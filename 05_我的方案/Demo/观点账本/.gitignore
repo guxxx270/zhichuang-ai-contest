@@ -1,0 +1,5 @@
+.env
+data/ledger.sqlite3
+__pycache__/
+.pytest_cache/
+*.pyc

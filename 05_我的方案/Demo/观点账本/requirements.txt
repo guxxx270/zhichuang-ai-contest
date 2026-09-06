@@ -1,0 +1,9 @@
+pydantic>=2.5
+pandas>=2.0
+streamlit>=1.35
+python-dotenv>=1.0
+openai>=1.30
+pytest>=8.0
+# 可选
+pypdf>=4.0        # 读 PDF 研报
+# akshare>=1.14   # 拉真实期货日线（正式演示前再装）
