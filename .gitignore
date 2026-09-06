@@ -1,0 +1,42 @@
+# ---- 系统与临时文件 ----
+.DS_Store
+._*
+Icon?
+.SynologyWorkingDirectory/
+*.part
+*.crdownload
+*.lock
+
+# ---- 大文件 / 外部材料：不进仓库，只进 Synology ----
+# 参考 PPT 只版本化提要与总览，不放 PDF
+02_参考PPT/*.pdf
+02_参考PPT/*.pptx
+# 他司案例：只版本化摘要与对比表
+03_他司案例/*/*
+!03_他司案例/*/_摘要.md
+# 开源代码：只版本化评估报告，不放克隆下来的代码
+04_开源代码/*/*
+!04_开源代码/*/_评估.md
+# 收件箱：只版本化 md 和脚本
+00_收件箱/*
+!00_收件箱/*.md
+!00_收件箱/*.command
+# 视频、压缩包
+*.zip
+*.mp4
+*.mov
+*.avi
+*.mkv
+
+# ---- 代码常见 ----
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+.env.*
+dist/
+build/
+.idea/
+.vscode/
