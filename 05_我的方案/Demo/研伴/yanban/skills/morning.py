@@ -24,10 +24,17 @@ from ..symbols import SECTORS, name_of
 Stance = Literal["偏多", "偏空", "中性", "未明确"]
 
 _STANCE_KW = [
-    ("偏多", ["看多", "偏多", "看涨", "上涨", "逢低做多", "逢低买入", "偏强", "做多", "反弹", "走强", "上行", "有望走强"]),
-    ("偏空", ["看空", "偏空", "看跌", "下跌", "逢高做空", "逢高沽空", "偏弱", "做空", "回落", "走弱", "下行", "承压", "下行空间"]),
-    ("中性", ["震荡", "区间波动", "观望", "盘整", "横盘", "方向不明", "中性"]),
+    ("偏多", ["看多", "偏多", "看涨", "上涨", "逢低做多", "逢低买入", "偏强", "做多", "反弹", "走强", "上行", "有望走强",
+             "多单持有", "看涨期权持有", "逢低短多", "回落可短多", "易涨难跌", "短多", "多为主", "拉涨", "走高", "向上突破"]),
+    ("偏空", ["看空", "偏空", "看跌", "下跌", "逢高做空", "逢高沽空", "偏弱", "做空", "回落", "走弱", "下行", "承压", "下行空间",
+             "空单持有", "看跌期权持有", "逢高短空", "易跌难涨", "回调风险", "短空", "空为主", "下探", "向下突破"]),
+    ("中性", ["震荡", "区间波动", "观望", "盘整", "横盘", "方向不明", "中性", "多空交织", "多空博弈", "涨跌不一",
+             "判断的难度", "难以判断", "方向判断", "等待报告", "等待USDA", "窄幅波动"]),
 ]
+# 「宽幅震荡 / 高位震荡 / 震荡偏强」这类复合词：先按最后出现的关键词定性，再由 _REFINE 修正
+_REFINE = [("震荡偏强", "偏多"), ("震荡偏多", "偏多"), ("偏强震荡", "偏多"), ("偏多震荡", "偏多"),
+           ("震荡偏弱", "偏空"), ("震荡偏空", "偏空"), ("偏弱震荡", "偏空"), ("偏空震荡", "偏空"),
+           ("宽幅震荡", "中性"), ("高位震荡", "中性"), ("低位震荡", "中性"), ("震荡整理", "中性"), ("震荡调整", "中性"), ("震荡运行", "中性")]
 _NUM_SENT = re.compile(r"\d+(?:\.\d+)?\s*(?:%|万吨|吨|万手|手|亿|万元|元|美元|个百分点|周|天)")
 _NEG = ["风险提示", "不构成", "免责"]
 
@@ -92,66 +99,124 @@ def load_events(path: Optional[Path] = None) -> list[Event]:
 
 
 # ---------- 要点抽取 ----------
-def _stance_of(sent: str) -> Stance:
-    best: tuple[int, Stance] | None = None
+_NEGATE_BEFORE = re.compile(r"(限制|压制|抑制|难以|不会|未见|不宜|不追|无明显|难见|尚未|缺乏)\S{0,2}$")
+_NEGATE_AFTER = re.compile(r"^\S{0,4}?(乏力|有限|受限|不足|难度|放缓|动力不足|空间有限|尚需|存疑)")
+_VIEW_LABEL = re.compile(r"(观点|策略|结论|建议)[:：]")
+_ANY_LABEL = re.compile(r"^[一-龥A-Za-z]{2,8}[:：]")          # 「装置信息：」「产销：」这类小标题会结束观点块
+# 结论句标记：强（策略/观点句）> 弱（预计/短期句）> 段首短标题句 > 普通句
+_STRONG = ["策略", "操作", "建议", "我们认为", "观点", "看待", "倾向", "综合来看", "整体来看", "总体来看", "综合而言"]
+_WEAK = ["预计", "维持", "判断", "短期", "后市", "展望", "或将", "有望", "料将"]
+_CONCLUSION = _STRONG + _WEAK
+_PARA_HEAD = re.compile(r"^\s*(?:【[^】]{1,8}】\s*)?([一-龥A-Za-z&]{1,8})[:：]")
+_PARA_SPLIT = re.compile(r"\n\s*\n|\n(?=\s*(?:【|[一-龥A-Za-z&]{1,8}[:：]))")
+
+
+def _sent_stance(sent: str) -> Optional[Stance]:
+    """一句话的立场：取最后出现的关键词；「限制反弹」这类否定语前缀忽略；复合词（震荡偏强 / 宽幅震荡）再修正。"""
+    hit: tuple[int, Stance] | None = None
     for st, kws in _STANCE_KW:
         for k in kws:
             pos = sent.rfind(k)
-            if pos >= 0 and (best is None or pos > best[0]):
-                best = (pos, st)  # type: ignore[assignment]
-    return best[1] if best else "未明确"
+            if pos < 0 or _NEGATE_BEFORE.search(sent[max(0, pos - 6):pos]) or _NEGATE_AFTER.match(sent[pos + len(k):pos + len(k) + 8]):
+                continue
+            if hit is None or pos > hit[0]:
+                hit = (pos, st)  # type: ignore[assignment]
+    if hit is None:
+        return None
+    st = hit[1]
+    for phrase, fixed in _REFINE:
+        if sent.rfind(phrase) >= 0 and sent.rfind(phrase) + len(phrase) >= hit[0]:
+            st = fixed  # type: ignore[assignment]
+    return st
 
 
-_NEGATE_BEFORE = re.compile(r"(限制|压制|抑制|难以|不会|未见|不宜|不追|无明显)\S{0,2}$")
-_CONCLUSION = ["我们认为", "预计", "建议", "看待", "观点", "维持", "判断", "倾向"]
-_PARA_HEAD = re.compile(r"^\s*(?:【[^】]{1,6}】\s*)?([一-龥A-Z]{1,6})[:：]")
+def _level(sent: str, i: int) -> int:
+    """句子的结论强度：3 策略/观点句，2 预计/短期句，1 段首短标题句（「油脂：偏强趋势未改」），0 普通句。"""
+    if any(c in sent for c in _STRONG):
+        return 3
+    if any(c in sent for c in _WEAK):
+        return 2
+    return 1 if (i == 0 and len(sent) <= 16) else 0
 
 
-def _stance_of_para(sents: list[str]) -> tuple[Stance, str]:
-    """段落立场：优先取带结论标记的最后一句；关键词前若有「限制/不追」等否定语则忽略。"""
-    best: tuple[int, Stance, str] | None = None      # (优先级, 立场, 句子)
+def _focus(sent: str, limit: int = 80) -> str:
+    """长句只留结论所在的分句（含前一分句），避免 80 字截断把结论截掉。"""
+    if len(sent) <= limit:
+        return sent
+    clauses = [c for c in re.split(r"[，；,;]", sent) if c.strip()]
+    idx = None
+    for i, c in enumerate(clauses):
+        if _sent_stance(c):
+            idx = i
+    if idx is None:
+        return sent[:limit]
+    out = clauses[idx]
+    if idx > 0 and len(out) < 30:
+        out = clauses[idx - 1] + "，" + out
+    return out[:limit]
+
+
+def _stance_of_para(sents: list[str]) -> tuple[Stance, str, int]:
+    """段落立场 → (立场, 结论句, 强度)。取强度最高的句子；同强度取靠后的一句（结论通常在后）。
+    「南华观点：」「策略：」之后的整段视为观点块，块内句子都按强 3 级计。"""
+    best: tuple[int, int, Stance, str] | None = None
+    in_view = False
     for i, sent in enumerate(sents):
-        hit: tuple[int, Stance] | None = None
-        for st, kws in _STANCE_KW:
-            for k in kws:
-                pos = sent.rfind(k)
-                if pos < 0 or _NEGATE_BEFORE.search(sent[max(0, pos - 6):pos]):
-                    continue
-                if hit is None or pos > hit[0]:
-                    hit = (pos, st)  # type: ignore[assignment]
-        if hit:
-            prio = i + (100 if any(c in sent for c in _CONCLUSION) else 0)
-            if best is None or prio >= best[0]:
-                best = (prio, hit[1], sent)
-    return (best[1], best[2]) if best else ("未明确", "")
+        if _VIEW_LABEL.search(sent):
+            in_view = True
+        elif _ANY_LABEL.match(sent):
+            in_view = False
+        st = _sent_stance(sent)
+        if not st:
+            continue
+        key = (3 if in_view else _level(sent, i), i)
+        if best is None or key >= best[:2]:
+            best = (key[0], key[1], st, sent)
+    return (best[2], _focus(best[3]), best[0]) if best else ("未明确", "", -1)
 
 
-def rule_points(doc: Doc, symbols: Optional[list[str]] = None) -> list[Point]:
-    """规则版：按段落归属品种（「铁矿石：……」段只归铁矿石），段内取结论句定立场，带数字的句子作数据点。"""
-    from ..symbols import SYMBOLS
-    wanted = set(symbols) if symbols else set(doc.symbols)
-    by_sym: dict[str, dict] = {}
-    for para in re.split(r"\n\s*\n|\n(?=\s*(?:【|[一-龥A-Z]{1,6}[:：]))", doc.text):
+def paragraphs(doc: Doc) -> list[tuple[set[str], str, list[str]]]:
+    """把材料切成段落并归属品种：[(品种代码集合, 段落原文, 句子列表)]。
+    「铁矿石：……」段只归铁矿石；「油脂：……」段按板块别名归豆油/棕榈油，不归里面顺带提到的原油；
+    标题不是品种也不是综述词（如「橡胶」「宏观数据」）的段落，只归标题本身能识别的品种；无标题段按提及归属。"""
+    from ..symbols import GENERIC_HEADS, SECTOR_ALIASES, SYMBOLS
+    out = []
+    for para in _PARA_SPLIT.split(doc.text):
         para = para.strip()
         if not para or any(n in para for n in _NEG) or para.startswith("（"):
             continue
         sents = [s.strip() for s in re.split(r"[。！？!?\n]+", para) if len(s.strip()) > 3]
         head = _PARA_HEAD.match(para)
-        if head and head.group(1) in SYMBOLS:
-            targets = {SYMBOLS[head.group(1)]}
+        h = head.group(1) if head else ""
+        if h in SYMBOLS:
+            targets = {SYMBOLS[h]}
+        elif h in SECTOR_ALIASES:
+            targets = set(SECTOR_ALIASES[h])
+        elif h and h not in GENERIC_HEADS:
+            targets = {SYMBOLS[n] for n in SYMBOLS if n in h}       # 「镍&不锈钢」「氧化铝&电解铝」这类组合标题
         else:
             targets = {SYMBOLS[n] for n in SYMBOLS if n in para}
-        targets &= wanted
-        if not targets:
+        out.append((targets, para, sents))
+    return out
+
+
+def rule_points(doc: Doc, symbols: Optional[list[str]] = None) -> list[Point]:
+    """规则版：按段落归属品种，段内取结论句定立场（同品种多段时取结论强度最高、位置靠后的一段），带数字的句子作数据点。"""
+    wanted = set(symbols) if symbols else set(doc.symbols)
+    by_sym: dict[str, dict] = {}
+    for targets, para, sents in paragraphs(doc):
+        overview = len(targets) >= 4 and not _PARA_HEAD.match(para)     # 无标题、点名一堆品种的综述段：只取数据，不定立场
+        targets = targets & wanted
+        if not targets or not sents:
             continue
-        stance, concl = _stance_of_para(sents)
-        data = [s[:100] for s in sents if _NUM_SENT.search(s)][:3]
+        stance, concl, level = ("未明确", "", -1) if overview else _stance_of_para(sents)
+        data = [(s if len(s) <= 72 else s[:70] + "…") for s in sents if _NUM_SENT.search(s)][:3]
         for code in targets:
-            slot = by_sym.setdefault(code, {"stance": "未明确", "summary": "", "data": [], "quote": ""})
-            if stance != "未明确" and (slot["stance"] == "未明确" or not slot["summary"]):
-                slot["stance"], slot["summary"], slot["quote"] = stance, concl[:80], concl[:90]
+            slot = by_sym.setdefault(code, {"stance": "未明确", "summary": "", "data": [], "quote": "", "level": -1})
+            if stance != "未明确" and level >= slot["level"]:
+                slot["stance"], slot["summary"], slot["quote"], slot["level"] = stance, concl[:80], concl[:90], level
             elif not slot["summary"]:
-                slot["summary"] = sents[0][:80] if sents else ""
+                slot["summary"] = sents[0][:80]
             for d in data:
                 if d not in slot["data"] and len(slot["data"]) < 3:
                     slot["data"].append(d)
@@ -226,12 +291,14 @@ def build_brief(docs: list[Doc], profile: Profile, as_of: Optional[date] = None,
         houses = [p for p in pts if p.doc_type == "研报" and p.stance != "未明确"]   # 分歧只在研报之间统计
         stances = Counter(p.stance for p in houses)
         div = None
-        if stances.get("偏多") and stances.get("偏空"):
-            bulls = "、".join(p.publisher for p in houses if p.stance == "偏多")
-            bears = "、".join(p.publisher for p in houses if p.stance == "偏空")
-            div = f"{stances['偏多']} 家偏多（{bulls}） vs {stances['偏空']} 家偏空（{bears}）"
-            if stances.get("中性"):
-                div += f"，另有 {stances['中性']} 家中性"
+        if len(stances) >= 2:
+            who = {st: "、".join(p.publisher for p in houses if p.stance == st) for st in stances}
+            if stances.get("偏多") and stances.get("偏空"):          # 多空对立：分歧雷达
+                div = f"{stances['偏多']} 家偏多（{who['偏多']}） vs {stances['偏空']} 家偏空（{who['偏空']}）"
+                if stances.get("中性"):
+                    div += f"，另有 {stances['中性']} 家中性（{who['中性']}）"
+            else:                                                    # 多/空 vs 中性：说法不一
+                div = " vs ".join(f"{n} 家{st}（{who[st]}）" for st, n in stances.most_common())
         data = []
         for p in pts:
             for x in p.data_points:
@@ -270,15 +337,41 @@ def render_brief(b: Brief) -> str:
 
 # ---------- 追问 ----------
 def ask(question: str, docs: list[Doc], llm: Optional[LLM] = None, k: int = 4) -> tuple[str, list[tuple[str, str]]]:
-    """基于已读材料回答追问。返回 (答案, [(来源, 原句)])。mock：按字重叠找最相关句子；api：把片段交给模型。"""
+    """基于已读材料回答追问。返回 (答案, [(来源, 原句)])。
+    mock：问题里提到品种就只在该品种的段落里找；问「看多/看空/理由/为什么/怎么看」时优先结论句；按二字词重叠打分。
+    api：把片段交给模型组织语言。"""
+    from ..symbols import detect_symbols
     llm = llm or LLM()
-    q_chars = set(re.findall(r"[一-龥A-Za-z0-9]", question))
+    q_syms = set(detect_symbols(question))
+    want_stance: Optional[Stance] = "偏多" if re.search(r"看多|看涨|偏多|多头|偏强|走强", question) else \
+        ("偏空" if re.search(r"看空|看跌|偏空|空头|偏弱|走弱", question) else None)
+    ask_view = bool(re.search(r"理由|为什么|为何|怎么看|观点|逻辑|依据|看法|判断", question)) or want_stance is not None
+    q_core = re.sub(r"[看多看空看涨看跌偏多偏空的那家理由是什么为何怎么看观点逻辑依据看法判断哪]", "", question)
+    for n in sorted({name_of(c) for c in q_syms}, key=len, reverse=True):
+        q_core = q_core.replace(n, "")
+    named = [d for d in docs if len(d.publisher) >= 2 and (d.publisher in question or d.publisher[:2] in question)]
+    if named:                                                    # 问「光大怎么看」：只在该机构的材料里找
+        docs = named
+        for d in named:
+            q_core = q_core.replace(d.publisher, "").replace(d.publisher[:2], "")
+    grams = {q_core[i:i + 2] for i in range(len(q_core) - 1) if re.fullmatch(r"[一-龥A-Za-z0-9]{2}", q_core[i:i + 2])}
     scored: list[tuple[float, str, str]] = []
     for d in docs:
-        for s in d.sentences():
-            sc = len(q_chars & set(s)) / (len(q_chars) + 1)
-            if sc > 0.15:
-                scored.append((sc, f"{d.publisher}《{d.title}》", s))
+        src = f"{d.publisher}《{d.title}》"
+        for targets, _para, sents in paragraphs(d):
+            if q_syms and not (targets & q_syms):
+                continue
+            for i, s in enumerate(sents):
+                st = _sent_stance(s)
+                if want_stance and st != want_stance:
+                    continue
+                sc = len({s[j:j + 2] for j in range(len(s) - 1)} & grams) / (len(grams) + 1)
+                if ask_view:
+                    sc += 0.5 * _level(s, i) + (0.3 if st else 0)
+                if q_syms and not grams and not ask_view:
+                    sc += 0.1                                  # 只问品种名：全部候选
+                if sc > 0.15:
+                    scored.append((sc, src, s))
     scored.sort(reverse=True)
     hits = [(src, s) for _, src, s in scored[:k]]
     if not hits:

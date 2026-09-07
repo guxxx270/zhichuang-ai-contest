@@ -85,8 +85,11 @@ with tab_m:
     with left:
         st.markdown(f"**关注品种**：" + " ".join(f'<span class="yb-chip">{n}</span>' for n in profile.watch_names()), unsafe_allow_html=True)
         ups = st.file_uploader("导入今天的研报 / 公告 / 纪要（md / txt / pdf，可多选）", accept_multiple_files=True, key="m_up")
-        c1, c2, c3 = st.columns(3)
-        if c1.button("加载示例材料", key="m_sample"):
+        c0, c1, c2, c3 = st.columns(4)
+        if c0.button("加载真实公开研报", key="m_real", help="9 月初光大 / 华泰 / 中信建投 / 南华的公开日报，转自新浪财经、东方财富"):
+            st.session_state.docs = load_docs(config.DATA_DIR / "real_docs")
+            st.session_state.redacted = 0
+        if c1.button("加载示例材料", key="m_sample", help="虚构材料，用于演示分歧雷达"):
             st.session_state.docs = load_docs()
             st.session_state.redacted = 0
         if c2.button("导入上传文件", key="m_import") and ups:
@@ -126,7 +129,8 @@ with tab_m:
         if st.button("问", key="m_ask") and q:
             ans, hits = ask(q, st.session_state.docs, llm)
             mem.log("晨读", "追问", inp=q, out=ans, engine=llm.mode, minutes=3)
-            st.markdown(f'<div class="yb-card">{ans}</div>', unsafe_allow_html=True)
+            with st.container(border=True):
+                st.markdown(ans)
         st.markdown("**已读材料**")
         st.dataframe(pd.DataFrame([{"日期": d.published_on, "类型": d.doc_type, "标题": d.title, "机构": d.publisher,
                                     "品种": "、".join(name_of(s) for s in d.symbols[:5])} for d in st.session_state.docs]),

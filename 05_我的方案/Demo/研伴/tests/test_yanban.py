@@ -84,3 +84,34 @@ def test_privacy_and_memory(tmp_path: Path):
     m.feedback("晨读", "2026-09-05", 1)
     s = m.stats()
     assert s["calls"] == 1 and s["minutes_total"] == 12 and s["feedback_up"] == 1
+
+
+# ---------- 真实公开研报（9 月初） ----------
+def _real():
+    return load_docs(Path(__file__).resolve().parent.parent / "data" / "real_docs")
+
+
+def test_real_docs_stances():
+    docs = {d.publisher + d.published_on.isoformat(): d for d in _real()}
+    p = {x.symbol: x for x in rule_points(docs["光大期货2026-09-03"], ["RB", "I"])}
+    assert p["RB"].stance == "中性" and p["I"].stance == "中性"          # 「需求端支撑有限」不能盖过结论句「震荡整理」
+    p = {x.symbol: x for x in rule_points(docs["华泰期货2026-09-03"], ["CU"])}
+    assert p["CU"].stance == "偏多" and "逢低买入" in p["CU"].summary    # 多段同品种：策略段胜过行情段
+    p = {x.symbol: x for x in rule_points(docs["光大期货2026-09-02"], ["CU"])}
+    assert p["CU"].stance == "中性"                                       # 「方向判断的难度」
+    p = {x.symbol: x for x in rule_points(docs["中信建投期货2026-09-02"], ["SC", "TA"])}
+    assert p["SC"].stance == "偏多" and p["TA"].stance == "偏多"          # 「产销：……回落」不属于策略块
+    p = {x.symbol: x for x in rule_points(docs["南华期货2026-09-03"], ["M", "SC", "C"])}
+    assert p["M"].stance == "中性" and "SC" not in p                      # 「油脂：」段里顺带提到的原油不算原油观点
+    assert p["C"].stance == "中性"                                        # 「上涨乏力」不算偏多
+
+
+def test_real_docs_brief_and_ask():
+    docs = _real()
+    b = build_brief(docs, Profile(watch=["RB", "I", "CU", "SC", "M"]), as_of=date(2026, 9, 4))
+    sec = {s.symbol: s for s in b.sections}
+    assert sec["CU"].divergence and "华泰期货" in sec["CU"].divergence and "光大期货" in sec["CU"].divergence
+    ans, hits = ask("看多铜的那家理由是什么", docs)
+    assert hits and "华泰期货" in hits[0][0] and all("华泰期货" in src for src, _ in hits)
+    ans, hits = ask("光大对铜的观点是什么", docs)
+    assert hits and all("光大期货" in src for src, _ in hits)

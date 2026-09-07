@@ -14,13 +14,14 @@ pip install -r requirements.txt
 cp .env.example .env        # 填公司 AI 平台的 LLM_API_BASE / LLM_API_KEY / LLM_MODEL；不填也能跑（mock 模式，规则引擎兜底）
 python run_demo.py          # 命令行跑通四项技能
 streamlit run app.py        # 打开界面
+python eval_morning.py      # 晨读评测：真实公开研报 + 人工标注金标准 → 立场准确率 / 追问命中率
 ```
 
 ## 四项技能 + 一道门 + 一个"我"
 
 | 模块 | 做什么 | 代码 | 规范（Prompt） | 资源 |
 |---|---|---|---|---|
-| 🌅 晨读 | 材料按「我的关注」做 5 分钟速读：各家怎么说、**分歧雷达**、数据、今日事件；可追问 | `yanban/skills/morning.py` | `prompts/morning_extract.md` | `data/sample_docs/`、`data/events.csv` |
+| 🌅 晨读 | 材料按「我的关注」做 5 分钟速读：各家怎么说、**分歧雷达**、数据、今日事件；可追问 | `yanban/skills/morning.py` | `prompts/morning_extract.md` | `data/real_docs/`（真实公开研报）、`data/sample_docs/`（虚构）、`data/events.csv` |
 | 📚 问典 | 规则问答 + 计算（涨跌停 / 保证金 / 限仓校验 / 最后交易日），每个数字带出处 | `yanban/skills/rulebook.py` | `prompts/rulebook_answer.md` | `data/rules/params.json`、`data/rules/*.md` |
 | ✍️ 代笔 | 模板 + 晨读要点 → 周报初稿；合规自检（禁用表述 / 缺失要素 / 需核对） | `yanban/skills/writer.py` | `prompts/writer_weekly.md` | `data/templates/`、`data/compliance_terms.json` |
 | 🛡️ 隐盾 | 进模型前脱敏为语义标签、本地还原；渐进授权；留痕只存摘要哈希 | `yanban/privacy.py`、`yanban/memory.py` | — | — |
@@ -43,16 +44,18 @@ app.py / run_demo.py       界面 / 命令行
 .streamlit/config.toml     品牌主题（深海蓝 + 琥珀金）
 yanban/                    config · llm · privacy · memory · profile · docs · symbols · skills/{morning,rulebook,writer}
 prompts/                   三份规范（技能赛道成果）
+data/real_docs/            6 份真实公开研报（9 月初：光大 / 华泰 / 中信建投 / 南华 + 一份市场资讯），转自新浪财经、东方财富，已删资格证号
+data/eval/                 晨读金标准：46 条立场标注 + 8 条追问；eval_morning.py 跑分（mock 引擎：立场严格 91%、方向不反 100%、追问 100%）
 data/                      示例材料（虚构）、事件日历、规则参数与条款（示例）、模板、合规词表、画像
-tests/test_yanban.py       6 项全链路测试：pytest -q
+tests/test_yanban.py       8 项全链路测试（含真实研报）：pytest -q
 ```
 
 ## 示例数据声明
 
-`data/sample_docs/` 的研报与公告、`data/rules/` 的参数与条款均为**演示用虚构 / 示例值**，正式演示前替换为公开研报原文与交易所公告原文，并在 `params.json` 的 `source` 填入公告文号。
+`data/sample_docs/` 的研报与公告、`data/rules/` 的参数与条款均为**演示用虚构 / 示例值**；`data/real_docs/` 是公开渠道转载的真实研报（front matter 里有 `source` 链接），只作评测与演示，不构成投资建议。正式演示前把 `data/rules/` 换成交易所公告原文，并在 `params.json` 的 `source` 填入公告文号。
 
 ## 下一步
 
-- 接公司 AI 平台后，用真实公开研报做 30 篇人工标注评测集，报告要点抽取与立场识别准确率。
+- 评测集从 6 篇 / 46 条扩到 30 篇；接公司 AI 平台后用 `eval_morning.py` 对比 llm 与规则引擎的准确率。
 - 问典规则库换成交易所规则原文 + 公司制度（按权限分级），自备 50 道业务问题。
 - 晨读定时任务 + 推送（企业 IM / 邮件），周报导出 docx。
