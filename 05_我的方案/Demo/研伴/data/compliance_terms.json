@@ -1,0 +1,12 @@
+{
+  "forbidden": [
+    {"term": "必涨|必跌|必然上涨|必然下跌", "suggestion": "改为“有望走强/承压”等非确定性表述", "severity": "高"},
+    {"term": "保证收益|稳赚|无风险|包赚", "suggestion": "删除；不得承诺收益", "severity": "高"},
+    {"term": "内幕|小道消息", "suggestion": "删除；仅引用公开信息", "severity": "高"},
+    {"term": "强烈建议(买入|卖出|做多|做空)", "suggestion": "改为“可关注……机会”，避免直接交易指令", "severity": "中"}
+  ],
+  "required_sections": [
+    {"name": "风险提示", "pattern": "风险提示", "suggestion": "补充“风险提示”段落"},
+    {"name": "免责声明", "pattern": "免责声明|仅供参考|不构成投资建议", "suggestion": "补充免责声明：本报告仅供内部参考，不构成投资建议"}
+  ]
+}

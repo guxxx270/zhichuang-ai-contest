@@ -1,0 +1,10 @@
+{
+  "name": "小林",
+  "role": "研究员",
+  "department": "研究所",
+  "watch": ["RB", "I", "CU", "SC", "M"],
+  "horizon": "中期",
+  "brief_style": "简洁",
+  "weekly_template": "weekly_report.md",
+  "notes": ["口径以交易所结算价为准", "周报交给投资部前先过合规自检"]
+}

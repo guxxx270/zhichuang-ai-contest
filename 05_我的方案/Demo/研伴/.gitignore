@@ -1,0 +1,5 @@
+.env
+data/memory.sqlite3
+__pycache__/
+.pytest_cache/
+*.pyc
