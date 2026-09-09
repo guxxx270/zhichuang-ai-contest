@@ -40,7 +40,12 @@ data/samples/           四个样例：微信 / 纪要 / 邮件 / Word
 prompts/                模型润色提示词         tests/  pytest（10 项）
 ```
 
-## 怎么换成公司真实的
+## 怎么换成公司真实的（全部在本机完成，不经过任何外部服务）
+
+最省事的路：填 `tools/templates/需知_知识库填写模板.xlsx`（三个 sheet：历史需求 / 追问规则 / 系统目录，黄色区域填、第 3 行是示例），然后
+`python tools/import_knowledge.py template 填好的模板.xlsx`（先加 `--dry-run` 预览）。有工单系统导出的话直接 `python tools/import_knowledge.py tickets 导出.xlsx`，列名按常见叫法自动识别、关键词自动抽取、小时自动折算人天，没有实际工时的记录会被跳过。写入前原 JSON 自动备份为 `.bak`。
+
+手工改也行：
 
 1. `knowledge/futures_probes.json`：加 / 改追问规则（触发词正则 → 问题 → 不问会怎样 → 默认假设 → 影响档）。
 2. `knowledge/system_catalog.json`：换成公司真实系统目录（能力关键词、负责团队、接入方式）。
