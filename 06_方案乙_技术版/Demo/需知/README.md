@@ -42,7 +42,7 @@ prompts/                模型润色提示词         tests/  pytest（10 项）
 
 ## 怎么换成公司真实的（全部在本机完成，不经过任何外部服务）
 
-最省事的路：填 `tools/templates/需知_知识库填写模板.xlsx`（三个 sheet：历史需求 / 追问规则 / 系统目录，黄色区域填、第 3 行是示例），然后
+最省事的路：直接改 `tools/templates/需知_知识库_样本数据.xlsx`（Demo 现用的 30 条历史需求 / 36 条追问规则 / 11 个系统已经在里面，替换成真实的即可），或从空白模板 `需知_知识库填写模板.xlsx` 填起（三个 sheet：历史需求 / 追问规则 / 系统目录，黄色区域填、第 3 行是示例），然后
 `python tools/import_knowledge.py template 填好的模板.xlsx`（先加 `--dry-run` 预览）。有工单系统导出的话直接 `python tools/import_knowledge.py tickets 导出.xlsx`，列名按常见叫法自动识别、关键词自动抽取、小时自动折算人天，没有实际工时的记录会被跳过。写入前原 JSON 自动备份为 `.bak`。
 
 手工改也行：
