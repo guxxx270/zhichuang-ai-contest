@@ -5,9 +5,18 @@
 
 ## 启动
 
+- **Windows**：双击 `启动需知.bat`（首次自动建虚拟环境并装依赖），浏览器打开即可。需要 **Python 3.10+**（推荐 3.12）。若 PATH 里的 `python` 是 3.7，脚本会改用 `py -3.12`。
 - Mac：双击 `启动需知.command`（首次自动建虚拟环境并装依赖），浏览器打开即可。
-- 手动：`pip install -r requirements.txt && streamlit run app.py`
-- 命令行看全流程：`python run_demo.py 1`（1～4 为四个样例）
+- 手动（Windows PowerShell，在本目录执行）：
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+- 命令行看全流程：`python run_demo.py 1`（1～4 为四个样例；请用上面虚拟环境里的 python）
 - 测试：`pytest -q tests`
 
 不配置 key 也能跑（**mock 模式**，规则引擎兜底）。要接公司 AI 平台：复制 `.env.example` 为 `.env`，填 `LLM_API_BASE / LLM_API_KEY / LLM_MODEL`（OpenAI 兼容接口）。key 由使用者自填，代码与仓库不含密钥。
