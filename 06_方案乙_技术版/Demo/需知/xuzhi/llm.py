@@ -21,7 +21,7 @@ class LLM:
                 from openai import OpenAI  # 延迟导入，mock 模式不需要
             except ImportError as e:  # pragma: no cover
                 raise RuntimeError("api 模式需要安装 openai：pip install openai") from e
-            self._client = OpenAI(base_url=config.LLM_API_BASE, api_key=config.LLM_API_KEY)
+            self._client = OpenAI(base_url=config.LLM_API_BASE, api_key=config.LLM_API_KEY, timeout=90, max_retries=1)
 
     def chat(self, system: str, user: str, temperature: float = 0.1, json_mode: bool = False) -> str:
         if self.mode == "mock":

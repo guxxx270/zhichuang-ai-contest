@@ -72,6 +72,7 @@ class Card:
     raw_features: list[str] = field(default_factory=list)    # 对应原句（回链）
     assumptions: list[str] = field(default_factory=list)
     engine: str = "规则"
+    title_from_template: bool = False
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False, indent=2)
@@ -111,6 +112,7 @@ def _first(rules: list[tuple[str, str]], text: str) -> str:
 def _title(text: str, req_type: str, card: Card) -> str:
     for pat, title in TITLE_TEMPLATES:
         if re.search(pat, text):
+            card.title_from_template = True
             return title
     obj = "、".join((card.indicators or card.symbols or card.scope_objects)[:2])
     noun = {"报表": "报表", "页面": "页面", "提醒": "提醒", "接口": "接口", "流程": "流程", "数据": "数据处理"}.get(req_type, "功能")
@@ -220,13 +222,15 @@ def refine_with_llm(text_redacted: str, card: Card, questions: list[Question], l
         return card, questions
     if not isinstance(data, dict):
         return card, questions
-    for k in ("title", "goal"):
-        if isinstance(data.get(k), str) and data[k].strip():
-            setattr(card, k, data[k].strip())
+    if isinstance(data.get("goal"), str) and data["goal"].strip():
+        card.goal = data["goal"].strip().rstrip("。")
+    if not card.title_from_template and isinstance(data.get("title"), str) and data["title"].strip():
+        card.title = data["title"].strip()[:30]
     if isinstance(data.get("features"), list) and data["features"]:
-        feats = [str(f).strip() for f in data["features"] if str(f).strip()]
-        card.features = feats[:12]
-        card.raw_features = (card.raw_features + [""] * 12)[:len(card.features)]
+        feats = [str(f).strip() for f in data["features"] if str(f).strip() and not re.search(r"上线|排期|周会|按计划|尽快", str(f))]
+        if len(feats) >= 2:
+            card.features = feats[:12]
+            card.raw_features = (card.raw_features + [""] * 12)[:len(card.features)]
     for i, q in enumerate(data.get("extra_questions", [])[:3]):
         if isinstance(q, dict) and q.get("question"):
             questions.append(Question(f"L{i+1}", q.get("category", "补充"), "模型", q.get("impact", "中"), q["question"],
