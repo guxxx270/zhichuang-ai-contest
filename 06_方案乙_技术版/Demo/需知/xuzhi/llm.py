@@ -15,13 +15,14 @@ from . import config
 class LLM:
     def __init__(self) -> None:
         self.mode = config.resolved_mode()
+        self.note = ""
         self._client = None
         if self.mode == "api":
             try:
                 from openai import OpenAI  # 延迟导入，mock 模式不需要
-            except ImportError as e:  # pragma: no cover
-                raise RuntimeError("api 模式需要安装 openai：pip install openai") from e
-            self._client = OpenAI(base_url=config.LLM_API_BASE, api_key=config.LLM_API_KEY, timeout=90, max_retries=1)
+                self._client = OpenAI(base_url=config.LLM_API_BASE, api_key=config.LLM_API_KEY, timeout=90, max_retries=1)
+            except ImportError:  # 没装 openai 也不让 Demo 挂：退回 mock
+                self.mode, self.note = "mock", "未安装 openai，已退回 mock（pip install openai 后恢复）"
 
     def chat(self, system: str, user: str, temperature: float = 0.1, json_mode: bool = False) -> str:
         if self.mode == "mock":
