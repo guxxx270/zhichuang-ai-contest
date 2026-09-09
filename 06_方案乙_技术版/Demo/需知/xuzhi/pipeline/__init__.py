@@ -32,10 +32,16 @@ class Analysis:
     notes: list[str] = field(default_factory=list)
 
 
+class _Mock:
+    mode = "mock"
+    note = ""
+
+
 def analyze(text: str, source_hint: str = "", llm: LLM | None = None, answers: dict[str, str] | None = None,
-            mobile: bool = False, client_view: bool = False) -> Analysis:
+            mobile: bool = False, client_view: bool = False, llm_polish: bool = True) -> Analysis:
+    """llm_polish=False：只跑规则引擎（毫秒级），模型润色留到用户点按钮时再做。"""
     t0 = time.time()
-    llm = llm or LLM()
+    llm = (llm or LLM()) if llm_polish else _Mock()
     red = Redactor().redact(text)
     card = extract_card(red.text, source_hint)
     questions = build_questions(red.text, card)

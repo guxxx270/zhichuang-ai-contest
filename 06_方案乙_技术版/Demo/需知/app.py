@@ -69,7 +69,7 @@ st.markdown(f"""
   <h1>📋 {config.PRODUCT_NAME} <span style="font-size:14px;opacity:.8;letter-spacing:0">{config.PRODUCT_EN} · 需求分析智能体</span></h1>
   <div class="slogan">{config.PRODUCT_SLOGAN}</div>
   {''.join(f'<span class="tag">{n} · {d}</span>' for n, d in config.SKILLS)}<span class="tag">隐盾 · 进模型前脱敏</span>
-  <span class="tag">{'🟢 已接入 ' + config.LLM_MODEL if llm.mode == 'api' else '🟡 mock 模式（未配置 key，规则引擎兜底）'}</span>
+  <span class="tag">{'🟢 已接入 ' + config.LLM_MODEL if llm.mode == 'api' else '🟡 mock 模式（' + (llm.note or '未配置 key，规则引擎兜底') + '）'}</span>
 </div>""", unsafe_allow_html=True)
 k = st.columns(4)
 for col, n, l in ((k[0], f"{stats['count']} 份", "已分析需求"), (k[1], f"{len(knowledge.probes())} 条", "期货追问知识库"),
@@ -86,6 +86,8 @@ with st.container(border=True):
         src = st.selectbox("来源（可不选）", ["自动识别", "企业微信", "会议纪要", "邮件", "需求单", "口述"], key="src")
         mobile = st.toggle("原型按手机版出", value=False, key="mobile")
         client = st.toggle("原型出客户版（脱敏）", value=False, key="client")
+        auto_polish = st.toggle("开工时自动让模型润色（约 20～30 秒）", value=False, key="auto_polish", disabled=(llm.mode != "api"),
+                                help="关闭时规则引擎毫秒级出结果，之后可点「模型润色」按钮再让大模型补追问、润色需求单")
     with c2:
         default_text = next((p.read_text(encoding="utf-8") for p in samples if p.stem == choice), "")
         text = st.text_area("原话", value=default_text, height=190, key=f"text_{choice}", placeholder="例如：净值日报能不能加一列……")
@@ -93,7 +95,7 @@ with st.container(border=True):
 
 if go and text.strip():
     with st.spinner("需知正在读、问、算、画……"):
-        a = analyze(text, "" if src == "自动识别" else src, llm, answers=None, mobile=mobile, client_view=client)
+        a = analyze(text, "" if src == "自动识别" else src, llm, answers=None, mobile=mobile, client_view=client, llm_polish=auto_polish)
     st.session_state.analysis = a
     st.session_state.answers = {}
     st.session_state.req_id = ledger.log_analysis(a)
@@ -115,6 +117,14 @@ with tabs[0]:
         chips = [f"来源 {card.source}", f"提出方 {card.requester or '未注明'}", f"类型 {card.req_type}" + (f" +{'/'.join(card.secondary_types)}" if card.secondary_types else ""),
                  f"触发 {card.trigger}", f"频率 {card.frequency}"] + ([f"期望 {card.deadline}"] if card.deadline else []) + [f"引擎 {a.engine}", f"{a.seconds}s"]
         st.markdown("".join(f'<span class="xz-chip">{html.escape(c)}</span>' for c in chips), unsafe_allow_html=True)
+        if llm.mode == "api" and a.engine == "规则":
+            if st.button("✨ 模型润色：补追问、润色标题 / 功能点 / 需求单（约 20～30 秒）", key="polish"):
+                with st.spinner(f"{config.LLM_MODEL} 正在读……"):
+                    a2 = analyze(a.raw_text, "" if src == "自动识别" else src, llm, answers={k: v for k, v in st.session_state.get("answers", {}).items() if v.strip()},
+                                 mobile=mobile, client_view=client, llm_polish=True)
+                st.session_state.analysis = a2
+                ledger.event(st.session_state.get("req_id", 0), "模型润色", f"{a2.seconds}s")
+                st.rerun()
         st.markdown(f"**一句话理解**：{card.goal}。")
         cc = st.columns(2)
         cc[0].markdown("**功能点（原话清洗）**\n" + "\n".join(f"{i}. {f}" for i, f in enumerate(card.features, 1)))
@@ -134,7 +144,8 @@ with tabs[0]:
         st.session_state.answers = answers
         if st.button("🔁 按业务答复重算（写单 / 估量 / 定架同步更新）", type="primary"):
             with st.spinner("重算中……"):
-                a2 = analyze(a.raw_text, "" if src == "自动识别" else src, llm, answers={k: v for k, v in answers.items() if v.strip()}, mobile=mobile, client_view=client)
+                a2 = analyze(a.raw_text, "" if src == "自动识别" else src, llm, answers={k: v for k, v in answers.items() if v.strip()}, mobile=mobile, client_view=client,
+                             llm_polish=(a.engine != "规则"))
             st.session_state.analysis = a2
             ledger.event(st.session_state.get("req_id", 0), "业务答复重算", f"{sum(1 for v in answers.values() if v.strip())} 条")
             st.rerun()

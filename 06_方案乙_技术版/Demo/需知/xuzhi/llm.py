@@ -16,6 +16,7 @@ class LLM:
     def __init__(self) -> None:
         self.mode = config.resolved_mode()
         self.note = ""
+        self.last_model = ""
         self._client = None
         if self.mode == "api":
             try:
@@ -42,6 +43,7 @@ class LLM:
                 resp = self._client.chat.completions.create(**kwargs)
             else:
                 raise RuntimeError(f"LLM 调用失败：{e}") from e
+        self.last_model = getattr(resp, "model", "") or ""
         return resp.choices[0].message.content or ""
 
     def chat_json(self, system: str, user: str) -> Any:

@@ -18,7 +18,7 @@ if llm.mode != "api":
 t0 = time.time()
 try:
     out = llm.chat_json("只输出 JSON。", '请返回 {"ok": true, "model": "你的模型名"}')
-    print(f"连通 ✅ 用时 {time.time()-t0:.1f}s，返回：{out}")
+    print(f"连通 ✅ 用时 {time.time()-t0:.1f}s，网关返回模型：{llm.last_model or '（未返回）'}，内容：{out}")
 except Exception as e:
     print(f"连通 ❌ {e}"); raise SystemExit(1)
 PY

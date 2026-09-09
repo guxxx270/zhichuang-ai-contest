@@ -13,7 +13,7 @@ def main() -> None:
     path = next(config.SAMPLES_DIR.glob(f"{int(n):02d}_*.md"))
     llm = LLM()
     print(f"{config.PRODUCT_NAME} · {config.PRODUCT_SLOGAN}")
-    print(f"LLM 模式：{llm.mode}（{'已接入 ' + config.LLM_MODEL if llm.mode == 'api' else '未配置 key，规则引擎兜底'}）\n样例：{path.name}\n")
+    print(f"LLM 模式：{llm.mode}（{'已接入 ' + config.LLM_MODEL if llm.mode == 'api' else (llm.note or '未配置 key，规则引擎兜底')}）\n样例：{path.name}\n")
     a = analyze(path.read_text(encoding="utf-8"), llm=llm)
     c = a.card
     print("=" * 70); print(f"【问清】{c.title}｜{c.req_type}｜提出方 {c.requester}｜脱敏 {a.redacted} 处｜{a.seconds}s")

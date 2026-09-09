@@ -93,3 +93,16 @@ def test_dual_track(results):
     assert any("交易链路" in t.name and t.who == "AI 做人审" for t in r1.estimate.tasks)   # 交易链路只能 AI 做人审
     plain = analyze("做个页面，每天看各品种主力合约的持仓量和成交量排名，能导出 Excel")
     assert "自建" in plain.estimate.delivery                                           # 无客户 / 交易风险的标准页面 → 业务自建路径
+
+
+def test_rules_only_is_instant():
+    a = analyze("净值日报能不能加一列较上一交易日变动", llm_polish=False)
+    assert a.engine == "规则" and a.seconds < 1.0
+
+
+def test_polish_guard():
+    from xuzhi.pipeline.spec import _polish_ok
+    orig = "# T\n\n## 1. a\n- ◻︎默认 x → y\n\n## 2. b\ntext\n\n## 3. c\n- ✅ q → r\n"
+    assert _polish_ok(orig, orig.replace("text", "润色后的文字"))
+    assert not _polish_ok(orig, "# T\n\n## 1. a\n")                     # 丢章节
+    assert not _polish_ok(orig, orig.replace("◻︎默认 ", ""))               # 丢标记

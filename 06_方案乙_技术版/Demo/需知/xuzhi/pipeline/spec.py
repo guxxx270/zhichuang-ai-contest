@@ -167,9 +167,16 @@ def _polish(spec: Spec, card: Card, llm: LLM) -> Spec:
     system = load_prompt("spec_polish") or "你是期货公司技术部的需求分析师，把需求单润色得简洁、专业、可签字。保持 Markdown 结构与所有条目，只改措辞。只输出 Markdown。"
     try:
         out = llm.chat(system, spec.business_md, temperature=0.2)
-        if out and out.count("#") >= 5:
+        if out and _polish_ok(spec.business_md, out):
             spec.business_md = out
             spec.engine = "规则 + 模型"
     except Exception:
         pass
     return spec
+
+
+def _polish_ok(orig: str, out: str) -> bool:
+    """润色不能丢内容：章节数一致、默认/已答复标记不少、篇幅在 0.6～1.6 倍之间。"""
+    h = lambda t: sum(1 for ln in t.splitlines() if ln.startswith("## "))
+    marks = lambda t: t.count("◻︎默认") + t.count("✅")
+    return h(out) == h(orig) and marks(out) >= marks(orig) and 0.6 * len(orig) <= len(out) <= 1.6 * len(orig)
