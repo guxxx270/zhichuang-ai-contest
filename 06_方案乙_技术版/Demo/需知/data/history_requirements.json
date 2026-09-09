@@ -1,35 +1,598 @@
 {
-  "_说明": "历史需求库（虚构示例 30 条），用于\"类比估算\"：按类型与关键词找相似需求，用其实际人天校准新需求的估算。estimate_days 为当时估算，actual_days 为上线后实际；全部虚构。",
+  "_说明": "历史需求库（虚构示例 30 条），用于\"类比估算\"：按类型与关键词找相似需求，用其实际人天校准新需求的估算。estimate_days 为当时估算，actual_days 为上线后实际；全部虚构。 ai_assisted / ai_share：是否使用 AI 协同及 AI 参与度（0～1），当前 30 条均为传统口径（false / 0）；上线后回写，AI 轨随之校准。",
   "items": [
-    {"id": "H001", "year": 2025, "title": "资管产品净值日报自动生成", "type": "报表", "dept": "资管运营", "keywords": ["净值", "日报", "产品", "报表平台", "定时", "Excel"], "estimate_days": 6, "actual_days": 8, "note": "口径确认耗时，历史回填 3 个月"},
-    {"id": "H002", "year": 2025, "title": "客户周报模板改版（加风险指标）", "type": "报表", "dept": "资管运营", "keywords": ["周报", "客户", "风险指标", "模板", "脱敏", "合规审阅"], "estimate_days": 4, "actual_days": 7, "note": "客户版脱敏字段反复确认"},
-    {"id": "H003", "year": 2024, "title": "黑色系基差监控看板", "type": "页面", "dept": "研究所", "keywords": ["基差", "现货", "主力合约", "看板", "品种", "行情"], "estimate_days": 12, "actual_days": 18, "note": "现货价格来源换了两次"},
-    {"id": "H004", "year": 2025, "title": "品种异动企业微信提醒", "type": "提醒", "dept": "投资部", "keywords": ["异动", "提醒", "企业微信", "涨跌幅", "盘中", "阈值"], "estimate_days": 8, "actual_days": 9, "note": "夜盘推送策略后补"},
-    {"id": "H005", "year": 2024, "title": "限仓额度使用率盘中提示", "type": "提醒", "dept": "风控部", "keywords": ["限仓", "持仓", "实时", "提示", "交易系统", "口径"], "estimate_days": 15, "actual_days": 24, "note": "三套限仓口径冲突，返工一次"},
-    {"id": "H006", "year": 2025, "title": "交易所保证金调整影响测算表", "type": "数据", "dept": "风控部", "keywords": ["保证金", "公告", "调整", "影响", "产品", "客户", "追保"], "estimate_days": 10, "actual_days": 14, "note": "公告解析需人工复核"},
-    {"id": "H007", "year": 2024, "title": "持仓集中度日终报表", "type": "报表", "dept": "风控部", "keywords": ["集中度", "持仓", "日终", "报表", "风控指标"], "estimate_days": 5, "actual_days": 5, "note": "直接取风控系统指标"},
-    {"id": "H008", "year": 2025, "title": "研报库全文检索页面", "type": "页面", "dept": "研究所", "keywords": ["研报", "检索", "页面", "全文", "权限"], "estimate_days": 10, "actual_days": 12, "note": "权限按部门"},
-    {"id": "H009", "year": 2024, "title": "投资指令电子化流程", "type": "流程", "dept": "资管部", "keywords": ["指令", "审批", "OA", "流程", "留痕", "投资经理"], "estimate_days": 20, "actual_days": 31, "note": "审批环节多次调整"},
-    {"id": "H010", "year": 2025, "title": "产品净值 API 对外接口", "type": "接口", "dept": "资管运营", "keywords": ["净值", "接口", "API", "对外", "鉴权", "产品"], "estimate_days": 6, "actual_days": 6, "note": ""},
-    {"id": "H011", "year": 2024, "title": "夜盘行情快照落库", "type": "数据", "dept": "技术部", "keywords": ["夜盘", "行情", "落库", "快照", "结算", "交易日历"], "estimate_days": 5, "actual_days": 8, "note": "交易日历边界问题"},
-    {"id": "H012", "year": 2025, "title": "主力合约切换规则统一", "type": "数据", "dept": "研究所", "keywords": ["主力合约", "切换", "持仓量", "规则", "历史序列"], "estimate_days": 4, "actual_days": 6, "note": "序列拼接争议"},
-    {"id": "H013", "year": 2025, "title": "客户结算单摘要企业微信推送", "type": "提醒", "dept": "营业部", "keywords": ["结算单", "客户", "推送", "企业微信", "脱敏", "定时"], "estimate_days": 7, "actual_days": 9, "note": "脱敏规则"},
-    {"id": "H014", "year": 2024, "title": "风险度预警阈值配置页", "type": "页面", "dept": "风控部", "keywords": ["风险度", "预警", "阈值", "配置", "页面", "权限"], "estimate_days": 6, "actual_days": 6, "note": ""},
-    {"id": "H015", "year": 2025, "title": "交易所公告自动采集", "type": "数据", "dept": "技术部", "keywords": ["公告", "交易所", "采集", "抓取", "解析"], "estimate_days": 8, "actual_days": 11, "note": "各交易所页面结构差异"},
-    {"id": "H016", "year": 2025, "title": "产品持仓穿透查询页面", "type": "页面", "dept": "资管部", "keywords": ["持仓", "产品", "穿透", "查询", "页面", "权限", "合约"], "estimate_days": 9, "actual_days": 10, "note": ""},
-    {"id": "H017", "year": 2024, "title": "晨会纪要归档与检索", "type": "页面", "dept": "研究所", "keywords": ["纪要", "归档", "检索", "页面"], "estimate_days": 5, "actual_days": 5, "note": ""},
-    {"id": "H018", "year": 2025, "title": "套保头寸与投机头寸分账统计", "type": "报表", "dept": "投资部", "keywords": ["套保", "投机", "头寸", "统计", "报表", "标记"], "estimate_days": 7, "actual_days": 10, "note": "套保标记来源不一致"},
-    {"id": "H019", "year": 2025, "title": "跨期价差监控与提醒", "type": "提醒", "dept": "投资部", "keywords": ["价差", "跨期", "监控", "提醒", "合约", "阈值", "分钟"], "estimate_days": 10, "actual_days": 12, "note": ""},
-    {"id": "H020", "year": 2024, "title": "资管产品风险日报（回撤 / 杠杆 / 集中度）", "type": "报表", "dept": "资管运营", "keywords": ["风险日报", "回撤", "杠杆", "集中度", "产品", "报表平台"], "estimate_days": 6, "actual_days": 7, "note": ""},
-    {"id": "H021", "year": 2025, "title": "仓单库存数据接入研究看板", "type": "数据", "dept": "研究所", "keywords": ["仓单", "库存", "交易所日报", "采集", "看板"], "estimate_days": 8, "actual_days": 9, "note": ""},
-    {"id": "H022", "year": 2025, "title": "投资经理个人业绩看板", "type": "页面", "dept": "资管部", "keywords": ["业绩", "看板", "投资经理", "净值", "权限", "产品"], "estimate_days": 8, "actual_days": 11, "note": "权限只看本人产品"},
-    {"id": "H023", "year": 2024, "title": "报表订阅与分发功能", "type": "改造", "dept": "技术部", "keywords": ["订阅", "分发", "报表平台", "邮件", "企业微信"], "estimate_days": 6, "actual_days": 6, "note": ""},
-    {"id": "H024", "year": 2025, "title": "交割月持仓自动提示", "type": "提醒", "dept": "风控部", "keywords": ["交割月", "持仓", "提示", "换月", "限仓", "个人客户"], "estimate_days": 6, "actual_days": 8, "note": ""},
-    {"id": "H025", "year": 2025, "title": "客户适当性材料合规审阅流程", "type": "流程", "dept": "合规部", "keywords": ["适当性", "合规审阅", "流程", "留痕", "客户"], "estimate_days": 12, "actual_days": 16, "note": ""},
-    {"id": "H026", "year": 2024, "title": "行情异动与新闻联动页面", "type": "页面", "dept": "研究所", "keywords": ["异动", "新闻", "联动", "页面", "行情", "解释"], "estimate_days": 14, "actual_days": 22, "note": "新闻源接入超预期"},
-    {"id": "H027", "year": 2025, "title": "产品每日保证金占用率报表", "type": "报表", "dept": "资管运营", "keywords": ["保证金", "占用率", "报表", "产品", "日终"], "estimate_days": 4, "actual_days": 4, "note": ""},
-    {"id": "H028", "year": 2025, "title": "手机端产品净值查询 H5", "type": "页面", "dept": "资管部", "keywords": ["手机", "H5", "净值", "查询", "单点登录", "OA"], "estimate_days": 8, "actual_days": 9, "note": ""},
-    {"id": "H029", "year": 2024, "title": "研究员观点周报自动汇总", "type": "报表", "dept": "研究所", "keywords": ["观点", "周报", "汇总", "研报", "模板"], "estimate_days": 6, "actual_days": 8, "note": ""},
-    {"id": "H030", "year": 2025, "title": "指令超限提示旁路服务", "type": "接口", "dept": "资管部", "keywords": ["指令", "超限", "限仓", "提示", "交易系统", "旁路", "实时持仓"], "estimate_days": 12, "actual_days": 15, "note": "与事前风控边界确认"}
+    {
+      "id": "H001",
+      "year": 2025,
+      "title": "资管产品净值日报自动生成",
+      "type": "报表",
+      "dept": "资管运营",
+      "keywords": [
+        "净值",
+        "日报",
+        "产品",
+        "报表平台",
+        "定时",
+        "Excel"
+      ],
+      "estimate_days": 6,
+      "actual_days": 8,
+      "note": "口径确认耗时，历史回填 3 个月",
+      "ai_assisted": false,
+      "ai_share": 0
+    },
+    {
+      "id": "H002",
+      "year": 2025,
+      "title": "客户周报模板改版（加风险指标）",
+      "type": "报表",
+      "dept": "资管运营",
+      "keywords": [
+        "周报",
+        "客户",
+        "风险指标",
+        "模板",
+        "脱敏",
+        "合规审阅"
+      ],
+      "estimate_days": 4,
+      "actual_days": 7,
+      "note": "客户版脱敏字段反复确认",
+      "ai_assisted": false,
+      "ai_share": 0
+    },
+    {
+      "id": "H003",
+      "year": 2024,
+      "title": "黑色系基差监控看板",
+      "type": "页面",
+      "dept": "研究所",
+      "keywords": [
+        "基差",
+        "现货",
+        "主力合约",
+        "看板",
+        "品种",
+        "行情"
+      ],
+      "estimate_days": 12,
+      "actual_days": 18,
+      "note": "现货价格来源换了两次",
+      "ai_assisted": false,
+      "ai_share": 0
+    },
+    {
+      "id": "H004",
+      "year": 2025,
+      "title": "品种异动企业微信提醒",
+      "type": "提醒",
+      "dept": "投资部",
+      "keywords": [
+        "异动",
+        "提醒",
+        "企业微信",
+        "涨跌幅",
+        "盘中",
+        "阈值"
+      ],
+      "estimate_days": 8,
+      "actual_days": 9,
+      "note": "夜盘推送策略后补",
+      "ai_assisted": false,
+      "ai_share": 0
+    },
+    {
+      "id": "H005",
+      "year": 2024,
+      "title": "限仓额度使用率盘中提示",
+      "type": "提醒",
+      "dept": "风控部",
+      "keywords": [
+        "限仓",
+        "持仓",
+        "实时",
+        "提示",
+        "交易系统",
+        "口径"
+      ],
+      "estimate_days": 15,
+      "actual_days": 24,
+      "note": "三套限仓口径冲突，返工一次",
+      "ai_assisted": false,
+      "ai_share": 0
+    },
+    {
+      "id": "H006",
+      "year": 2025,
+      "title": "交易所保证金调整影响测算表",
+      "type": "数据",
+      "dept": "风控部",
+      "keywords": [
+        "保证金",
+        "公告",
+        "调整",
+        "影响",
+        "产品",
+        "客户",
+        "追保"
+      ],
+      "estimate_days": 10,
+      "actual_days": 14,
+      "note": "公告解析需人工复核",
+      "ai_assisted": false,
+      "ai_share": 0
+    },
+    {
+      "id": "H007",
+      "year": 2024,
+      "title": "持仓集中度日终报表",
+      "type": "报表",
+      "dept": "风控部",
+      "keywords": [
+        "集中度",
+        "持仓",
+        "日终",
+        "报表",
+        "风控指标"
+      ],
+      "estimate_days": 5,
+      "actual_days": 5,
+      "note": "直接取风控系统指标",
+      "ai_assisted": false,
+      "ai_share": 0
+    },
+    {
+      "id": "H008",
+      "year": 2025,
+      "title": "研报库全文检索页面",
+      "type": "页面",
+      "dept": "研究所",
+      "keywords": [
+        "研报",
+        "检索",
+        "页面",
+        "全文",
+        "权限"
+      ],
+      "estimate_days": 10,
+      "actual_days": 12,
+      "note": "权限按部门",
+      "ai_assisted": false,
+      "ai_share": 0
+    },
+    {
+      "id": "H009",
+      "year": 2024,
+      "title": "投资指令电子化流程",
+      "type": "流程",
+      "dept": "资管部",
+      "keywords": [
+        "指令",
+        "审批",
+        "OA",
+        "流程",
+        "留痕",
+        "投资经理"
+      ],
+      "estimate_days": 20,
+      "actual_days": 31,
+      "note": "审批环节多次调整",
+      "ai_assisted": false,
+      "ai_share": 0
+    },
+    {
+      "id": "H010",
+      "year": 2025,
+      "title": "产品净值 API 对外接口",
+      "type": "接口",
+      "dept": "资管运营",
+      "keywords": [
+        "净值",
+        "接口",
+        "API",
+        "对外",
+        "鉴权",
+        "产品"
+      ],
+      "estimate_days": 6,
+      "actual_days": 6,
+      "note": "",
+      "ai_assisted": false,
+      "ai_share": 0
+    },
+    {
+      "id": "H011",
+      "year": 2024,
+      "title": "夜盘行情快照落库",
+      "type": "数据",
+      "dept": "技术部",
+      "keywords": [
+        "夜盘",
+        "行情",
+        "落库",
+        "快照",
+        "结算",
+        "交易日历"
+      ],
+      "estimate_days": 5,
+      "actual_days": 8,
+      "note": "交易日历边界问题",
+      "ai_assisted": false,
+      "ai_share": 0
+    },
+    {
+      "id": "H012",
+      "year": 2025,
+      "title": "主力合约切换规则统一",
+      "type": "数据",
+      "dept": "研究所",
+      "keywords": [
+        "主力合约",
+        "切换",
+        "持仓量",
+        "规则",
+        "历史序列"
+      ],
+      "estimate_days": 4,
+      "actual_days": 6,
+      "note": "序列拼接争议",
+      "ai_assisted": false,
+      "ai_share": 0
+    },
+    {
+      "id": "H013",
+      "year": 2025,
+      "title": "客户结算单摘要企业微信推送",
+      "type": "提醒",
+      "dept": "营业部",
+      "keywords": [
+        "结算单",
+        "客户",
+        "推送",
+        "企业微信",
+        "脱敏",
+        "定时"
+      ],
+      "estimate_days": 7,
+      "actual_days": 9,
+      "note": "脱敏规则",
+      "ai_assisted": false,
+      "ai_share": 0
+    },
+    {
+      "id": "H014",
+      "year": 2024,
+      "title": "风险度预警阈值配置页",
+      "type": "页面",
+      "dept": "风控部",
+      "keywords": [
+        "风险度",
+        "预警",
+        "阈值",
+        "配置",
+        "页面",
+        "权限"
+      ],
+      "estimate_days": 6,
+      "actual_days": 6,
+      "note": "",
+      "ai_assisted": false,
+      "ai_share": 0
+    },
+    {
+      "id": "H015",
+      "year": 2025,
+      "title": "交易所公告自动采集",
+      "type": "数据",
+      "dept": "技术部",
+      "keywords": [
+        "公告",
+        "交易所",
+        "采集",
+        "抓取",
+        "解析"
+      ],
+      "estimate_days": 8,
+      "actual_days": 11,
+      "note": "各交易所页面结构差异",
+      "ai_assisted": false,
+      "ai_share": 0
+    },
+    {
+      "id": "H016",
+      "year": 2025,
+      "title": "产品持仓穿透查询页面",
+      "type": "页面",
+      "dept": "资管部",
+      "keywords": [
+        "持仓",
+        "产品",
+        "穿透",
+        "查询",
+        "页面",
+        "权限",
+        "合约"
+      ],
+      "estimate_days": 9,
+      "actual_days": 10,
+      "note": "",
+      "ai_assisted": false,
+      "ai_share": 0
+    },
+    {
+      "id": "H017",
+      "year": 2024,
+      "title": "晨会纪要归档与检索",
+      "type": "页面",
+      "dept": "研究所",
+      "keywords": [
+        "纪要",
+        "归档",
+        "检索",
+        "页面"
+      ],
+      "estimate_days": 5,
+      "actual_days": 5,
+      "note": "",
+      "ai_assisted": false,
+      "ai_share": 0
+    },
+    {
+      "id": "H018",
+      "year": 2025,
+      "title": "套保头寸与投机头寸分账统计",
+      "type": "报表",
+      "dept": "投资部",
+      "keywords": [
+        "套保",
+        "投机",
+        "头寸",
+        "统计",
+        "报表",
+        "标记"
+      ],
+      "estimate_days": 7,
+      "actual_days": 10,
+      "note": "套保标记来源不一致",
+      "ai_assisted": false,
+      "ai_share": 0
+    },
+    {
+      "id": "H019",
+      "year": 2025,
+      "title": "跨期价差监控与提醒",
+      "type": "提醒",
+      "dept": "投资部",
+      "keywords": [
+        "价差",
+        "跨期",
+        "监控",
+        "提醒",
+        "合约",
+        "阈值",
+        "分钟"
+      ],
+      "estimate_days": 10,
+      "actual_days": 12,
+      "note": "",
+      "ai_assisted": false,
+      "ai_share": 0
+    },
+    {
+      "id": "H020",
+      "year": 2024,
+      "title": "资管产品风险日报（回撤 / 杠杆 / 集中度）",
+      "type": "报表",
+      "dept": "资管运营",
+      "keywords": [
+        "风险日报",
+        "回撤",
+        "杠杆",
+        "集中度",
+        "产品",
+        "报表平台"
+      ],
+      "estimate_days": 6,
+      "actual_days": 7,
+      "note": "",
+      "ai_assisted": false,
+      "ai_share": 0
+    },
+    {
+      "id": "H021",
+      "year": 2025,
+      "title": "仓单库存数据接入研究看板",
+      "type": "数据",
+      "dept": "研究所",
+      "keywords": [
+        "仓单",
+        "库存",
+        "交易所日报",
+        "采集",
+        "看板"
+      ],
+      "estimate_days": 8,
+      "actual_days": 9,
+      "note": "",
+      "ai_assisted": false,
+      "ai_share": 0
+    },
+    {
+      "id": "H022",
+      "year": 2025,
+      "title": "投资经理个人业绩看板",
+      "type": "页面",
+      "dept": "资管部",
+      "keywords": [
+        "业绩",
+        "看板",
+        "投资经理",
+        "净值",
+        "权限",
+        "产品"
+      ],
+      "estimate_days": 8,
+      "actual_days": 11,
+      "note": "权限只看本人产品",
+      "ai_assisted": false,
+      "ai_share": 0
+    },
+    {
+      "id": "H023",
+      "year": 2024,
+      "title": "报表订阅与分发功能",
+      "type": "改造",
+      "dept": "技术部",
+      "keywords": [
+        "订阅",
+        "分发",
+        "报表平台",
+        "邮件",
+        "企业微信"
+      ],
+      "estimate_days": 6,
+      "actual_days": 6,
+      "note": "",
+      "ai_assisted": false,
+      "ai_share": 0
+    },
+    {
+      "id": "H024",
+      "year": 2025,
+      "title": "交割月持仓自动提示",
+      "type": "提醒",
+      "dept": "风控部",
+      "keywords": [
+        "交割月",
+        "持仓",
+        "提示",
+        "换月",
+        "限仓",
+        "个人客户"
+      ],
+      "estimate_days": 6,
+      "actual_days": 8,
+      "note": "",
+      "ai_assisted": false,
+      "ai_share": 0
+    },
+    {
+      "id": "H025",
+      "year": 2025,
+      "title": "客户适当性材料合规审阅流程",
+      "type": "流程",
+      "dept": "合规部",
+      "keywords": [
+        "适当性",
+        "合规审阅",
+        "流程",
+        "留痕",
+        "客户"
+      ],
+      "estimate_days": 12,
+      "actual_days": 16,
+      "note": "",
+      "ai_assisted": false,
+      "ai_share": 0
+    },
+    {
+      "id": "H026",
+      "year": 2024,
+      "title": "行情异动与新闻联动页面",
+      "type": "页面",
+      "dept": "研究所",
+      "keywords": [
+        "异动",
+        "新闻",
+        "联动",
+        "页面",
+        "行情",
+        "解释"
+      ],
+      "estimate_days": 14,
+      "actual_days": 22,
+      "note": "新闻源接入超预期",
+      "ai_assisted": false,
+      "ai_share": 0
+    },
+    {
+      "id": "H027",
+      "year": 2025,
+      "title": "产品每日保证金占用率报表",
+      "type": "报表",
+      "dept": "资管运营",
+      "keywords": [
+        "保证金",
+        "占用率",
+        "报表",
+        "产品",
+        "日终"
+      ],
+      "estimate_days": 4,
+      "actual_days": 4,
+      "note": "",
+      "ai_assisted": false,
+      "ai_share": 0
+    },
+    {
+      "id": "H028",
+      "year": 2025,
+      "title": "手机端产品净值查询 H5",
+      "type": "页面",
+      "dept": "资管部",
+      "keywords": [
+        "手机",
+        "H5",
+        "净值",
+        "查询",
+        "单点登录",
+        "OA"
+      ],
+      "estimate_days": 8,
+      "actual_days": 9,
+      "note": "",
+      "ai_assisted": false,
+      "ai_share": 0
+    },
+    {
+      "id": "H029",
+      "year": 2024,
+      "title": "研究员观点周报自动汇总",
+      "type": "报表",
+      "dept": "研究所",
+      "keywords": [
+        "观点",
+        "周报",
+        "汇总",
+        "研报",
+        "模板"
+      ],
+      "estimate_days": 6,
+      "actual_days": 8,
+      "note": "",
+      "ai_assisted": false,
+      "ai_share": 0
+    },
+    {
+      "id": "H030",
+      "year": 2025,
+      "title": "指令超限提示旁路服务",
+      "type": "接口",
+      "dept": "资管部",
+      "keywords": [
+        "指令",
+        "超限",
+        "限仓",
+        "提示",
+        "交易系统",
+        "旁路",
+        "实时持仓"
+      ],
+      "estimate_days": 12,
+      "actual_days": 15,
+      "note": "与事前风控边界确认",
+      "ai_assisted": false,
+      "ai_share": 0
+    }
   ]
 }

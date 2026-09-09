@@ -79,3 +79,17 @@ def test_free_text_works():
     a = analyze("能不能做个页面，每天看各产品的保证金占用和风险度，超过 80% 提醒我，手机也要能看")
     assert a.card.req_type == "页面" and "保证金占用" in a.card.indicators and "手机端可看" in a.card.nonfunctional
     assert a.estimate.mid > 0 and len(a.questions) >= 6
+
+
+def test_dual_track(results):
+    for a in results.values():
+        e = a.estimate
+        assert e.tasks and abs(sum(t.trad_days for t in e.tasks) - e.mid) < 0.6      # 拆分守恒
+        assert 0 < e.ai_mid < e.mid and 10 <= e.saving_pct <= 70
+        assert abs(sum(e.who.values()) - 1.0) < 0.05
+        assert {t.who for t in e.tasks} == {"AI 能做", "AI 做人审", "人必须做"}
+        assert all(t.who != "AI 能做" for t in e.tasks if "验收" in t.name or "口径确认" in t.name)
+    r1 = results["03"]
+    assert any("交易链路" in t.name and t.who == "AI 做人审" for t in r1.estimate.tasks)   # 交易链路只能 AI 做人审
+    plain = analyze("做个页面，每天看各品种主力合约的持仓量和成交量排名，能导出 Excel")
+    assert "自建" in plain.estimate.delivery                                           # 无客户 / 交易风险的标准页面 → 业务自建路径

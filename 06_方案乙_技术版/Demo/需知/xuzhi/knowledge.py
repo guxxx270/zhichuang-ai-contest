@@ -45,6 +45,8 @@ class HistoryItem:
     estimate_days: float
     actual_days: float
     note: str
+    ai_assisted: bool = False
+    ai_share: float = 0.0
 
 
 def _load(path):
@@ -66,7 +68,7 @@ def systems() -> list[System]:
 @lru_cache(maxsize=1)
 def history() -> list[HistoryItem]:
     raw = _load(config.HISTORY_PATH)["items"]
-    return [HistoryItem(h["id"], h["year"], h["title"], h["type"], h["dept"], tuple(h["keywords"]), h["estimate_days"], h["actual_days"], h.get("note", "")) for h in raw]
+    return [HistoryItem(h["id"], h["year"], h["title"], h["type"], h["dept"], tuple(h["keywords"]), h["estimate_days"], h["actual_days"], h.get("note", ""), bool(h.get("ai_assisted", False)), float(h.get("ai_share", 0))) for h in raw]
 
 
 IMPACT_ORDER = {"高": 0, "中": 1, "低": 2}

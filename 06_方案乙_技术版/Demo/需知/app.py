@@ -155,29 +155,38 @@ with tabs[1]:
 
 # ---------- 估量 ----------
 with tabs[2]:
-    m = st.columns(4)
-    m[0].metric("中位估算", f"{est.mid} 人天")
-    m[1].metric("区间", f"{est.low} ～ {est.high}")
+    m = st.columns(5)
+    m[0].metric("传统开发", f"{est.mid} 人天", help=f"区间 {est.low} ～ {est.high}；六维加权 + 历史需求类比")
+    m[1].metric("AI 协同", f"{est.ai_mid} 人天", delta=f"-{est.saving_pct}%", delta_color="inverse", help=f"区间 {est.ai_low} ～ {est.ai_high}；按任务性质分别乘 AI 协同系数")
     m[2].metric("置信度", est.confidence)
     m[3].metric("未答复的高影响问题", f"{est.unanswered_high} 个")
+    m[4].metric("AI 能做的活占", f"{est.who.get('AI 能做', 0):.0%}", help="按传统人天口径统计")
     st.caption(est.confidence_reason)
+    st.markdown(f"**建议交付方式**：{est.delivery}")
+    st.markdown("#### 双轨拆分：先拆活，再分工")
+    who_cls = {"AI 能做": "lo", "AI 做人审": "md", "人必须做": "hi"}
+    st.markdown("".join(f'<span class="xz-chip {who_cls[k]}">{k} {v:.0%}</span>' for k, v in est.who.items()), unsafe_allow_html=True)
+    tdf = pd.DataFrame([{"任务": t.name, "阶段": t.phase, "分工": t.who, "传统人天": t.trad_days, "AI 协同人天": t.ai_days, "系数": t.coef, "为什么": t.note} for t in est.tasks])
+    st.dataframe(tdf, hide_index=True, width="stretch", height=min(60 + 36 * len(tdf), 620))
     l, r = st.columns([1, 1])
     with l:
-        st.markdown("**六维复杂度**（1～5）")
-        df = pd.DataFrame({"维度": list(est.dims.keys()), "分": list(est.dims.values()), "依据": [est.reasons[d] for d in est.dims]})
-        st.dataframe(df, hide_index=True, width="stretch")
-        st.bar_chart(df.set_index("维度")["分"], height=200)
+        st.markdown("**按阶段对比（人天）**")
+        pdf = pd.DataFrame({"传统开发": est.phases, "AI 协同": est.ai_phases})
+        try:
+            st.bar_chart(pdf, height=220, stack=False)
+        except TypeError:
+            st.bar_chart(pdf, height=220)
         st.markdown(f"基础估算 **{est.base_days} 人天**（六维加权）" + (f"；类比校准 **{est.history_days} 人天**（相似历史需求实际值加权）" if est.history_days else "；无相似历史需求，未校准"))
+        st.markdown("**六维复杂度**（1～5）")
+        st.dataframe(pd.DataFrame({"维度": list(est.dims.keys()), "分": list(est.dims.values()), "依据": [est.reasons[d] for d in est.dims]}), hide_index=True, width="stretch")
     with r:
-        st.markdown("**类比估算：相似历史需求**")
+        st.markdown("**类比估算：相似历史需求**（当前 30 条均为传统口径；上线后回写「是否用 AI / 参与度」，AI 轨随之校准）")
         if est.similar:
             st.dataframe(pd.DataFrame([{"相似度": f"{s.score:.0%}", "需求": s.title, "类型": s.type, "部门": s.dept, "年份": s.year, "当时估": s.estimate_days, "实际": s.actual_days, "备注": s.note} for s in est.similar]),
                          hide_index=True, width="stretch")
         else:
             st.info("历史需求库里没有相似需求；上线后把实际工时回写，下次就有了。")
-        st.markdown("**阶段拆分**")
-        st.dataframe(pd.DataFrame([{"阶段": k, "人天": v} for k, v in est.phases.items()]), hide_index=True, width="stretch")
-    st.markdown('<div class="xz-foot">数字全由程序算：六维加权 → 基础人天；相似历史需求实际人天按相似度加权 → 校准；上线后实际工时回写台账，估算越用越准（飞轮）。</div>', unsafe_allow_html=True)
+    st.markdown('<div class="xz-foot">数字全由程序算：六维加权 → 基础人天；相似历史需求实际人天按相似度加权 → 传统轨；每个任务按「AI 能做 / AI 做人审 / 人必须做」乘系数 → AI 协同轨。涉及资金数字、交易链路、对客内容的任务只按"AI 做人审"折算，验证成本不打折。</div>', unsafe_allow_html=True)
 
 # ---------- 定架 ----------
 with tabs[3]:
@@ -224,7 +233,7 @@ with tabs[5]:
     rows = ledger.recent(30)
     if rows:
         st.dataframe(pd.DataFrame(rows).rename(columns={"id": "编号", "ts": "时间", "title": "需求", "source": "来源", "req_type": "类型", "requester": "提出方", "engine": "引擎",
-                                                        "n_questions": "问题数", "n_answered": "已答复", "mid_days": "估算(人天)", "confidence": "置信度", "redacted": "脱敏处"}),
+                                                        "n_questions": "问题数", "n_answered": "已答复", "mid_days": "传统(人天)", "ai_days": "AI 协同(人天)", "confidence": "置信度", "redacted": "脱敏处"}),
                      hide_index=True, width="stretch")
     st.markdown('<div class="xz-foot">台账 = 审计留痕 + 飞轮数据：谁提、AI 说了什么、业务怎么答、估了多少；上线后回写实际工时，估算越来越准。</div>', unsafe_allow_html=True)
 

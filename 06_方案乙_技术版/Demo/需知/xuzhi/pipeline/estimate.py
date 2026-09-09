@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 
 from .. import config, knowledge
 from .intake import Card, Question
+from .tasks import Task, allocate, build_tasks, delivery_mode, who_split
 
 DIMS = ["功能点", "数据接入", "界面", "权限", "性能", "合规"]
 WEIGHTS = {"功能点": 1.2, "数据接入": 1.5, "界面": 1.2, "权限": 0.8, "性能": 1.5, "合规": 0.8}   # 每提高 1 分增加的人天
@@ -38,6 +39,15 @@ class Estimate:
     similar: list[Similar]
     phases: dict[str, float] = field(default_factory=dict)
     unanswered_high: int = 0
+    # ---- AI 协同轨 ----
+    tasks: list[Task] = field(default_factory=list)
+    ai_mid: float = 0.0
+    ai_low: float = 0.0
+    ai_high: float = 0.0
+    saving_pct: float = 0.0
+    who: dict[str, float] = field(default_factory=dict)
+    ai_phases: dict[str, float] = field(default_factory=dict)
+    delivery: str = ""
 
     @property
     def total_points(self) -> int:
@@ -107,6 +117,15 @@ def estimate(card: Card, text: str, questions: list[Question]) -> Estimate:
         conf, why = "中", f"有相似历史需求可参照（相似度 {top:.0%}），但仍有 {unanswered_high} 个高影响问题未答复"
     else:
         conf, why = "低", f"无相似历史需求，且 {unanswered_high} 个高影响问题未答复；建议先问清再报数"
-    phases = {"需求与设计": round(mid * 0.15, 1), "开发": round(mid * 0.5, 1), "测试与比对": round(mid * 0.2, 1), "上线与培训": round(mid * 0.15, 1)}
+    tasks = allocate(build_tasks(card, text), mid)
+    phases: dict[str, float] = {}
+    ai_phases: dict[str, float] = {}
+    for t in tasks:
+        phases[t.phase] = round(phases.get(t.phase, 0.0) + t.trad_days, 1)
+        ai_phases[t.phase] = round(ai_phases.get(t.phase, 0.0) + t.ai_days, 1)
+    ai_mid = round(sum(t.ai_days for t in tasks), 1)
+    ratio = ai_mid / mid if mid else 1.0
+    split = who_split(tasks)
     return Estimate(dims, reasons, round(base, 1), round(history_days, 1) if history_days else None, round(mid, 1), round(low, 1), round(high, 1),
-                    conf, why, sims, phases, unanswered_high)
+                    conf, why, sims, phases, unanswered_high, tasks, ai_mid, round(low * ratio, 1), round(high * ratio, 1),
+                    round((1 - ratio) * 100), split, ai_phases, delivery_mode(card, split, text))

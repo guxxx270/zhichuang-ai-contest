@@ -25,7 +25,10 @@ def main() -> None:
     print("\n" + a.message)
     print("=" * 70); print("【写单】业务版前 30 行："); print("\n".join(a.spec.business_md.splitlines()[:30]))
     print("=" * 70); e = a.estimate
-    print(f"【估量】{e.mid} 人天（{e.low}～{e.high}），置信度 {e.confidence}：{e.confidence_reason}")
+    print(f"【估量】传统 {e.mid} 人天（{e.low}～{e.high}）｜AI 协同 {e.ai_mid} 人天（{e.ai_low}～{e.ai_high}，省 {e.saving_pct}%）｜置信度 {e.confidence}：{e.confidence_reason}")
+    print("  分工：" + "，".join(f"{k} {v:.0%}" for k, v in e.who.items()) + f"｜建议：{e.delivery}")
+    for t in e.tasks:
+        print(f"   {t.id:3} {t.phase} · {t.who:5} {t.trad_days:>5} → {t.ai_days:>5}  {t.name}")
     print("  六维：" + "，".join(f"{k} {v}" for k, v in e.dims.items()))
     for s in e.similar:
         print(f"  相似：{s.title}（{s.score:.0%}，实际 {s.actual_days} 人天）")

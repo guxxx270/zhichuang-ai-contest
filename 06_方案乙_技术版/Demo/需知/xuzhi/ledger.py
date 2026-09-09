@@ -21,14 +21,18 @@ class Ledger:
         CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, req_id INTEGER, action TEXT, detail TEXT);
         CREATE TABLE IF NOT EXISTS feedback(id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, req_id INTEGER, skill TEXT, score INTEGER, note TEXT);
         """)
+        try:
+            self.conn.execute("ALTER TABLE requirements ADD COLUMN ai_days REAL")
+        except sqlite3.OperationalError:
+            pass   # 已有该列
 
     def log_analysis(self, a) -> int:
         cur = self.conn.execute(
-            "INSERT INTO requirements(ts,title,source,req_type,requester,engine,n_questions,n_answered,mid_days,confidence,redacted,payload) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO requirements(ts,title,source,req_type,requester,engine,n_questions,n_answered,mid_days,confidence,redacted,ai_days,payload) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (datetime.now().isoformat(timespec="seconds"), a.card.title, a.card.source, a.card.req_type, a.card.requester, a.card.engine,
-             len(a.questions), sum(1 for q in a.questions if q.answer.strip()), a.estimate.mid, a.estimate.confidence, a.redacted,
+             len(a.questions), sum(1 for q in a.questions if q.answer.strip()), a.estimate.mid, a.estimate.confidence, a.redacted, a.estimate.ai_mid,
              json.dumps({"card": json.loads(a.card.to_json()), "questions": [q.__dict__ for q in a.questions],
-                         "estimate": {"mid": a.estimate.mid, "low": a.estimate.low, "high": a.estimate.high, "dims": a.estimate.dims},
+                         "estimate": {"mid": a.estimate.mid, "low": a.estimate.low, "high": a.estimate.high, "ai_mid": a.estimate.ai_mid, "dims": a.estimate.dims},
                          "decisions": [d.recommended for d in a.architecture.decisions]}, ensure_ascii=False)))
         self.conn.commit()
         return int(cur.lastrowid)
@@ -42,7 +46,7 @@ class Ledger:
         self.conn.commit()
 
     def recent(self, n: int = 20) -> list[dict]:
-        cur = self.conn.execute("SELECT id,ts,title,source,req_type,requester,engine,n_questions,n_answered,mid_days,confidence,redacted FROM requirements ORDER BY id DESC LIMIT ?", (n,))
+        cur = self.conn.execute("SELECT id,ts,title,source,req_type,requester,engine,n_questions,n_answered,mid_days,ai_days,confidence,redacted FROM requirements ORDER BY id DESC LIMIT ?", (n,))
         cols = [c[0] for c in cur.description]
         return [dict(zip(cols, r)) for r in cur.fetchall()]
 
