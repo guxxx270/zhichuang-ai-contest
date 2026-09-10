@@ -81,9 +81,17 @@ def test_prototype_html(results):
 
 def test_added_column_in_prototype():
     from xuzhi.llm import LLM
-    a = analyze("净值日报新增对标指数列，放在单位净值旁边，盘后给投研看。", llm=LLM(mode="mock"))
+    a = analyze("净值日报能不能加一列对标指数，就放在单位净值旁边，盘后给投研看。", llm=LLM(mode="mock"))
+    html = a.prototype_html
     assert "对标指数" in a.card.indicators
-    assert "对标指数" in a.prototype_html
+    assert html.count("<th>对标指数</th>") == 1
+    assert html.count("沪深300") >= 1
+    import re
+    cells = re.findall(r"沪深300 <span class=\"(?:up|down)\">[^<]+</span>", html)
+    assert cells and len(set(cells)) == 1
+    b = analyze("净值日报加一列对标指数，对中证500。", llm=LLM(mode="mock"))
+    assert "中证500" in b.prototype_html
+    assert "沪深300" not in b.prototype_html
 
 
 def test_free_text_works():

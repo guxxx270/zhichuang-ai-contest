@@ -107,8 +107,8 @@ def find_added_columns(text: str) -> list[str]:
 
     def add(raw: str) -> None:
         s = re.sub(r"^(把|把这|这一|这个)", "", raw.strip("「」\"“”' 　"))
-        s = re.sub(r"(也要|放进去|就行|就好|旁边).*$", "", s)
-        s = s.strip("的 ")
+        s = re.split(r"(就|放在|也要|放进去|就行|就好|旁边)", s, maxsplit=1)[0]
+        s = s.strip("的 「」\"“”' 　")
         if len(s) < 2 or len(s) > 20 or s in _NOT_COLUMNS or s in found:
             return
         found.append(s)

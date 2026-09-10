@@ -248,5 +248,9 @@ def refine_with_llm(text_redacted: str, card: Card, questions: list[Question], l
         if isinstance(q, dict) and q.get("question"):
             questions.append(Question(f"L{i+1}", q.get("category", "补充"), "模型", q.get("impact", "中"), q["question"],
                                       q.get("why", ""), q.get("default", "待业务答复")))
+    blob = " ".join(card.features)
+    for col in textutil.find_added_columns(blob) + textutil.find_indicators(blob):
+        if col not in card.indicators and not any(col != x and col in x for x in card.indicators):
+            card.indicators.append(col)
     card.engine = "规则 + 模型"
     return card, questions

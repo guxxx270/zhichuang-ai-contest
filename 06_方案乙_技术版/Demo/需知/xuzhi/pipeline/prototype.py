@@ -5,7 +5,7 @@ from __future__ import annotations
 import html
 import random
 
-from .. import config, textutil
+from .. import config
 from .intake import Card
 
 B = config.BRAND
@@ -49,10 +49,19 @@ table.xz td {{ padding:8px 10px; border-top:1px solid {B['mist']}; }}
 </style>"""
 
 _PRODUCTS = ["稳健一号", "量化增强二号", "商品 CTA 三号", "套利精选", "宏观对冲五号", "产业链六号"]
+_BENCHMARKS = ("中证1000", "中证2000", "沪深300", "中证500", "中证800", "上证50", "创业板指")
 
 
 def _rng(seed: str) -> random.Random:
     return random.Random(sum(map(ord, seed)))
+
+
+def _pick_benchmark(card: Card) -> str:
+    blob = " ".join(card.features + card.raw_features + [card.title] + (card.indicators or []))
+    for name in _BENCHMARKS:
+        if name in blob:
+            return name
+    return "沪深300"
 
 
 def _table(headers: list[str], rows: list[list[str]]) -> str:
@@ -72,10 +81,8 @@ def _report_or_page(card: Card, rng: random.Random, client_view: bool) -> str:
     by_product = "资管产品" in card.scope_objects or not card.symbols
     key = "产品" if by_product else "品种"
     keys = _PRODUCTS if by_product else (card.symbols or ["螺纹钢", "热轧卷板", "铁矿石"])
-    blob = " ".join(card.features + card.raw_features + [card.title])
-    extra_cols = textutil.find_added_columns(blob)
     headers: list[str] = [key]
-    for h in extra_cols + inds:
+    for h in inds:
         if h and h not in headers:
             headers.append(h)
     if any("变动" in f or "较上一" in f for f in card.features) and "较上一交易日变动" not in headers:
@@ -83,6 +90,9 @@ def _report_or_page(card: Card, rng: random.Random, client_view: bool) -> str:
     headers = headers[:8]
     if client_view:
         headers = [h for h in headers if h not in ("集中度", "杠杆", "保证金占用")]
+    bench = _pick_benchmark(card)
+    bench_move = _pct(rng, -1.2, 1.2)
+    has_bench = any("对标" in h for h in headers)
     rows = []
     for k in keys[:6]:
         r = [k]
@@ -97,8 +107,8 @@ def _report_or_page(card: Card, rng: random.Random, client_view: bool) -> str:
                 r.append(f"{rng.uniform(-120, 180):+.0f}")
             elif ind in ("涨跌幅", "较上一交易日变动") or "变动" in ind:
                 r.append(_pct(rng, -1.5, 1.5))
-            elif "对标" in ind or "指数" in ind:
-                r.append(f"沪深300 {_pct(rng, -1.2, 1.2)}")
+            elif "对标" in ind:
+                r.append(f"{html.escape(bench)} {bench_move}")
             elif "盈亏" in ind or "超额" in ind:
                 r.append(_pct(rng, -2.5, 2.5))
             else:
@@ -107,13 +117,23 @@ def _report_or_page(card: Card, rng: random.Random, client_view: bool) -> str:
     kpis = "".join(f'<div class="xz-kpi"><div class="n">{v}</div><div class="l">{l}</div></div>' for v, l in
                    ((f"{len(keys)} 只" if by_product else f"{len(keys)} 个", f"{key}范围"), ("T+1 16:45", "数据时点（结算后）"),
                     (f"{rng.randint(0, 3)}", "今日异常项"), ("已脱敏" if client_view else "内部版", "版本")))
+    chips = "".join(f'<span class="tag">{html.escape(f[:20])}</span>' for f in card.features[:5])
     bar = (f'<div class="xz-bar"><input type="date" value="2026-09-08"><select><option>全部{key}</option>' + "".join(f"<option>{k}</option>" for k in keys[:6]) + "</select>"
            + '<button class="xz-btn">查询</button><button class="xz-btn ghost">导出 Excel</button><button class="xz-btn ghost">订阅每日推送</button>'
            + ('' if client_view else '<button class="xz-btn warn">切换到客户版</button>') + "</div>")
+    if chips:
+        bar += f'<div class="xz-bar">{chips}</div>'
     alert = ""
     if "提醒" in " ".join(card.features) or card.req_type == "提醒":
         alert = f'<div class="alert"><span class="tag hi">异常</span><div><b>{keys[1]}</b> {inds[0]}较近 60 日均值偏离 2.3σ，已推送企业微信（09:32）</div></div>'
-    return bar + f'<div class="xz-kpis">{kpis}</div>' + alert + _table(headers, rows)
+    note = ""
+    if has_bench:
+        unspecified = bench == "沪深300" and "沪深300" not in " ".join(
+            card.features + card.raw_features + [card.title] + (card.indicators or [])
+        )
+        extra = "原话未写对哪只指数，示例暂用沪深300，待业务确认。" if unspecified else "具体对哪只指数以业务确认为准。"
+        note = (f'<div class="foot">对标指数为示例（{html.escape(bench)}），同一查询日全表同一涨跌，不是真实行情。{extra}</div>')
+    return bar + f'<div class="xz-kpis">{kpis}</div>' + alert + _table(headers, rows) + note
 
 
 def _alerts(card: Card, rng: random.Random) -> str:
@@ -172,7 +192,7 @@ def render(card: Card, mobile: bool = False, client_view: bool = False) -> str:
     else:
         body = _report_or_page(card, rng, client_view)
     who = html.escape(card.requester or "业务方")
-    page = (f'<div class="xz-top"><h2>{html.escape(card.title)}</h2><span class="who">{who} · 原型 v0.1 · 假数据</span></div>'
+    page = (f'<div class="xz-top"><h2>{html.escape(card.title)}</h2><span class="who">{who} · 原型 v0.1 · 假数据 · {html.escape(card.engine)}</span></div>'
             f'<div class="xz-wrap">{body}<div class="foot">需知 · 出样：本页由需求卡片自动生成，数据均为示例；业务确认后作为验收依据。</div></div>')
     if mobile:
         page = f'<div class="phone">{page}</div>'

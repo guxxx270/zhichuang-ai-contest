@@ -269,6 +269,8 @@ if go:
             "mode": llm.mode, "model": llm.model, "api_base": run_base, "backend": backend_sel,
             "provider_id": provider_id,
         }
+        if do_polish:
+            st.session_state.just_polished = a.engine != "规则"
         st.rerun()
 
 _last = st.session_state.get("last_llm") or {}
@@ -334,7 +336,23 @@ with tabs[0]:
                         "backend": backend_sel, "provider_id": provider_id,
                     }
                     ledger.event(st.session_state.get("req_id", 0), "模型润色", f"{a2.seconds}s")
-                    st.rerun()
+                    if a2.engine != "规则":
+                        st.session_state.just_polished = True
+                        st.rerun()
+                    st.warning("已调用模型，但润色未改写初稿（仍是规则引擎结果）。按钮还在，可换模型或再试一次。")
+        elif a.engine != "规则":
+            model_hint = (getattr(llm, "last_model", "") or (_last.get("model") or "")).strip()
+            if st.session_state.pop("just_polished", False):
+                st.toast("模型润色完成")
+                st.success(
+                    (f"已用 **{model_hint}** 润色标题、追问和需求单。" if model_hint else "模型润色完成。")
+                    + " 润色按钮已收起，避免再调一次；改口径请填业务答复后点重算。"
+                )
+            else:
+                st.caption(
+                    ("已用模型润色" + (f"（{model_hint}）" if model_hint else "") + "，按钮已收起。")
+                    + " 改口径请填业务答复后点重算。"
+                )
         st.markdown(f"**一句话理解**：{card.goal}。")
         cc = st.columns(2)
         cc[0].markdown("**功能点（原话清洗）**\n" + "\n".join(f"{i}. {f}" for i, f in enumerate(card.features, 1)))
@@ -441,7 +459,7 @@ with tabs[4]:
     cli = t1.toggle("客户版", value=client, key="proto_client")
     proto = render_proto(card, mobile=mob, client_view=cli)
     t1.download_button("下载原型 .html", proto, file_name=f"原型_{card.title}.html")
-    t1.markdown('<div class="xz-foot">原型由需求卡片自动生成，假数据；业务点一遍就知道"是不是这个意思"，确认后作为验收依据。</div>', unsafe_allow_html=True)
+    t1.markdown('<div class="xz-foot">原型随需求卡片重画（假数据）。润色会更新功能点标签和引擎标记；对标指数同一查询日全表同一涨跌。</div>', unsafe_allow_html=True)
     with t2:
         _iframe(proto, height=640 if not mob else 760)
 
