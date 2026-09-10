@@ -1,4 +1,7 @@
-"""配置：从 .env 读取 LLM 接入信息（key 由使用者自填，代码不含密钥）；各数据目录；品牌常量。"""
+"""配置：公开的模型/网关预设（不含密钥）；各数据目录；品牌常量。
+
+API Key 不在代码与仓库中：页面上按模型填写，仅存于当前浏览器会话。
+"""
 from __future__ import annotations
 
 import os
@@ -8,13 +11,26 @@ ROOT = Path(__file__).resolve().parent.parent
 try:
     from dotenv import load_dotenv
     load_dotenv(ROOT / ".env", override=False)
-except ImportError:      # 没装 python-dotenv 也能跑（环境变量或 mock）
+except ImportError:
     pass
 
-LLM_API_BASE = os.getenv("LLM_API_BASE", "").strip()   # OpenAI 兼容网关，例：https://ai.company.internal/v1
+# 可选：仅作本地调试兜底；正式用法是页面输入。仓库默认留空。
+LLM_API_BASE = os.getenv("LLM_API_BASE", "").strip()
 LLM_API_KEY = os.getenv("LLM_API_KEY", "").strip()
 LLM_MODEL = os.getenv("LLM_MODEL", "").strip()
 LLM_MODE = os.getenv("LLM_MODE", "").strip().lower()   # auto / api / mock
+
+# 页面预设：(显示名, mode, provider_id, api_base, model_id)
+# model_id 为 "__custom__" 时需在页面填写模型名；provider=custom 时还需填网关。
+LLM_PRESETS: list[tuple[str, str, str, str, str]] = [
+    ("mock · 规则引擎（不调 API）", "mock", "mock", "", ""),
+    ("硅基流动 · DeepSeek-V4-Flash", "api", "siliconflow", "https://api.siliconflow.cn/v1", "deepseek-ai/DeepSeek-V4-Flash"),
+    ("硅基流动 · DeepSeek-V3", "api", "siliconflow", "https://api.siliconflow.cn/v1", "deepseek-ai/DeepSeek-V3"),
+    ("硅基流动 · Qwen2.5-72B", "api", "siliconflow", "https://api.siliconflow.cn/v1", "Qwen/Qwen2.5-72B-Instruct"),
+    ("Qoder Cloud Agents · 国内", "api", "qoder-cloud", "https://api.qoder.com.cn", "ultimate"),
+    ("Qoder Cloud Agents · 国际", "api", "qoder-cloud-intl", "https://api.qoder.com", "ultimate"),
+    ("自定义 OpenAI 兼容网关", "api", "custom", "", "__custom__"),
+]
 
 DATA_DIR = ROOT / "data"
 SAMPLES_DIR = DATA_DIR / "samples"
@@ -32,9 +48,8 @@ SKILLS = [("问清", "先问清，再开工"), ("写单", "业务版 · 技术�
           ("定架", "告诉领导要拍板什么"), ("出样", "看得见的需求"), ("对账", "改了什么一眼看 · 二期")]
 BRAND = {"navy": "#14367A", "accent": "#E07A1F", "paper": "#F6F4EF", "ink": "#1F2937", "mist": "#E5E7EB", "teal": "#0F766E"}
 
-# 估量参数（可按公司实际校准）
-DAYS_PER_COMPLEXITY_POINT = 1.6      # 复杂度总分 → 基础人天 的系数
-ESTIMATE_BLEND_HISTORY = 0.6         # 有相似历史需求时，历史实际人天的权重
+DAYS_PER_COMPLEXITY_POINT = 1.6
+ESTIMATE_BLEND_HISTORY = 0.6
 
 
 def resolved_mode() -> str:

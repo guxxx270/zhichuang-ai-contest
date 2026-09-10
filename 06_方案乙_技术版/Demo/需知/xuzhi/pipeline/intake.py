@@ -25,6 +25,7 @@ NONFUNC_RULES = [(r"手机(?!_\d)|移动|随时|出差", "手机端可看"), (r"
                  (r"排序|按风险", "结果按风险排序"), (r"导出|下载", "支持导出")]
 
 TITLE_TEMPLATES: list[tuple[str, str]] = [
+    (r"净值日报.*对标指数", "净值日报改版：新增对标指数列"),
     (r"净值日报.*(加|新增|放进|改)", "净值日报改版：新增变动列与风险指标"),
     (r"基差.*(监控|页面|看板)", "基差监控页面（含异常提醒）"),
     (r"(下单|报单).*(限仓|超限)|限仓.*(提示|提醒)", "下单前限仓超限提示"),
@@ -139,6 +140,9 @@ def extract_card(text: str, source_hint: str = "") -> Card:
     card.frequency = _first(FREQ_RULES, body)
     card.symbols = textutil.find_symbols(body)
     card.indicators = textutil.find_indicators(body)
+    for col in textutil.find_added_columns(body):
+        if col not in card.indicators:
+            card.indicators.append(col)
     card.scope_objects = _scope_objects(body)
     card.data_sources = textutil.match_rules(body, textutil.DATA_SOURCE_RULES)
     card.channels = textutil.match_rules(body, textutil.CHANNEL_RULES)
@@ -193,11 +197,20 @@ def build_questions(text: str, card: Card, limit: int = 12) -> list[Question]:
     return qs[:limit]
 
 
+def _salutation(card: Card) -> str:
+    """发给业务的开头称呼：有提出方用「××你好」，没有则用「您好」，避免「您你好」。"""
+    who = (card.requester.split("·")[0] if card.requester else "").strip()
+    if not who or who in ("您", "你"):
+        return "您好"
+    if who.endswith(("您好", "你好")):
+        return who
+    return f"{who}你好"
+
+
 def confirm_message(card: Card, questions: list[Question]) -> str:
-    who = card.requester.split("·")[0] if card.requester else "您"
     highs = [q for q in questions if q.impact == "高" and not q.answer.strip()]
     mids = [q for q in questions if q.impact != "高" and not q.answer.strip()]
-    lines = [f"{who}你好，关于「{card.title}」，开工前想和你确认几件事，确认清楚了我们就能给准确的排期：", ""]
+    lines = [f"{_salutation(card)}，关于「{card.title}」，开工前想和你确认几件事，确认清楚了我们就能给准确的排期：", ""]
     for i, q in enumerate(highs, 1):
         lines.append(f"{i}. {q.question}")
     if mids:

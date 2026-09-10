@@ -5,7 +5,7 @@ from __future__ import annotations
 import html
 import random
 
-from .. import config
+from .. import config, textutil
 from .intake import Card
 
 B = config.BRAND
@@ -72,16 +72,22 @@ def _report_or_page(card: Card, rng: random.Random, client_view: bool) -> str:
     by_product = "资管产品" in card.scope_objects or not card.symbols
     key = "产品" if by_product else "品种"
     keys = _PRODUCTS if by_product else (card.symbols or ["螺纹钢", "热轧卷板", "铁矿石"])
-    headers = [key] + ([f"较上一交易日变动"] if "变动" in " ".join(card.features) or "较上一" in " ".join(card.features) else []) + inds[:5]
+    blob = " ".join(card.features + card.raw_features + [card.title])
+    extra_cols = textutil.find_added_columns(blob)
+    headers: list[str] = [key]
+    for h in extra_cols + inds:
+        if h and h not in headers:
+            headers.append(h)
+    if any("变动" in f or "较上一" in f for f in card.features) and "较上一交易日变动" not in headers:
+        headers.insert(1, "较上一交易日变动")
+    headers = headers[:8]
     if client_view:
         headers = [h for h in headers if h not in ("集中度", "杠杆", "保证金占用")]
     rows = []
     for k in keys[:6]:
         r = [k]
-        if "较上一交易日变动" in headers:
-            r.append(_pct(rng, -1.5, 1.5))
-        for ind in headers[len(r):]:
-            if ind in ("净值", "单位净值"):
+        for ind in headers[1:]:
+            if ind in ("净值", "单位净值", "累计净值"):
                 r.append(f"{rng.uniform(0.9, 1.6):.4f}")
             elif ind in ("回撤",):
                 r.append(f"{rng.uniform(0.2, 6):.2f}%")
@@ -89,8 +95,12 @@ def _report_or_page(card: Card, rng: random.Random, client_view: bool) -> str:
                 r.append(f"{rng.uniform(5, 45):.1f}%")
             elif ind in ("基差", "价差"):
                 r.append(f"{rng.uniform(-120, 180):+.0f}")
-            elif ind in ("涨跌幅",):
-                r.append(_pct(rng))
+            elif ind in ("涨跌幅", "较上一交易日变动") or "变动" in ind:
+                r.append(_pct(rng, -1.5, 1.5))
+            elif "对标" in ind or "指数" in ind:
+                r.append(f"沪深300 {_pct(rng, -1.2, 1.2)}")
+            elif "盈亏" in ind or "超额" in ind:
+                r.append(_pct(rng, -2.5, 2.5))
             else:
                 r.append(f"{rng.uniform(10, 90):.1f}")
         rows.append(r)

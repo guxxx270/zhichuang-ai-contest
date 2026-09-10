@@ -20,7 +20,7 @@ streamlit run app.py
 - 命令行看全流程：`python run_demo.py 1`（1～4 为四个样例；请用上面虚拟环境里的 python）
 - 测试：`pytest -q tests`
 
-不配置 key 也能跑（**mock 模式**，规则引擎兜底）。要接公司 AI 平台：复制 `.env.example` 为 `.env`，填 `LLM_API_BASE / LLM_API_KEY / LLM_MODEL`（OpenAI 兼容接口）。key 由使用者自填，代码与仓库不含密钥。
+不配置 key 也能跑（**mock 模式**，规则引擎兜底）。开工默认只跑规则（毫秒级）。要用大模型润色：在页面**顶部**选模型、填写 **API Key**（仅当前会话有效），然后打开「开工时自动润色」，或开工后再点「模型润色」。Qoder 请选 **Cloud Agents** 并填 PAT；也可用硅基流动或自定义 OpenAI 兼容网关。
 
 ## 六项技能（v0.2 实现前五项，对账为二期）
 

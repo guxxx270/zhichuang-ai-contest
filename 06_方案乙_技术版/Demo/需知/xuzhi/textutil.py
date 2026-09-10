@@ -24,7 +24,8 @@ DEPARTMENTS: list[tuple[str, str]] = [
 USER_ROLES = ["投资经理", "研究员", "运营", "交易员", "风控", "客户经理", "合规", "领导", "客户", "投资者"]
 
 INDICATORS = ["单位净值", "累计净值", "净值", "回撤", "集中度", "杠杆", "保证金占用", "保证金", "风险度", "可用资金", "基差", "价差",
-              "升贴水", "涨跌停", "涨跌幅", "限仓", "持仓量", "成交量", "仓单", "库存", "追保", "资金缺口", "手续费", "VaR"]
+              "升贴水", "涨跌停", "涨跌幅", "限仓", "持仓量", "成交量", "仓单", "库存", "追保", "资金缺口", "手续费", "VaR",
+              "对标指数", "持仓盈亏", "超额收益", "跟踪误差"]
 
 DATA_SOURCE_RULES: list[tuple[str, str]] = [
     (r"行情|价格|涨跌|K线|走势|异动", "期货行情（行情服务 / 数据仓库日终）"),
@@ -89,6 +90,33 @@ def find_indicators(text: str) -> list[str]:
     found = [i for i in INDICATORS if i in text]
     # 去掉被更长词覆盖的（单位净值 vs 净值）
     return [i for i in found if not any(i != j and i in j for j in found)]
+
+
+_COL_PATTERNS = [
+    re.compile(r'(?:加一列|加一栏|增加一列|新增一列)[「"“]([^」"”]{1,24})[」"”]'),
+    re.compile(r'(?:加一列|加一栏|增加一列|新增一列)([^，。；;、\n]{1,24})'),
+    re.compile(r'新增([^，。；;、\n]{1,16})列'),
+    re.compile(r'增加([^，。；;、\n]{1,16})列'),
+]
+_NOT_COLUMNS = {"风险指标", "客户版", "一", "这个", "那个"}
+
+
+def find_added_columns(text: str) -> list[str]:
+    """从「加一列 / 新增××列」里抽出要出现在报表上的列名。"""
+    found: list[str] = []
+
+    def add(raw: str) -> None:
+        s = re.sub(r"^(把|把这|这一|这个)", "", raw.strip("「」\"“”' 　"))
+        s = re.sub(r"(也要|放进去|就行|就好|旁边).*$", "", s)
+        s = s.strip("的 ")
+        if len(s) < 2 or len(s) > 20 or s in _NOT_COLUMNS or s in found:
+            return
+        found.append(s)
+
+    for pat in _COL_PATTERNS:
+        for m in pat.finditer(text):
+            add(m.group(1))
+    return found
 
 
 def match_rules(text: str, rules: list[tuple[str, str]]) -> list[str]:

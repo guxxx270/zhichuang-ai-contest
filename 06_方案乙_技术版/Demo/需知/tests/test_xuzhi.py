@@ -12,7 +12,9 @@ SAMPLES = sorted(config.SAMPLES_DIR.glob("*.md"))
 
 @pytest.fixture(scope="module")
 def results():
-    return {p.stem[:2]: analyze(p.read_text(encoding="utf-8")) for p in SAMPLES}
+    from xuzhi.llm import LLM
+    llm = LLM(mode="mock")
+    return {p.stem[:2]: analyze(p.read_text(encoding="utf-8"), llm=llm) for p in SAMPLES}
 
 
 def test_knowledge_loads():
@@ -54,9 +56,10 @@ def test_estimate_ranges(results):
 
 
 def test_answers_change_outputs(results):
+    from xuzhi.llm import LLM
     a = results["01"]
     qid = next(q.id for q in a.questions if q.impact == "高")
-    b = analyze(a.raw_text, answers={qid: "以结算价为准，夜盘计入次日"})
+    b = analyze(a.raw_text, llm=LLM(mode="mock"), answers={qid: "以结算价为准，夜盘计入次日"})
     assert "✅" in b.spec.business_md and b.estimate.unanswered_high == a.estimate.unanswered_high - 1
 
 
@@ -73,10 +76,19 @@ def test_prototype_html(results):
         assert a.prototype_html.startswith("<!doctype html>") and a.card.title in a.prototype_html
     assert "追加资金" in results["04"].prototype_html
     assert "提醒设置" in results["03"].prototype_html
+    assert "较上一交易日变动" in results["01"].prototype_html
+
+
+def test_added_column_in_prototype():
+    from xuzhi.llm import LLM
+    a = analyze("净值日报新增对标指数列，放在单位净值旁边，盘后给投研看。", llm=LLM(mode="mock"))
+    assert "对标指数" in a.card.indicators
+    assert "对标指数" in a.prototype_html
 
 
 def test_free_text_works():
-    a = analyze("能不能做个页面，每天看各产品的保证金占用和风险度，超过 80% 提醒我，手机也要能看")
+    from xuzhi.llm import LLM
+    a = analyze("能不能做个页面，每天看各产品的保证金占用和风险度，超过 80% 提醒我，手机也要能看", llm=LLM(mode="mock"))
     assert a.card.req_type == "页面" and "保证金占用" in a.card.indicators and "手机端可看" in a.card.nonfunctional
     assert a.estimate.mid > 0 and len(a.questions) >= 6
 
