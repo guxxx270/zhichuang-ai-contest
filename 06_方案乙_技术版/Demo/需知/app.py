@@ -199,13 +199,13 @@ with opt_l:
         "开工时让模型自动润色（约 20～30 秒）",
         value=False,
         key="auto_polish",
-        help="默认关闭：开工只跑规则。打开后展开选用模型，点开工才会调用。不开也可以先开工，再到「问清」选模型润色。",
+        help="默认关闭：开工只跑规则。打开后开工时调用模型；成功后问清里不再出「模型润色」，避免调两次。不开则开工后到「问清」再润色。",
     )
 with opt_r:
     if auto_polish:
-        st.caption("已打开：请在下方选用模型并填 Key。点「需知，开工」才会调用。")
+        st.caption("已打开：点开工会调用下方模型。润色成功后，「问清」里不再出润色按钮。")
     else:
-        st.caption("开工只跑规则。若要调模型：打开左侧开关（开工时润色），或开工后到「问清」再选模型润色。")
+        st.caption("开工只跑规则。要调模型：打开左侧开关让开工商润色，或开工后到「问清」点「模型润色」（两处二选一）。")
 
 model_box = None
 if auto_polish:
@@ -308,7 +308,7 @@ with tabs[0]:
             else:
                 polish_box = st.container(border=True)
                 with polish_box:
-                    st.markdown("**模型润色** — 开工已出规则初稿。在这里选用模型，与「开工时自动润色」是同一套配置，点按钮才调用。")
+                    st.markdown("**模型润色** — 开工已出规则初稿。在这里选用模型后点按钮才调用。")
                     preset_label, mode_sel, provider_id, api_base_sel, model_sel = _render_model_preset()
                 with st.form("xuzhi_polish"):
                     with polish_box:
