@@ -71,7 +71,7 @@ def detect_source(text: str, hint: str = "") -> str:
         return m.group(1)
     if hint:
         return hint
-    for k, v in (("微信", "企业微信"), ("邮件", "邮件"), ("纪要", "会议纪要"), ("需求说明", "需求单")):
+    for k, v in (("微信", "企业微信"), ("邮件", "邮件"), ("纪要", "会议纪要"), ("需求说明", "需求单"), ("口述", "口述")):
         if k in text:
             return v
     return "粘贴文本"

@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset=utf-8 />
+  <style>
+    body { margin: 0; font-family: -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif; background: transparent; color: #1F2937; }
+    .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    button {
+      background: #14367A; color: #fff; border: none; border-radius: 8px; padding: 7px 14px;
+      font-size: 13px; cursor: pointer;
+    }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    button.rec { background: #E07A1F; }
+    .status { font-size: 12px; color: #6b7280; flex: 1; min-width: 160px; }
+  </style>
+</head>
+<body>
+  <div class='row'>
+    <button id='btn' type='button'>开始口述</button>
+    <span class='status' id='status'>对着麦克风说需求，识别后写入右边原话框</span>
+  </div>
+  <script>
+    function send(type, data) {
+      window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type: type }, data || {}), '*');
+    }
+    send('streamlit:componentReady', { apiVersion: 1 });
+    function setHeight() {
+      send('streamlit:setFrameHeight', { height: Math.max(44, document.documentElement.scrollHeight) });
+    }
+    window.addEventListener('load', setHeight);
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const btn = document.getElementById('btn');
+    const status = document.getElementById('status');
+    const TERMS = ['净值日报','对标指数','单位净值','累计净值','沪深300','中证500','中证1000','限仓','脱敏','客户版','回撤','集中度','杠杆','保证金','基差','升贴水','日终','结算后','企业微信'];
+    let rec = null, listening = false, acc = '';
+    function score(t) {
+      let s = 0;
+      for (let i = 0; i < TERMS.length; i++) if ((t || '').indexOf(TERMS[i]) >= 0) s += TERMS[i].length;
+      return s;
+    }
+    function pick(result) {
+      let best = result[0].transcript, bestS = -1;
+      for (let i = 0; i < result.length; i++) {
+        const t = result[i].transcript || '';
+        const s = score(t) + (result[i].confidence || 0);
+        if (s > bestS) { bestS = s; best = t; }
+      }
+      return best;
+    }
+    function readParentRaw() {
+      try {
+        const doc = window.parent.document;
+        const areas = doc.querySelectorAll('textarea');
+        for (let i = 0; i < areas.length; i++) {
+          const ph = areas[i].placeholder || '';
+          const lab = areas[i].getAttribute('aria-label') || '';
+          if (ph.indexOf('净值日报') >= 0 || lab.indexOf('原话') >= 0) return areas[i].value;
+        }
+        const keyed = doc.querySelector('[class*="st-key-raw_text"] textarea');
+        if (keyed) return keyed.value;
+      } catch (e) {}
+      return null;
+    }
+    let boxAtStart = null;
+    function emit(text) {
+      const t = (text || '').replace(/\s+/g, ' ').trim();
+      if (!t) return;
+      const live = readParentRaw();
+      const box = (typeof live === 'string') ? live : boxAtStart;
+      send('streamlit:setComponentValue', {
+        value: {
+          text: t,
+          ts: Date.now(),
+          box: (typeof box === 'string') ? box : '',
+          has_box: typeof box === 'string' ? 1 : 0
+        }
+      });
+    }
+    if (!SR) {
+      status.textContent = '当前浏览器不支持口述，请用 Edge / Chrome，或改为粘贴文字。';
+      btn.disabled = true;
+    } else {
+      btn.onclick = function () {
+        if (listening) {
+          try { rec.stop(); } catch (e) {}
+          return;
+        }
+        rec = new SR();
+        boxAtStart = readParentRaw();
+        rec.lang = 'zh-CN';
+        rec.continuous = true;
+        rec.interimResults = true;
+        rec.maxAlternatives = 3;
+        acc = '';
+        rec.onresult = function (e) {
+          let interim = '';
+          for (let i = e.resultIndex; i < e.results.length; i++) {
+            const r = e.results[i];
+            if (r.isFinal) acc += pick(r);
+            else interim += r[0].transcript;
+          }
+          status.textContent = (acc + interim) || '正在听…';
+          setHeight();
+        };
+        rec.onerror = function (e) {
+          const map = {
+            'not-allowed': '未获得麦克风权限，请在浏览器地址栏允许后重试。',
+            'no-speech': '没有听清，请再试一次。',
+            'audio-capture': '找不到麦克风。',
+            'network': '语音识别需要网络（浏览器语音引擎）。'
+          };
+          status.textContent = map[e.error] || ('识别中断：' + e.error);
+          listening = false;
+          btn.textContent = '开始口述';
+          btn.classList.remove('rec');
+        };
+        rec.onend = function () {
+          listening = false;
+          btn.textContent = '开始口述';
+          btn.classList.remove('rec');
+          if (acc.trim()) {
+            emit(acc);
+            status.textContent = '已写入原话，可继续口述或点开工。';
+          } else if (!status.textContent.startsWith('未获得') && !status.textContent.startsWith('找不到')) {
+            status.textContent = '没有听清，请再试一次。';
+          }
+        };
+        rec.start();
+        listening = true;
+        btn.textContent = '结束口述';
+        btn.classList.add('rec');
+        status.textContent = '正在听，请说需求…点「结束口述」接到原话框当前内容后面。';
+      };
+    }
+  </script>
+</body>
+</html>

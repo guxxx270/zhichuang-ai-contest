@@ -9,10 +9,12 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from xuzhi import config, knowledge
+from xuzhi.asr import correct_domain_speech
 from xuzhi.ledger import Ledger
 from xuzhi.llm import LLM
 from xuzhi.pipeline import analyze
 from xuzhi.pipeline.prototype import render as render_proto
+from xuzhi.speech import append_dictation, dictation_bar
 
 B = config.BRAND
 
@@ -46,6 +48,7 @@ st.markdown(f"""
 .xz-card {{ background:#fff; border:1px solid var(--xz-mist); border-radius:12px; padding:14px 16px; margin-bottom:10px; }}
 .xz-foot {{ color:#6b7280; font-size:12px; margin-top:6px; }}
 div[data-testid="stTabs"] button {{ font-size:15px; }}
+iframe[title="xuzhi_dictation"] {{ border: none !important; }}
 </style>""", unsafe_allow_html=True)
 
 
@@ -161,6 +164,19 @@ def _render_model_secrets(
     return api_key_sel, api_base_sel, model_sel, backend_sel, extra
 
 
+def _commit_dictation(chunk: str, box: str | None = None) -> None:
+    """把新口述接在原话框当前内容后面；box 为框里现有文字（含已删空）。"""
+    chunk = correct_domain_speech(chunk or "")
+    if not chunk:
+        return
+    prev = box if box is not None else st.session_state.get("raw_composed", "")
+    composed = append_dictation(prev, chunk)
+    st.session_state.raw_composed = composed
+    st.session_state.speech_rev = st.session_state.get("speech_rev", 0) + 1
+    st.session_state.sample = "（粘贴自己的）"
+    st.session_state.src = "口述"
+
+
 ledger = get_ledger()
 samples = sorted(config.SAMPLES_DIR.glob("*.md"))
 stats = ledger.stats()
@@ -194,7 +210,7 @@ st.write("")
 
 opt_l, opt_r = st.columns([2, 3])
 with opt_l:
-    st.markdown("**① 收需求** — 微信、纪要、邮件、Word，原话扔进来就行")
+    st.markdown("**① 收需求** — 微信、纪要、邮件、Word，原话扔进来就行，也可口述")
     auto_polish = st.toggle(
         "开工时让模型自动润色（约 20～30 秒）",
         value=False,
@@ -214,6 +230,20 @@ if auto_polish:
         st.markdown("**选用模型**")
         preset_label, mode_sel, provider_id, api_base_sel, model_sel = _render_model_preset()
 
+voice_l, voice_r = st.columns([2, 3])
+with voice_l:
+    st.caption("口述请用 Edge / Chrome，允许麦克风。说完点「结束口述」，接到原话框里现在剩下的文字后面。")
+with voice_r:
+    heard = dictation_bar()
+    if isinstance(heard, dict):
+        ts = heard.get("ts")
+        chunk = (heard.get("text") or "").strip()
+        if ts and chunk and ts != st.session_state.get("speech_last_ts"):
+            st.session_state.speech_last_ts = ts
+            box = (heard.get("box") or "") if heard.get("has_box") else None
+            _commit_dictation(chunk, box)
+            st.rerun()
+
 with st.form("xuzhi_go"):
     if auto_polish and model_box is not None:
         with model_box:
@@ -229,15 +259,25 @@ with st.form("xuzhi_go"):
         client = st.toggle("原型出客户版（脱敏）", value=False, key="client")
     with c2:
         default_text = next((p.read_text(encoding="utf-8") for p in samples if p.stem == choice), "")
-        text = st.text_area("原话", value=default_text, height=190, placeholder="例如：净值日报能不能加一列……")
+        if choice == "（粘贴自己的）":
+            default_text = st.session_state.get("raw_composed", "") or default_text
+        text = st.text_area(
+            "原话",
+            value=default_text,
+            height=190,
+            placeholder="例如：净值日报能不能加一列……也可点上方「开始口述」",
+            key=f"raw_text_{st.session_state.get('speech_rev', 0)}",
+        )
         if auto_polish:
-            st.caption("已打开自动润色：点开工会调用上方模型（约 20～30 秒）。选了样例会用该样例原文。")
+            st.caption("已打开自动润色：点开工会调用上方模型（约 20～30 秒）。选了样例会用该样例原文。口述请选「粘贴自己的」。")
         else:
-            st.caption("开工只跑规则，不调模型。选了样例会用该样例原文；要自己改字请选「粘贴自己的」。")
+            st.caption("开工只跑规则，不调模型。选了样例会用该样例原文；口述或手改请选「粘贴自己的」。")
         go = st.form_submit_button("📋 需知，开工", type="primary")
 
 llm = None
 if go:
+    if choice == "（粘贴自己的）":
+        st.session_state.raw_composed = text
     if choice != "（粘贴自己的）":
         loaded = next((p.read_text(encoding="utf-8") for p in samples if p.stem == choice), "")
         if loaded:
