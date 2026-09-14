@@ -95,7 +95,8 @@ def _render_model_preset() -> tuple[str, str, str, str, str]:
         return "mock", "mock", "mock", "", ""
     prev = st.session_state.get("model_preset")
     if prev not in labels:
-        st.session_state.model_preset = labels[0]
+        env_pick = next((p[0] for p in presets if config.LLM_MODEL and p[4] == config.LLM_MODEL and p[3] == config.LLM_API_BASE), None)
+        st.session_state.model_preset = env_pick or labels[0]
     preset_label = st.selectbox("选用模型", labels, key="model_preset")
     return next(p for p in presets if p[0] == preset_label)
 
@@ -110,12 +111,15 @@ def _render_model_secrets(
     if mode_sel != "api":
         return api_key_sel, api_base_sel, model_sel, backend_sel, extra
 
+    key_state = f"api_key_input_{provider_id}"
+    if key_state not in st.session_state and config.LLM_API_KEY and api_base_sel and api_base_sel == config.LLM_API_BASE:
+        st.session_state[key_state] = config.LLM_API_KEY      # 本机 .env 同一网关的 key 自动带出，省得演示时重复输入；仍不进仓库
     api_key_sel = st.text_input(
         f"API Key（{provider_id}）",
         type="password",
         key=f"api_key_input_{provider_id}",
         placeholder="Qoder 请填 PAT（pt-…）；其它网关填 sk-…",
-        help="不会写入磁盘或仓库。点开工（且已打开自动润色）或点「模型润色」才会调用。",
+        help="不会写入仓库；若本机 .env 配了同一网关会自动带出。点开工（且已打开自动润色）或点「模型润色」才会调用。",
     ).strip()
     st.session_state.api_keys[provider_id] = api_key_sel
 
@@ -233,6 +237,7 @@ if auto_polish:
 voice_l, voice_r = st.columns([2, 3])
 with voice_l:
     st.caption("口述请用 Edge / Chrome，允许麦克风。说完点「结束口述」，接到原话框里现在剩下的文字后面。")
+    st.caption("⚠️ 浏览器口述会把语音送到浏览器厂商的语音服务（Google / Microsoft），**含客户姓名、账号的内容请勿口述**；隐盾只脱敏文字，管不到语音。正式环境应接公司语音服务或关闭口述。")
 with voice_r:
     heard = dictation_bar()
     if isinstance(heard, dict):
