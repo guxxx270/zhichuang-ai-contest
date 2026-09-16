@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import html
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -10,21 +11,50 @@ import streamlit.components.v1 as components
 
 from xuzhi import config, knowledge
 from xuzhi.asr import correct_domain_speech
+from xuzhi.drafts import (
+    Draft,
+    RepoBundle,
+    draft_from_bytes,
+    draft_usability_hints,
+    load_urls,
+    materials_report,
+    summarize,
+    visual_drafts,
+)
 from xuzhi.ledger import Ledger
 from xuzhi.llm import LLM
 from xuzhi.pipeline import analyze
-from xuzhi.pipeline.prototype import render as render_proto
+from xuzhi.pipeline.prototype import apply_prototype_view, render as render_proto
 from xuzhi.speech import append_dictation, dictation_bar
 
 B = config.BRAND
 
 
+def _sandbox_preview_html(html_src: str) -> str:
+    """预览沙箱：外链不跳走。若出样已带 data-xz-inert 交互脚本，则不再重复注入。"""
+    page = html_src or ""
+    page = re.sub(r"""\s(srcdoc)\s*=\s*(['"])(.*?)\2""", "", page, flags=re.I)
+    page = re.sub(r"<form\b", '<form onsubmit="return false;"', page, flags=re.I)
+    if "data-xz-inert" in page or "xz-inert-toast" in page:
+        # 出样页已处理：界外可点不可进；此处只挡表单
+        return page
+    page = re.sub(r"""\shref\s*=\s*(['"])(.*?)\1""", ' href="#"', page, flags=re.I)
+    guard = (
+        "<script>(function(){document.addEventListener('click',function(e){"
+        "var a=e.target&&e.target.closest&&e.target.closest('a');"
+        "if(a){e.preventDefault();e.stopPropagation();}},true);"
+        "document.addEventListener('submit',function(e){e.preventDefault();},true);"
+        "})();</script>"
+    )
+    if re.search(r"</body\s*>", page, flags=re.I):
+        return re.sub(r"</body\s*>", guard + "</body>", page, count=1, flags=re.I)
+    return page + guard
+
+
 def _iframe(html_src: str, height: int) -> None:
-    """新旧 Streamlit 兼容：≥1.60 用 st.iframe，否则 components.html。"""
-    if hasattr(st, "iframe"):
-        st.iframe(html_src, height=height)
-    else:
-        components.html(html_src, height=height, scrolling=True)
+    """预览 HTML：必须用 components.html（srcdoc）。勿用 st.iframe——它把参数当 URL，
+    原型里一点链接就会跳到需知本页。"""
+    components.html(_sandbox_preview_html(html_src or ""), height=height, scrolling=True)
 
 st.set_page_config(page_title=f"{config.PRODUCT_NAME} · 需求分析智能体", page_icon="📋", layout="wide")
 st.markdown(f"""
@@ -69,7 +99,7 @@ def build_llm(mode: str, model: str, api_base: str, api_key: str, backend: str =
             extra=extra,
         )
     except Exception as e:
-        st.warning(f"模型初始化失败，已退回 mock：{e}")
+        st.warning(f"模型初始化失败，已回退规则引擎：{e}")
         return LLM(mode="mock")
 
 
@@ -82,29 +112,116 @@ def _preset_row(p: tuple) -> tuple[str, str, str, str, str]:
     return label, mode, "legacy", "", model
 
 
-def _api_presets() -> list[tuple[str, str, str, str, str]]:
-    rows = [_preset_row(tuple(p)) for p in getattr(config, "LLM_PRESETS", [])]
-    return [p for p in rows if p[1] == "api"]
-
-
 def _render_model_preset() -> tuple[str, str, str, str, str]:
-    """选用模型（不含 Key）。须在 form 外，换模型才能立刻展开对应网关字段。"""
-    presets = _api_presets()
-    labels = [p[0] for p in presets]
-    if not labels:
-        return "mock", "mock", "mock", "", ""
+    """选用模型（不含 Key）。页面不展示 mock；未填 Key 时开工自动回退规则。"""
+    all_presets = [_preset_row(tuple(p)) for p in getattr(config, "LLM_PRESETS", [])]
+    api_presets = [p for p in all_presets if p[1] == "api"]
+    if not api_presets:
+        st.warning("未配置可用模型预设，开工将只跑规则引擎。")
+        return "规则引擎", "mock", "mock", "", ""
+    labels = [p[0] for p in api_presets]
     prev = st.session_state.get("model_preset")
     if prev not in labels:
-        env_pick = next((p[0] for p in presets if config.LLM_MODEL and p[4] == config.LLM_MODEL and p[3] == config.LLM_API_BASE), None)
+        env_pick = next(
+            (
+                p[0]
+                for p in api_presets
+                if config.LLM_API_BASE and p[3] == config.LLM_API_BASE
+            ),
+            None,
+        )
         st.session_state.model_preset = env_pick or labels[0]
     preset_label = st.selectbox("选用模型", labels, key="model_preset")
-    return next(p for p in presets if p[0] == preset_label)
+    return next(p for p in api_presets if p[0] == preset_label)
+
+
+def _render_live_model_pick(
+    *,
+    provider_id: str,
+    api_base: str,
+    api_key: str,
+    fetch_fn,
+    filter_fn,
+    sentinel: str,
+    select_label: str,
+    search_help: str,
+) -> str:
+    """填 Key 后实时拉 /models，搜索过滤；目录为空时可手填。"""
+    f1, f2 = st.columns([3, 1])
+    with f1:
+        q = st.text_input(
+            "搜索模型",
+            key=f"{provider_id}_model_filter",
+            placeholder="在实时目录中过滤",
+            help=search_help,
+        )
+    with f2:
+        st.write("")
+        st.write("")
+        refresh = st.button("重新拉取", key=f"{provider_id}_refresh_models")
+
+    cache_key = (provider_id, api_base, api_key)
+    cat_k, note_k, ck_k, pick_k = (
+        f"{provider_id}_models_catalog",
+        f"{provider_id}_models_note",
+        f"{provider_id}_models_cache_key",
+        f"{provider_id}_model_pick",
+    )
+    force = refresh or st.session_state.pop(f"{provider_id}_models_refresh", False)
+    if force or st.session_state.get(ck_k) != cache_key or cat_k not in st.session_state:
+        with st.spinner("正在拉取实时模型目录…"):
+            catalog, note = fetch_fn(api_base, api_key)
+        st.session_state[cat_k] = catalog
+        st.session_state[note_k] = note
+        st.session_state[ck_k] = cache_key
+    catalog = list(st.session_state.get(cat_k) or [])
+    note = st.session_state.get(note_k) or ""
+    filtered = filter_fn(catalog, q)
+    if not catalog:
+        st.warning(note or "实时目录为空。")
+        return st.text_input(
+            "模型 ID（目录为空时手填）",
+            key=f"{provider_id}_model_custom_empty",
+            placeholder="仅当接口暂不可用时手填",
+        ).strip()
+    label_map = dict(filtered)
+    options = [mid for mid, _ in filtered]
+    if not options:
+        st.info(f"实时目录里没有匹配「{q.strip()}」的项。清空搜索或点「重新拉取」。")
+        options = [sentinel]
+        label_map[sentinel] = "（无匹配）可手填模型 ID"
+    else:
+        options = options + [sentinel]
+        label_map[sentinel] = "手填其它模型 ID"
+    prev = st.session_state.get(pick_k)
+    if prev in options:
+        idx = options.index(prev)
+    elif config.LLM_MODEL in options:
+        idx = options.index(config.LLM_MODEL)
+    else:
+        idx = 0
+    chosen = st.selectbox(
+        select_label,
+        options,
+        index=min(idx, max(0, len(options) - 1)),
+        key=pick_k,
+        format_func=lambda mid: label_map.get(mid, mid),
+    )
+    if note:
+        st.caption(note + f"　·　过滤后 {len(filtered)}/{len(catalog)}")
+    if chosen == sentinel:
+        return st.text_input(
+            "模型 ID",
+            key=f"{provider_id}_model_custom",
+            placeholder="与网关 /models 返回的 id 一致",
+        ).strip()
+    return chosen
 
 
 def _render_model_secrets(
     mode_sel: str, provider_id: str, api_base_sel: str, model_sel: str
 ) -> tuple[str, str, str, str, dict[str, str]]:
-    """Key / 自定义网关 / Qoder。放进 form 里，避免敲 Key 就整页刷新。"""
+    """Key / 自定义网关 / Qoder。须放在 form 外，填 PAT 才能立刻拉模型目录。"""
     extra: dict[str, str] = {}
     backend_sel = "openai"
     api_key_sel = ""
@@ -113,15 +230,20 @@ def _render_model_secrets(
 
     key_state = f"api_key_input_{provider_id}"
     if key_state not in st.session_state and config.LLM_API_KEY and api_base_sel and api_base_sel == config.LLM_API_BASE:
-        st.session_state[key_state] = config.LLM_API_KEY      # 本机 .env 同一网关的 key 自动带出，省得演示时重复输入；仍不进仓库
+        st.session_state[key_state] = config.LLM_API_KEY
     api_key_sel = st.text_input(
         f"API Key（{provider_id}）",
         type="password",
         key=f"api_key_input_{provider_id}",
         placeholder="Qoder 请填 PAT（pt-…）；其它网关填 sk-…",
-        help="不会写入仓库；若本机 .env 配了同一网关会自动带出。点开工（且已打开自动润色）或点「模型润色」才会调用。",
+        help="不会写入仓库。填 Key 后会向网关 GET /models 拉取当前可用模型，不使用本地写死列表。",
     ).strip()
     st.session_state.api_keys[provider_id] = api_key_sel
+
+    live_compat = getattr(config, "LIVE_OPENAI_PROVIDERS", {}) or {}
+    live_openai = provider_id in live_compat
+    live_qoder = provider_id in ("qoder-cloud", "qoder-cloud-intl")
+    provider_label = live_compat.get(provider_id, provider_id)
 
     if provider_id == "custom" or model_sel == "__custom__":
         c_base, c_model = st.columns(2)
@@ -139,29 +261,69 @@ def _render_model_secrets(
             model_sel = c_model.text_input(
                 "模型 ID",
                 key=f"custom_model_{provider_id}",
-                placeholder="例如 deepseek-ai/DeepSeek-V3",
+                placeholder="可先填 Key，在上方网关用 /models 核对 id",
             ).strip()
-    elif provider_id not in ("qoder-cloud", "qoder-cloud-intl"):
+    elif not live_openai and not live_qoder:
         st.caption(f"网关：`{api_base_sel}`　·　模型：`{model_sel}`")
 
-    if provider_id in ("qoder-cloud", "qoder-cloud-intl"):
-        backend_sel = "qoder-cloud"
-        from xuzhi.qoder_cloud import CUSTOM_MODEL_SENTINEL, fallback_models
-        catalog = fallback_models(api_base_sel)
-        label_map = dict(catalog)
-        options = [mid for mid, _ in catalog] + [CUSTOM_MODEL_SENTINEL]
-        label_map[CUSTOM_MODEL_SENTINEL] = "自定义模型 ID"
-        chosen = st.selectbox(
-            "Qoder 模型",
-            options,
-            index=0,
-            key="qoder_model_pick",
-            format_func=lambda mid: label_map.get(mid, mid),
-        )
-        if chosen == CUSTOM_MODEL_SENTINEL:
-            model_sel = st.text_input("模型 ID", key="qoder_model_custom", placeholder="例如 qwen3.7-plus / ultimate").strip()
+    if live_openai:
+        from xuzhi.llm import list_openai_models
+        from xuzhi.qoder_cloud import CUSTOM_MODEL_SENTINEL, filter_model_catalog
+
+        # Fable 等网关地址可能随环境变化：允许改 Base，仍实时拉 /models
+        if provider_id == "fable":
+            base_key = f"live_api_base_{provider_id}"
+            if base_key not in st.session_state:
+                st.session_state[base_key] = api_base_sel or ""
+            api_base_sel = st.text_input(
+                "API Base URL（OpenAI 兼容）",
+                key=base_key,
+                placeholder="https://your-fable-host/v1",
+                help="须含 /v1；填 Key 后请求 GET /models。可用环境变量 FABLE_API_BASE 作默认。",
+            ).strip()
         else:
-            model_sel = chosen
+            st.caption(f"网关：`{api_base_sel}`　·　模型列表来自实时 GET /models")
+
+        if not api_key_sel:
+            st.info(f"填写 API Key 后将实时拉取{provider_label}当前可用模型（不使用本地写死名单）。")
+            model_sel = ""
+        elif not (api_base_sel or "").strip():
+            st.warning("请先填写 API Base URL。")
+            model_sel = ""
+        else:
+            model_sel = _render_live_model_pick(
+                provider_id=provider_id,
+                api_base=api_base_sel,
+                api_key=api_key_sel,
+                fetch_fn=list_openai_models,
+                filter_fn=filter_model_catalog,
+                sentinel=CUSTOM_MODEL_SENTINEL,
+                select_label=f"{provider_label}模型（实时）",
+                search_help="列表来自 GET /v1/models；下架后刷新即消失。",
+            )
+
+    if live_qoder:
+        backend_sel = "qoder-cloud"
+        from xuzhi.qoder_cloud import (
+            CUSTOM_MODEL_SENTINEL,
+            filter_model_catalog,
+            list_qoder_models,
+        )
+
+        if not api_key_sel:
+            st.info("填写 PAT 后将实时拉取账号模型目录（不使用本地兜底列表）。")
+            model_sel = ""
+        else:
+            model_sel = _render_live_model_pick(
+                provider_id=provider_id,
+                api_base=api_base_sel,
+                api_key=api_key_sel,
+                fetch_fn=list_qoder_models,
+                filter_fn=filter_model_catalog,
+                sentinel=CUSTOM_MODEL_SENTINEL,
+                select_label="Qoder 模型（实时）",
+                search_help="列表来自官方 GET /models，与 PyCharm 一致；模型下架后刷新即消失。",
+            )
         e1, e2 = st.columns(2)
         extra["environment_id"] = e1.text_input("Environment ID（可空=自动）", key="qoder_env_id", placeholder="env_…").strip()
         extra["agent_id"] = e2.text_input("Agent ID（可空=自动）", key="qoder_agent_id", placeholder="agent_…").strip()
@@ -181,24 +343,139 @@ def _commit_dictation(chunk: str, box: str | None = None) -> None:
     st.session_state.src = "口述"
 
 
+def _collect_drafts(
+    uploads,
+    url_entries: list[dict] | None,
+    use_sample: bool,
+) -> tuple[list[Draft], list[RepoBundle], list[str]]:
+    drafts: list[Draft] = []
+    repos: list[RepoBundle] = []
+    errors: list[str] = []
+    if uploads:
+        for f in uploads:
+            try:
+                drafts.append(draft_from_bytes(f.name, f.getvalue(), source="upload"))
+            except Exception as e:
+                errors.append(f"未读到：{getattr(f, 'name', 'upload')} — {e}")
+    if url_entries:
+        more_d, more_r, err = load_urls(entries=url_entries, git_only=True)
+        drafts.extend(more_d)
+        repos.extend(more_r)
+        errors.extend(err)
+    if use_sample and not drafts and not repos:
+        sample = config.DATA_DIR / "drafts" / "净值日报_示例底稿.html"
+        if sample.exists():
+            drafts.append(draft_from_bytes(sample.name, sample.read_bytes(), source="sample"))
+    seen: set[str] = set()
+    uniq: list[Draft] = []
+    for d in drafts:
+        key = d.name + "|" + str(len(d.html))
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq.append(d)
+    return uniq[:12], repos, errors
+
+
+def _ensure_draft_link_rows() -> list[dict]:
+    """会话内维护可增减的链接行。"""
+    if "draft_link_rows" not in st.session_state:
+        # 兼容旧「整段文本」：拆成多行
+        legacy = (st.session_state.get("draft_urls") or "").strip()
+        rows = []
+        if legacy:
+            for i, line in enumerate(legacy.splitlines()):
+                line = line.strip()
+                if line:
+                    rows.append({"id": i})
+                    st.session_state[f"draft_link_url_{i}"] = line
+        if not rows:
+            rows = [{"id": 0}]
+        st.session_state.draft_link_rows = rows
+        st.session_state.draft_link_next_id = max((r["id"] for r in rows), default=-1) + 1
+    return st.session_state.draft_link_rows
+
+
+def _read_draft_link_entries() -> list[dict]:
+    entries = []
+    for row in st.session_state.get("draft_link_rows") or []:
+        rid = row["id"]
+        url = (st.session_state.get(f"draft_link_url_{rid}") or "").strip()
+        if not url:
+            continue
+        entries.append(
+            {
+                "url": url,
+                "token": (st.session_state.get(f"draft_link_tok_{rid}") or "").strip(),
+                "username": (st.session_state.get(f"draft_link_user_{rid}") or "").strip(),
+            }
+        )
+    return entries
+
+
+def _render_draft_link_rows() -> None:
+    rows = _ensure_draft_link_rows()
+    st.caption("只填 Git 仓库。每条可单独带 Token（可选）；公有仓留空即可。")
+    for idx, row in enumerate(list(rows)):
+        rid = row["id"]
+        c1, c2, c3, c4 = st.columns([3.2, 2.0, 1.5, 0.6])
+        with c1:
+            st.text_input(
+                f"Git 仓库 {idx + 1}",
+                key=f"draft_link_url_{rid}",
+                placeholder="https://…/repo.git",
+                label_visibility="collapsed" if idx else "visible",
+            )
+        with c2:
+            st.text_input(
+                "Token（可选）",
+                type="password",
+                key=f"draft_link_tok_{rid}",
+                placeholder="私有仓 Token",
+                label_visibility="collapsed" if idx else "visible",
+                help="仅本条仓库使用；不填则匿名拉取。",
+            )
+        with c3:
+            st.text_input(
+                "用户名（可选）",
+                key=f"draft_link_user_{rid}",
+                placeholder="多数可空",
+                label_visibility="collapsed" if idx else "visible",
+                help="Gitee / 部分自建仓需要；默认 oauth2 / x-access-token。",
+            )
+        with c4:
+            label = "删" if len(rows) > 1 else " "
+            if st.button(label, key=f"draft_link_del_{rid}", disabled=len(rows) <= 1):
+                st.session_state.draft_link_rows = [r for r in rows if r["id"] != rid]
+                for suffix in ("url", "tok", "user"):
+                    st.session_state.pop(f"draft_link_{suffix}_{rid}", None)
+                st.rerun()
+    b1, b2 = st.columns([1, 4])
+    with b1:
+        if st.button("＋添加仓库", key="draft_link_add"):
+            nid = int(st.session_state.get("draft_link_next_id", len(rows)))
+            st.session_state.draft_link_rows = list(rows) + [{"id": nid}]
+            st.session_state.draft_link_next_id = nid + 1
+            st.rerun()
+    with b2:
+        st.caption("网页请左侧上传 HTML；Token 仅会话内使用。")
+
+
 ledger = get_ledger()
 samples = sorted(config.SAMPLES_DIR.glob("*.md"))
 stats = ledger.stats()
 if "api_keys" not in st.session_state:
     st.session_state.api_keys = {}
 
-preset_label = "mock · 规则引擎（不调 API）"
-mode_sel, provider_id, api_base_sel, model_sel = "mock", "mock", "", ""
+preset_label = ""
+mode_sel, provider_id, api_base_sel, model_sel = "api", "", "", ""
 backend_sel, extra, api_key_sel = "openai", {}, ""
 
-_auto_hint = bool(st.session_state.get("auto_polish"))
 _picked = st.session_state.get("model_preset") or ""
-if _auto_hint and _picked:
-    _status = f"🟠 已打开自动润色 · 开工将调用 {_picked}"
-elif _auto_hint:
-    _status = "🟠 已打开自动润色 · 请选用模型"
+if _picked:
+    _status = f"🟠 开工将调用模型 · {_picked}（未填 Key 则走规则）"
 else:
-    _status = "🟡 开工只跑规则，不调模型"
+    _status = "🟠 请选用模型并填 Key；未填 Key 时走规则引擎"
 st.markdown(f"""
 <div class="xz-hero">
   <h1>📋 {config.PRODUCT_NAME} <span style="font-size:14px;opacity:.8;letter-spacing:0">{config.PRODUCT_EN} · 需求分析智能体</span></h1>
@@ -212,27 +489,15 @@ for col, n, l in ((k[0], f"{stats['count']} 份", "已分析需求"), (k[1], f"{
     col.markdown(f'<div class="xz-kpi"><div class="n">{n}</div><div class="l">{l}</div></div>', unsafe_allow_html=True)
 st.write("")
 
-opt_l, opt_r = st.columns([2, 3])
-with opt_l:
-    st.markdown("**① 收需求** — 微信、纪要、邮件、Word，原话扔进来就行，也可口述")
-    auto_polish = st.toggle(
-        "开工时让模型自动润色（约 20～30 秒）",
-        value=False,
-        key="auto_polish",
-        help="默认关闭：开工只跑规则。打开后开工时调用模型；成功后问清里不再出「模型润色」，避免调两次。不开则开工后到「问清」再润色。",
+st.markdown("**① 收需求** — 微信、纪要、邮件、Word，原话扔进来就行，也可口述；开工调用下方模型，未填 Key 时自动走规则")
+model_box = st.container(border=True)
+with model_box:
+    st.markdown("**选用模型**")
+    preset_label, mode_sel, provider_id, api_base_sel, model_sel = _render_model_preset()
+    st.caption("开工调用所选模型。未填 API Key 时自动用规则引擎出初稿，可稍后在「问清」补 Key 再润色。")
+    api_key_sel, api_base_sel, model_sel, backend_sel, extra = _render_model_secrets(
+        mode_sel, provider_id, api_base_sel, model_sel
     )
-with opt_r:
-    if auto_polish:
-        st.caption("已打开：点开工会调用下方模型。润色成功后，「问清」里不再出润色按钮。")
-    else:
-        st.caption("开工只跑规则。要调模型：打开左侧开关让开工商润色，或开工后到「问清」点「模型润色」（两处二选一）。")
-
-model_box = None
-if auto_polish:
-    model_box = st.container(border=True)
-    with model_box:
-        st.markdown("**选用模型**")
-        preset_label, mode_sel, provider_id, api_base_sel, model_sel = _render_model_preset()
 
 voice_l, voice_r = st.columns([2, 3])
 with voice_l:
@@ -249,13 +514,27 @@ with voice_r:
             _commit_dictation(chunk, box)
             st.rerun()
 
-with st.form("xuzhi_go"):
-    if auto_polish and model_box is not None:
-        with model_box:
-            api_key_sel, api_base_sel, model_sel, backend_sel, extra = _render_model_secrets(
-                mode_sel, provider_id, api_base_sel, model_sel
-            )
+draft_box = st.container(border=True)
+with draft_box:
+    st.markdown(
+        "**页面底稿 / 代码仓库（可选）** — 不传也能开工。"
+        "左侧 **上传 HTML** 做页面底稿；右侧只填 **Git 仓库**（Token 可选）。"
+        "不要贴浏览器网页地址（多为空壳）。"
+        "HTML 建议：页面加载完 F12 → Copy outerHTML → 存成 .html 再上传。"
+    )
+    d1, d2 = st.columns([1, 1])
+    with d1:
+        draft_uploads = st.file_uploader(
+            "上传 HTML 底稿（可多选）",
+            type=["html", "htm"],
+            accept_multiple_files=True,
+            key="draft_uploads",
+        )
+        use_sample_draft = st.toggle("没有底稿时用示例「净值日报」底稿演示", value=False, key="use_sample_draft")
+    with d2:
+        _render_draft_link_rows()
 
+with st.form("xuzhi_go"):
     c1, c2 = st.columns([2, 3])
     with c1:
         choice = st.selectbox("选一个样例（或在右边粘贴）", ["（粘贴自己的）"] + [p.stem for p in samples], key="sample")
@@ -273,10 +552,7 @@ with st.form("xuzhi_go"):
             placeholder="例如：净值日报能不能加一列……也可点上方「开始口述」",
             key=f"raw_text_{st.session_state.get('speech_rev', 0)}",
         )
-        if auto_polish:
-            st.caption("已打开自动润色：点开工会调用上方模型（约 20～30 秒）。选了样例会用该样例原文。口述请选「粘贴自己的」。")
-        else:
-            st.caption("开工只跑规则，不调模型。选了样例会用该样例原文；口述或手改请选「粘贴自己的」。")
+        st.caption("点开工会调用上方模型；未填 Key 则走规则。选了样例会用该样例原文；口述或手改请选「粘贴自己的」。")
         go = st.form_submit_button("📋 需知，开工", type="primary")
 
 llm = None
@@ -291,23 +567,54 @@ if go:
         st.warning("请粘贴原话，或选一个样例后再点开工。")
     else:
         run_mode, run_model, run_base, run_key = mode_sel, model_sel, api_base_sel, api_key_sel
-        if not auto_polish:
-            run_mode = "mock"
-        if run_mode == "api" and (not run_model or run_model == "__custom__"):
-            st.info("未填模型 ID，本次按 mock 运行。")
+        if run_mode == "api" and (not run_model or run_model in ("__custom__", "__custom_qoder_model__")):
+            st.info("未填模型 ID，本次按规则引擎运行。")
             run_mode = "mock"
         if run_mode == "api" and not run_base:
-            st.info("未填 API Base URL，本次按 mock 运行。")
+            st.info("未填 API Base URL，本次按规则引擎运行。")
             run_mode = "mock"
         if run_mode == "api" and not run_key:
-            st.info("未填 Key → 本次按规则引擎运行（仍可稍后点「模型润色」）。")
+            st.info("未填 Key → 本次按规则引擎出初稿（可稍后在「问清」补 Key 再润色）。")
             run_mode = "mock"
         llm = build_llm(run_mode, run_model, run_base, run_key, backend=backend_sel, extra=extra)
-        do_polish = bool(auto_polish) and llm.mode == "api"
-        spin = "模型正在润色，约 20～30 秒……" if do_polish else "规则引擎正在拆需求、估工、出原型……"
+        do_polish = llm.mode == "api"
+        drafts, repos, draft_errs = _collect_drafts(
+            draft_uploads,
+            _read_draft_link_entries(),
+            use_sample_draft,
+        )
+        for e in draft_errs:
+            if e.startswith("未读到："):
+                st.error(e)
+            elif e.startswith("无有效内容：") or e.startswith("未纳入："):
+                st.warning(e)
+            else:
+                st.warning(e)
+        load_lines = materials_report(drafts, repos)
+        st.session_state.materials_report = load_lines
+        if drafts or repos or draft_errs:
+            with st.expander("📦 材料加载结果（Git / HTML）", expanded=True):
+                for line in load_lines:
+                    st.markdown(line)
+                for h in draft_usability_hints(drafts):
+                    st.warning(h)
+                if drafts and not visual_drafts(drafts) and not repos:
+                    st.info("没有可复刻的静态界面，出样将按需求原话生成。")
+        if do_polish and (drafts or repos):
+            spin = "模型正在读现有材料并出结果……"
+        elif do_polish:
+            spin = "模型正在理解需求并出结果……"
+        else:
+            spin = "规则引擎正在拆需求、估工、出原型……"
         with st.spinner(spin):
-            a = analyze(text, "" if src == "自动识别" else src, llm, answers=None, mobile=mobile, client_view=client, llm_polish=do_polish)
+            a = analyze(
+                text, "" if src == "自动识别" else src, llm, answers=None,
+                mobile=mobile, client_view=client, llm_polish=do_polish,
+                drafts=drafts, repos=repos,
+            )
         st.session_state.analysis = a
+        st.session_state.drafts = drafts
+        st.session_state.repos = repos
         st.session_state.answers = {}
         st.session_state.req_id = ledger.log_analysis(a)
         st.session_state.last_llm = {
@@ -330,10 +637,19 @@ llm = llm or build_llm(
 
 a = st.session_state.get("analysis")
 if not a:
-    st.info("选一个样例或粘贴一段话，点「需知，开工」。默认只跑规则；要调模型可打开「开工时自动润色」，或开工后在「问清」再润色。所有样例与数据均为虚构。")
+    st.info("选一个样例或粘贴一段话，选用模型并填 Key 后点「需知，开工」。未填 Key 时自动走规则引擎。所有样例与数据均为虚构。")
     st.stop()
 
 card, est, arch = a.card, a.estimate, a.architecture
+_mat = st.session_state.get("materials_report") or materials_report(
+    getattr(a, "drafts", None) or st.session_state.get("drafts"),
+    getattr(a, "repos", None) or st.session_state.get("repos"),
+)
+if _mat:
+    with st.expander("📦 本次已读材料（Git / HTML）", expanded=bool(st.session_state.get("repos") or getattr(a, "repos", None))):
+        for line in _mat:
+            st.markdown(line)
+
 tabs = st.tabs(["🗣️ 问清", "📄 写单", "📏 估量", "🏗️ 定架", "🖼️ 出样", "📒 台账", "🛡️ 隐盾"])
 
 # ---------- 问清 ----------
@@ -348,32 +664,26 @@ with tabs[0]:
         st.markdown("".join(f'<span class="xz-chip">{html.escape(c)}</span>' for c in chips), unsafe_allow_html=True)
         if a.engine == "规则":
             polish_clicked = False
-            if auto_polish:
-                polish_clicked = st.button("✨ 模型润色：补追问、润色标题 / 功能点 / 需求单（约 20～30 秒）", key="polish")
-            else:
-                polish_box = st.container(border=True)
-                with polish_box:
-                    st.markdown("**模型润色** — 开工已出规则初稿。在这里选用模型后点按钮才调用。")
-                    preset_label, mode_sel, provider_id, api_base_sel, model_sel = _render_model_preset()
-                with st.form("xuzhi_polish"):
-                    with polish_box:
-                        api_key_sel, api_base_sel, model_sel, backend_sel, extra = _render_model_secrets(
-                            mode_sel, provider_id, api_base_sel, model_sel
-                        )
-                    polish_clicked = st.form_submit_button(
-                        "✨ 模型润色：补追问、润色标题 / 功能点 / 需求单（约 20～30 秒）"
-                    )
+            polish_box = st.container(border=True)
+            with polish_box:
+                st.markdown("**模型润色** — 开工未调到模型（多半是没填 Key 或调用失败）。请在上方补齐 PAT/模型后点润色。")
+            with st.form("xuzhi_polish"):
+                polish_clicked = st.form_submit_button(
+                    "✨ 模型润色：补追问、润色标题 / 功能点 / 需求单"
+                )
             if polish_clicked:
                 polish_key = (api_key_sel or st.session_state.api_keys.get(provider_id, "")).strip()
                 polish_llm = build_llm(mode_sel, model_sel, api_base_sel, polish_key, backend=backend_sel, extra=extra)
                 if polish_llm.mode != "api":
-                    st.warning("请先选用模型并填写 API Key，再点润色。")
+                    st.warning("请先在上方选用模型并填写 API Key，再点润色。")
                 else:
                     with st.spinner(f"{polish_llm.model or '模型'} 正在读……"):
                         a2 = analyze(
                             a.raw_text, "" if src == "自动识别" else src, polish_llm,
                             answers={k: v for k, v in st.session_state.get("answers", {}).items() if v.strip()},
                             mobile=mobile, client_view=client, llm_polish=True,
+                            drafts=getattr(a, "drafts", None) or st.session_state.get("drafts") or [],
+                            repos=getattr(a, "repos", None) or st.session_state.get("repos") or [],
                         )
                     st.session_state.analysis = a2
                     st.session_state.last_llm = {
@@ -391,11 +701,11 @@ with tabs[0]:
                 st.toast("模型润色完成")
                 st.success(
                     (f"已用 **{model_hint}** 润色标题、追问和需求单。" if model_hint else "模型润色完成。")
-                    + " 润色按钮已收起，避免再调一次；改口径请填业务答复后点重算。"
+                    + " 问清里不再出润色按钮，避免再调一次；改口径请填业务答复后点重算。"
                 )
             else:
                 st.caption(
-                    ("已用模型润色" + (f"（{model_hint}）" if model_hint else "") + "，按钮已收起。")
+                    ("已用模型润色" + (f"（{model_hint}）" if model_hint else "") + "。")
                     + " 改口径请填业务答复后点重算。"
                 )
         st.markdown(f"**一句话理解**：{card.goal}。")
@@ -422,6 +732,8 @@ with tabs[0]:
                     answers={k: v for k, v in answers.items() if v.strip()},
                     mobile=mobile, client_view=client,
                     llm_polish=(a.engine != "规则"),
+                    drafts=getattr(a, "drafts", None) or st.session_state.get("drafts") or [],
+                    repos=getattr(a, "repos", None) or st.session_state.get("repos") or [],
                 )
             st.session_state.analysis = a2
             ledger.event(st.session_state.get("req_id", 0), "业务答复重算", f"{sum(1 for v in answers.values() if v.strip())} 条")
@@ -479,6 +791,8 @@ with tabs[2]:
 # ---------- 定架 ----------
 with tabs[3]:
     st.markdown(f"**复用发现**：{arch.coverage_line}")
+    if getattr(arch, "draft_names", None):
+        st.caption("本需求已绑定页面底稿：" + "、".join(arch.draft_names))
     l, r = st.columns([1, 1])
     with l:
         st.markdown("**可复用的系统 / 组件**")
@@ -491,7 +805,7 @@ with tabs[3]:
         _iframe(a.layers_html, height=330)
     st.markdown(f"#### 需要 IT 拍板的决策（{len(arch.decisions)} 项）")
     for d in arch.decisions:
-        with st.expander(f"{d.id} {d.topic} — 建议：{d.recommended}", expanded=(d.id == "D1")):
+        with st.expander(f"{d.id} {d.topic} — 建议：{d.recommended}", expanded=(d.id in ("D0", "D1"))):
             st.markdown(f"**问题**：{d.question}")
             st.dataframe(pd.DataFrame([{"方案": o[0], "优点": o[1], "代价": o[2], "建议": "✅" if o[0].startswith(d.recommended[:4]) else ""} for o in d.options]), hide_index=True, width="stretch")
             st.markdown(f"**理由**：{d.reason}　**影响**：{d.impact}")
@@ -502,9 +816,34 @@ with tabs[4]:
     t1, t2 = st.columns([1, 4])
     mob = t1.toggle("手机版", value=mobile, key="proto_mobile")
     cli = t1.toggle("客户版", value=client, key="proto_client")
-    proto = render_proto(card, mobile=mob, client_view=cli)
+    draft_list = getattr(a, "drafts", None) or st.session_state.get("drafts") or []
+    source = getattr(a, "prototype_source_html", "") or ""
+    if source:
+        proto = apply_prototype_view(source, mobile=mob, client_view=cli)
+    else:
+        proto = render_proto(card, mobile=mob, client_view=cli, drafts=draft_list or None, llm=None)
     t1.download_button("下载原型 .html", proto, file_name=f"原型_{card.title}.html")
-    t1.markdown('<div class="xz-foot">原型随需求卡片重画（假数据）。润色会更新功能点标签和引擎标记；对标指数同一查询日全表同一涨跌。</div>', unsafe_allow_html=True)
+    if draft_list or getattr(a, "repos", None):
+        t1.markdown(
+            '<div class="xz-foot">在原 HTML 上落地改动；Git 源码用于问清/定架。'
+            "不相干菜单可点但进不去。</div>",
+            unsafe_allow_html=True,
+        )
+        caps = []
+        if draft_list:
+            caps.append("页：" + "、".join(d.name for d in draft_list[:4]))
+        repos_now = getattr(a, "repos", None) or st.session_state.get("repos") or []
+        if repos_now:
+            caps.append("仓：" + "、".join(r.name for r in repos_now[:3]))
+            nfiles = sum(len(getattr(r, "files", []) or []) for r in repos_now)
+            caps.append(f"已读源文件 {nfiles} 个")
+        if caps:
+            t1.caption(" · ".join(caps))
+    else:
+        t1.markdown(
+            '<div class="xz-foot">未提供底稿/仓库：有 Key 时模型按需求自行理解出样；否则用内置模板。</div>',
+            unsafe_allow_html=True,
+        )
     with t2:
         _iframe(proto, height=640 if not mob else 760)
 
@@ -530,4 +869,4 @@ with tabs[6]:
     st.markdown(f"**进模型前脱敏 {a.redacted} 处**（手机号、账号、证件号、内网地址、密钥、客户姓名 / 机构名 → 语义标签；本地规则，不联网）")
     with st.container(border=True):
         st.text(a.redacted_text)
-    st.markdown("**三道线**：① 需求原话先脱敏再进模型；② 不接生产数据库、不读代码仓库，复用发现只看系统目录；③ 每次分析、答复、决策留痕，可导出审计。")
+    st.markdown("**三道线**：① 需求原话先脱敏再进模型；② 不接生产数据库；代码仓库仅在你主动粘贴链接时浅读摘要，不扫内网；③ 每次分析、答复、决策留痕，可导出审计。")

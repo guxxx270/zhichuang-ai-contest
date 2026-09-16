@@ -8,8 +8,46 @@ from __future__ import annotations
 import json
 import re
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 from . import config
+
+
+def list_openai_models(api_base: str, api_key: str) -> tuple[list[tuple[str, str]], str]:
+    """实时拉取 OpenAI 兼容网关 GET /models（硅基流动等），不用本地写死列表。"""
+    from .qoder_cloud import parse_model_catalog
+
+    if not (api_key or "").strip():
+        return [], "请先填写 API Key，再拉取实时模型目录。"
+    base = (api_base or "").strip().rstrip("/")
+    if not base:
+        return [], "缺少 API Base。"
+    url = base if base.endswith("/models") else base + "/models"
+    req = Request(
+        url,
+        headers={
+            "Authorization": f"Bearer {api_key.strip()}",
+            "Accept": "application/json",
+        },
+        method="GET",
+    )
+    try:
+        with urlopen(req, timeout=30) as resp:
+            raw = json.loads(resp.read().decode("utf-8", errors="replace") or "{}")
+    except HTTPError as e:
+        detail = ""
+        try:
+            detail = e.read().decode("utf-8", errors="replace")[:200]
+        except Exception:
+            pass
+        return [], f"拉取实时目录失败：HTTP {e.code} {detail}".strip()
+    except (URLError, TimeoutError, json.JSONDecodeError, OSError) as e:
+        return [], f"拉取实时目录失败：{e}"
+    live = parse_model_catalog(raw)
+    if live:
+        return live, f"实时目录 · {len(live)} 个当前可用模型"
+    return [], "账号当前无可用模型（目录为空）。"
 
 
 class LLM:
@@ -53,7 +91,7 @@ class LLM:
         if self.mode == "api":
             try:
                 from openai import OpenAI  # 延迟导入，mock 模式不需要
-                self._client = OpenAI(base_url=self.api_base, api_key=self.api_key, timeout=90, max_retries=1)
+                self._client = OpenAI(base_url=self.api_base, api_key=self.api_key, timeout=120, max_retries=1)
             except ImportError:
                 self.mode, self.note = "mock", "未安装 openai，已退回 mock（pip install openai 后恢复）"
 

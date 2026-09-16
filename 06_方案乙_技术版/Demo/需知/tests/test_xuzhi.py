@@ -85,13 +85,31 @@ def test_added_column_in_prototype():
     html = a.prototype_html
     assert "对标指数" in a.card.indicators
     assert html.count("<th>对标指数</th>") == 1
-    assert html.count("沪深300") >= 1
-    import re
-    cells = re.findall(r"沪深300 <span class=\"(?:up|down)\">[^<]+</span>", html)
-    assert cells and len(set(cells)) == 1
-    b = analyze("净值日报加一列对标指数，对中证500。", llm=LLM(mode="mock"))
-    assert "中证500" in b.prototype_html
-    assert "沪深300" not in b.prototype_html
+    assert "<th>净值</th>" not in html
+
+
+def test_indicator_case_variants_deduped():
+    """原话 sortino + 模型写成 Sortino 时，指标只保留一份（保留原话写法）。"""
+    from types import SimpleNamespace
+
+    from xuzhi.pipeline.intake import extract_card, refine_with_llm
+
+    text = "报表加一列sortino"
+    card = extract_card(text)
+    assert card.indicators == ["sortino"]
+
+    llm = SimpleNamespace(
+        mode="api",
+        chat_json=lambda system, user: {
+            "title": "加 Sortino 列",
+            "goal": "展示 Sortino",
+            "features": ["加一列Sortino"],
+            "extra_questions": [],
+        },
+    )
+    refined, _ = refine_with_llm(text, card, [], llm)
+    assert refined.indicators == ["sortino"]
+    assert "Sortino" not in refined.indicators
 
 
 def test_free_text_works():

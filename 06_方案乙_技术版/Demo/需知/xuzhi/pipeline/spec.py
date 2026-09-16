@@ -126,7 +126,7 @@ def build_spec(card: Card, questions: list[Question], reuse_line: str = "", llm:
     b += [f"{i}. {f}" for i, f in enumerate(card.features, 1)]
     b += ["", "## 4. 数据与口径"]
     b += [f"- 数据来源：{'、'.join(card.data_sources) or '待确认'}"]
-    for q in _q_by_cat(questions, ("口径", "时点与日历", "数据来源", "风控口径", "品种范围")):
+    for q in _q_by_cat(questions, ("口径", "时点与日历", "数据来源", "风控口径", "品种范围", "展示格式")):
         mark = "✅" if q.answer.strip() else "◻︎默认"
         b.append(f"- {mark} {q.question.split('？')[0]}？→ {q.resolved}")
     b += ["", "## 5. 不做什么（本期范围外）"]

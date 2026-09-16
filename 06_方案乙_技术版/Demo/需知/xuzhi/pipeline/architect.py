@@ -1,4 +1,5 @@
-"""定架：技术栈 / 架构建议 + IT 决策清单（选项 / 推荐 / 理由 / 影响，生成 ADR）+ 复用发现（对照公司系统目录）。"""
+"""定架：技术栈 / 架构建议 + IT 决策清单（选项 / 推荐 / 理由 / 影响，生成 ADR）+ 复用发现（对照公司系统目录）。
+有页面底稿时：优先建议在现有 HTML / 前端工程上改，并把底稿写入分层图与 ADR。"""
 from __future__ import annotations
 
 import re
@@ -6,6 +7,7 @@ from dataclasses import dataclass, field
 from datetime import date
 
 from .. import knowledge
+from ..drafts import Draft, RepoBundle, summarize, visual_drafts
 from .intake import Card
 
 
@@ -42,6 +44,7 @@ class Architecture:
     decisions: list[Decision]
     adr_md: str = ""
     engine: str = "规则"
+    draft_names: list[str] = field(default_factory=list)
 
 
 AFFINITY = {"报表": "报表平台", "提醒": "消息推送中心", "流程": "OA 移动门户", "接口": "交易系统"}   # 需求类型 → 天然承载平台
@@ -78,10 +81,31 @@ def _coverage_line(card: Card, reuse: list[Reuse]) -> str:
     return line
 
 
-def suggest_stack(card: Card, text: str, reuse: list[Reuse]) -> tuple[list[tuple[str, str]], dict[str, list[str]]]:
+def suggest_stack(
+    card: Card,
+    text: str,
+    reuse: list[Reuse],
+    drafts: list[Draft] | None = None,
+    repos: list[RepoBundle] | None = None,
+) -> tuple[list[tuple[str, str]], dict[str, list[str]]]:
     t = card.req_type
     realtime = card.frequency in ("实时", "分钟级") or bool(re.search(r"实时|盘中|下单前", text))
     stack: list[tuple[str, str]] = []
+    drafts = drafts or []
+    repos = repos or []
+    if drafts:
+        names = "、".join(d.name for d in drafts[:4])
+        cols = "、".join(dict.fromkeys(h for d in drafts for h in d.table_headers))[:80] or "（底稿无表头）"
+        stack.append(("前端底稿", f"以已有页面为底：{names}；现有列：{cols}。按需求增量改 UI，避免整页重做"))
+        stack.append(("改动面", "保留底稿布局与 VI；新增列 / 筛选 / 文案落在既有表格与工具条上，变更可 diff"))
+    if repos:
+        n = sum(len(r.files) for r in repos)
+        sample = "、".join(f.path for r in repos for f in r.files[:6])
+        stack.append((
+            "代码仓库",
+            f"已读 {len(repos)} 个仓库共约 {n} 个源文件，前后端一并理解。"
+            f"优先在现有模块上改（例：{sample}{'…' if sample else '见目录'}），对齐现有页面与接口，避免平行新建一套",
+        ))
     if t == "报表":
         stack += [("承载", "报表平台：新建数据集 + 模板，定时任务在结算文件到齐后触发"), ("计算", "SQL 视图 / Python 任务计算新增列与指标，写入报表数据集")]
     elif t == "页面":
@@ -100,18 +124,47 @@ def suggest_stack(card: Card, text: str, reuse: list[Reuse]) -> tuple[list[tuple
         stack.append(("安全", "客户字段脱敏（隐盾规则）；对外内容合规审阅留痕"))
     if re.search(r"公告|通知文案|解释|解析", text):
         stack.append(("AI", "公司 AI 平台（OpenAI 兼容 API）做非结构化解析 / 文案生成，输出需人工复核"))
+    app_layer = [card.title] + [f for f in card.features[:3]]
+    if drafts:
+        app_layer = [f"底稿·{d.title or d.name}" for d in drafts[:3]] + app_layer
+    if repos:
+        app_layer = [f"仓·{r.name}" for r in repos[:2]] + app_layer
     layers = {
-        "入口": card.channels or ["网页"],
-        "应用": [card.title] + [f for f in card.features[:3]],
-        "服务": [r.system for r in reuse[:4]] or ["新建服务"],
+        "入口": card.channels or (["现有页面改造"] if (drafts or repos) else ["网页"]),
+        "应用": app_layer,
+        "服务": [r.system for r in reuse[:4]] or (
+            [f"现仓·{repos[0].name}"] if repos else ["新建服务"]
+        ),
         "数据": card.data_sources or ["数据仓库"],
     }
     return stack, layers
 
 
-def build_decisions(card: Card, text: str, reuse: list[Reuse]) -> list[Decision]:
+def build_decisions(
+    card: Card,
+    text: str,
+    reuse: list[Reuse],
+    drafts: list[Draft] | None = None,
+    repos: list[RepoBundle] | None = None,
+) -> list[Decision]:
     ds: list[Decision] = []
+    drafts = drafts or []
+    repos = repos or []
     top = reuse[0] if reuse else None
+    if drafts or repos:
+        names = "、".join([*(d.name for d in drafts[:2]), *(r.name for r in repos[:2])])
+        ds.append(Decision(
+            "D0", "基于现有代码/底稿改 vs 新建",
+            f"已提供现有材料（{names}{'…' if (len(drafts) + len(repos)) > 2 else ''}），在现仓/现页上改还是另起新服务？",
+            [
+                ("基于现有仓库与页面增量改", "对齐现有架构与交互，验收可对照 diff", "受原结构约束"),
+                ("保留现仓作参考、模块重建", "交互/接口可重做", "工时高，联调面大"),
+                ("忽略现仓、按模板新建", "实现快", "与现网不一致，迁移成本高"),
+            ],
+            "基于现有仓库与页面增量改",
+            "已加载源码/底稿，优先复用路由、API 与组件",
+            "工时与验收方式",
+        ))
     ds.append(Decision("D1", "新建 vs 复用", "在现有系统上加模块，还是新建独立服务？",
                        [(f"复用「{top.system}」加模块" if top else "复用现有平台", "省 30%～50% 工时，权限与运维现成", "受该系统排期与改动窗口约束"),
                         ("新建独立服务", "不受现有系统约束，迭代快", "多一套部署与运维，权限要重接")],
@@ -147,9 +200,21 @@ def build_decisions(card: Card, text: str, reuse: list[Reuse]) -> list[Decision]
     return ds
 
 
-def adr_markdown(card: Card, decisions: list[Decision]) -> str:
+def adr_markdown(
+    card: Card,
+    decisions: list[Decision],
+    drafts: list[Draft] | None = None,
+    repos: list[RepoBundle] | None = None,
+) -> str:
     today = date.today().isoformat()
     md = [f"# ADR · {card.title}", f"日期：{today}　状态：待评审　生成：需知", ""]
+    if drafts or repos:
+        md += ["## 现有材料", summarize(drafts or [], repos or []), ""]
+        for r in (repos or [])[:2]:
+            md.append(f"### 仓库 {r.name}")
+            md.append("目录摘录：" + "；".join(r.tree[:12]))
+            md.append("重点文件：" + "、".join(f.path for f in r.files[:8]))
+            md.append("")
     for d in decisions:
         md += [f"## {d.id} {d.topic}", f"**问题**：{d.question}", "", "**选项**："]
         md += [f"- {o[0]}：优点 —— {o[1]}；代价 —— {o[2]}" for o in d.options]
@@ -157,10 +222,24 @@ def adr_markdown(card: Card, decisions: list[Decision]) -> str:
     return "\n".join(md)
 
 
-def build_architecture(card: Card, text: str) -> Architecture:
+def build_architecture(
+    card: Card,
+    text: str,
+    drafts: list[Draft] | None = None,
+    repos: list[RepoBundle] | None = None,
+) -> Architecture:
+    drafts = drafts or []
+    repos = repos or []
+    usable = visual_drafts(drafts)
     reuse = discover_reuse(card, text)
-    stack, layers = suggest_stack(card, text, reuse)
-    decisions = build_decisions(card, text, reuse)
-    arch = Architecture(stack, layers, reuse, _coverage_line(card, reuse), decisions)
-    arch.adr_md = adr_markdown(card, decisions)
+    stack, layers = suggest_stack(card, text, reuse, drafts=usable, repos=repos)
+    decisions = build_decisions(card, text, reuse, drafts=usable, repos=repos)
+    line = _coverage_line(card, reuse)
+    if usable or repos:
+        line = f"已加载材料：{summarize(drafts, repos)}。" + line
+    arch = Architecture(
+        stack, layers, reuse, line, decisions,
+        draft_names=[*(d.name for d in usable), *(r.name for r in repos)],
+    )
+    arch.adr_md = adr_markdown(card, decisions, drafts=usable, repos=repos)
     return arch

@@ -21,16 +21,24 @@ LLM_MODEL = os.getenv("LLM_MODEL", "").strip()
 LLM_MODE = os.getenv("LLM_MODE", "").strip().lower()   # auto / api / mock
 
 # 页面预设：(显示名, mode, provider_id, api_base, model_id)
-# model_id 为 "__custom__" 时需在页面填写模型名；provider=custom 时还需填网关。
+# model_id 为空：填 Key 后实时 GET /models；为 "__custom__" 时手填模型名。
+# OpenAI 兼容且实时拉目录的 provider 见 LIVE_OPENAI_PROVIDERS。
 LLM_PRESETS: list[tuple[str, str, str, str, str]] = [
     ("mock · 规则引擎（不调 API）", "mock", "mock", "", ""),
-    ("硅基流动 · DeepSeek-V4-Flash", "api", "siliconflow", "https://api.siliconflow.cn/v1", "deepseek-ai/DeepSeek-V4-Flash"),
-    ("硅基流动 · DeepSeek-V3", "api", "siliconflow", "https://api.siliconflow.cn/v1", "deepseek-ai/DeepSeek-V3"),
-    ("硅基流动 · Qwen2.5-72B", "api", "siliconflow", "https://api.siliconflow.cn/v1", "Qwen/Qwen2.5-72B-Instruct"),
+    ("硅基流动", "api", "siliconflow", "https://api.siliconflow.cn/v1", ""),
+    ("OpenAI", "api", "openai", "https://api.openai.com/v1", ""),
+    ("Fable", "api", "fable", os.getenv("FABLE_API_BASE", "").strip(), ""),
     ("Qoder Cloud Agents · 国内", "api", "qoder-cloud", "https://api.qoder.com.cn", "ultimate"),
     ("Qoder Cloud Agents · 国际", "api", "qoder-cloud-intl", "https://api.qoder.com", "ultimate"),
     ("自定义 OpenAI 兼容网关", "api", "custom", "", "__custom__"),
 ]
+
+# 走 OpenAI 兼容 GET /models 实时目录的 provider（不含 Qoder Cloud Agents）
+LIVE_OPENAI_PROVIDERS: dict[str, str] = {
+    "siliconflow": "硅基流动",
+    "openai": "OpenAI",
+    "fable": "Fable",
+}
 
 DATA_DIR = ROOT / "data"
 SAMPLES_DIR = DATA_DIR / "samples"

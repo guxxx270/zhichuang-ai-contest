@@ -129,6 +129,39 @@ def _scope_objects(text: str) -> list[str]:
     return out
 
 
+def _assumptions(card: Card, text: str = "") -> list[str]:
+    a = []
+    futures = looks_futures_domain(text, card.title, " ".join(card.features), " ".join(card.indicators))
+    if not card.deadline:
+        a.append("原话未提上线时间 → 按正常排期")
+    if card.req_type in ("报表", "页面") and not card.channels:
+        a.append("未提输出形态 → 默认网页" + (" + Excel" if futures else ""))
+    if card.req_type == "提醒" and "企业微信" not in card.channels:
+        a.append("未指定提醒渠道 → 默认企业微信" if futures else "未指定提醒渠道 → 待业务确认渠道")
+    if futures and "客户" in card.scope_objects:
+        a.append("涉及客户 → 默认需脱敏与合规审阅")
+    if card.frequency == "按需":
+        a.append("未提频率 → 默认每日一次（结算后）" if futures else "未提频率 → 按业务约定")
+    return a
+
+
+def _neutral_goal(card: Card) -> str:
+    who = "、".join(card.users[:2]) or "相关同事"
+    focus = "、".join((card.indicators or card.symbols or card.scope_objects)[:3])
+    if card.features:
+        return f"落实「{card.title or card.features[0]}」，让{who}能完成：{card.features[0]}"
+    if focus:
+        return f"落实「{card.title}」，让{who}能用上与{focus}相关的{card.req_type or '功能'}"
+    return f"落实「{card.title or '该需求'}」，让{who}能用上所需能力"
+
+
+def _futures_goal(card: Card) -> str:
+    return (
+        f"让{'、'.join(card.users[:2])}{'定时' if card.trigger == '定时' else '及时'}拿到"
+        f"{'、'.join((card.indicators or card.symbols)[:3]) or '所需'}相关的{card.req_type}结果，减少人工整理与漏看"
+    )
+
+
 def extract_card(text: str, source_hint: str = "") -> Card:
     body = textutil.strip_meta(text)
     card = Card(source=textutil.detect_source(text, source_hint))
@@ -141,8 +174,7 @@ def extract_card(text: str, source_hint: str = "") -> Card:
     card.symbols = textutil.find_symbols(body)
     card.indicators = textutil.find_indicators(body)
     for col in textutil.find_added_columns(body):
-        if col not in card.indicators:
-            card.indicators.append(col)
+        textutil.merge_label(card.indicators, col)
     card.scope_objects = _scope_objects(body)
     card.data_sources = textutil.match_rules(body, textutil.DATA_SOURCE_RULES)
     card.channels = textutil.match_rules(body, textutil.CHANNEL_RULES)
@@ -160,40 +192,127 @@ def extract_card(text: str, source_hint: str = "") -> Card:
                 card.raw_features.append(s)
     card.features, card.raw_features = card.features[:12], card.raw_features[:12]
     card.title = _title(body, card.req_type, card)
-    card.goal = f"让{ '、'.join(card.users[:2]) }{'定时' if card.trigger == '定时' else '及时'}拿到{ '、'.join((card.indicators or card.symbols)[:3]) or '所需'}相关的{card.req_type}结果，减少人工整理与漏看"
-    card.assumptions = _assumptions(card)
+    futures = looks_futures_domain(body, card.title, " ".join(card.features), " ".join(card.indicators))
+    card.goal = _futures_goal(card) if futures else _neutral_goal(card)
+    card.assumptions = _assumptions(card, body)
     return card
 
 
-def _assumptions(card: Card) -> list[str]:
-    a = []
-    if not card.deadline:
-        a.append("原话未提上线时间 → 按正常排期")
-    if card.req_type in ("报表", "页面") and not card.channels:
-        a.append("未提输出形态 → 默认网页 + Excel")
-    if card.req_type == "提醒" and "企业微信" not in card.channels:
-        a.append("未指定提醒渠道 → 默认企业微信")
-    if "客户" in card.scope_objects:
-        a.append("涉及客户 → 默认需脱敏与合规审阅")
-    if card.frequency == "按需":
-        a.append("未提频率 → 默认每日一次（结算后）")
-    return a
+_FUTURES_HINT = re.compile(
+    r"期货|期权|合约|主力|基差|价差|结算|日终|夜盘|限仓|保证金|净值|"
+    r"持仓|交割|品种|报单|下单|交易所|对标指数|资管产品|换月"
+)
 
 
-def build_questions(text: str, card: Card, limit: int = 12) -> list[Question]:
+def looks_futures_domain(text: str, *extra: str) -> bool:
+    blob = " ".join([text or "", *extra])
+    return bool(_FUTURES_HINT.search(blob))
+
+
+def _added_column_names(text: str, card: Card) -> list[str]:
+    """从原话与功能点抽出明确「加一列」的列名。"""
+    cols: list[str] = []
+    for snip in [text or "", card.title or ""] + list(card.features or []) + list(card.raw_features or []):
+        for col in textutil.find_added_columns(snip):
+            textutil.merge_label(cols, col)
+    return cols[:6]
+
+
+def _column_display_questions(
+    text: str,
+    card: Card,
+    *,
+    table_headers: list[str] | None = None,
+) -> list[Question]:
+    """往表里加列时追问展示格式等（与业务域无关）。"""
+    cols = _added_column_names(text, card)
+    if not cols:
+        return []
+    label = "、".join(f"「{c}」" for c in cols)
+    headers = [h for h in (table_headers or []) if h and len(h) >= 1][:12]
+    header_hint = "、".join(headers) if headers else ""
+
+    qs: list[Question] = [
+        Question(
+            "C_FMT",
+            "展示格式",
+            "通用",
+            "高",
+            (
+                f"新增列{label}在表里按什么格式显示：文本、整数、小数、百分数、日期时间，还是其它？"
+                f"若是数字，保留几位小数、要不要百分号、要不要千分位、单位写在表头还是单元格里？"
+            ),
+            "格式不定会导致前后端、导出与出样对不齐，上线后再改样式成本高。",
+            "与相邻数字列对齐；说不清则小数 2 位、非百分数、不加千分位，单位放表头括号内。",
+        ),
+        Question(
+            "C_NULL",
+            "展示格式",
+            "通用",
+            "中",
+            f"新增列{label}在无数据或算不出时怎么显示：空白、「—」、0，还是其它占位？",
+            "空值展示不一致，业务会当成 0 或漏数。",
+            "无数据显示「—」，与表内其它空单元格一致。",
+        ),
+        Question(
+            "C_POS",
+            "界面",
+            "通用",
+            "中",
+            (
+                f"新增列{label}插在哪一列旁边？"
+                + (f"（现有表头：{header_hint}）" if header_hint else "（相对现有哪一列表头）")
+                + "是否需要可排序、可筛选？"
+            ),
+            "列位置和交互不定，界面与导出列序会返工。",
+            ("插在表尾；暂不单独做排序/筛选，沿用表原有能力。" if not header_hint else f"插在「{headers[-1]}」右侧；暂不单独做排序/筛选。"),
+        ),
+        Question(
+            "C_SIGN",
+            "展示格式",
+            "通用",
+            "低",
+            f"若{label}是数字，正负要不要用颜色区分（如红跌绿涨）？导出 Excel 是否与页面同一套格式？",
+            "着色与导出格式常被当成「改了需求」。",
+            "页面不强制着色；导出与页面小数位、百分号规则一致。",
+        ),
+    ]
+    return qs
+
+
+def build_questions(
+    text: str,
+    card: Card,
+    limit: int = 12,
+    *,
+    has_materials: bool = False,
+    table_headers: list[str] | None = None,
+) -> list[Question]:
+    """规则追问。有 HTML/Git 时不硬套期货模板（除非原话/材料本身像期货业务）。"""
     body = textutil.strip_meta(text)
-    qs: list[Question] = []
+    futures_ok = looks_futures_domain(body, card.title, " ".join(card.features), " ".join(card.indicators))
+    qs: list[Question] = list(_column_display_questions(body, card, table_headers=table_headers))
+    seen_ids = {q.id for q in qs}
     seen_cat: dict[str, int] = {}
+    for q in qs:
+        seen_cat[q.category] = seen_cat.get(q.category, 0) + 1
     for p in sorted(knowledge.probes(), key=lambda p: (knowledge.IMPACT_ORDER[p.impact], p.tag != "期货")):
         if not p.hits(body):
             continue
-        # 已在原话里说清的就不问（简单判定：默认假设里的关键词已出现）
+        if has_materials and p.tag == "期货" and not futures_ok:
+            continue
+        if not has_materials and p.tag == "期货" and not futures_ok:
+            continue
         if p.id == "T29" and not card.deadline:
+            continue
+        if p.id in seen_ids:
             continue
         if seen_cat.get(p.category, 0) >= 3:
             continue
         seen_cat[p.category] = seen_cat.get(p.category, 0) + 1
         qs.append(Question(p.id, p.category, p.tag, p.impact, p.question, p.why, p.default))
+        seen_ids.add(p.id)
+    # 加列场景优先保留展示格式题，再截断
     return qs[:limit]
 
 
@@ -207,28 +326,78 @@ def _salutation(card: Card) -> str:
     return f"{who}你好"
 
 
-def confirm_message(card: Card, questions: list[Question]) -> str:
-    highs = [q for q in questions if q.impact == "高" and not q.answer.strip()]
-    mids = [q for q in questions if q.impact != "高" and not q.answer.strip()]
+_FUTURES_Q_HINT = re.compile(
+    r"结算|夜盘|主力合约|限仓|交割|保证金|对标指数|交易日|收盘价|持仓量|期货"
+)
+
+
+def confirm_message(card: Card, questions: list[Question], text: str = "") -> str:
+    """发给业务的确认消息：问题与理解均跟随原话领域，不硬套期货口径。"""
+    futures = looks_futures_domain(
+        text, card.title, card.goal, " ".join(card.features), " ".join(q.question for q in questions)
+    )
+    usable = []
+    for q in questions:
+        if not futures and (q.tag == "期货" or _FUTURES_Q_HINT.search(q.question) or _FUTURES_Q_HINT.search(q.default)):
+            continue
+        usable.append(q)
+    highs = [q for q in usable if q.impact == "高" and not q.answer.strip()]
+    mids = [q for q in usable if q.impact != "高" and not q.answer.strip()]
     lines = [f"{_salutation(card)}，关于「{card.title}」，开工前想和你确认几件事，确认清楚了我们就能给准确的排期：", ""]
-    for i, q in enumerate(highs, 1):
-        lines.append(f"{i}. {q.question}")
+    if highs:
+        for i, q in enumerate(highs, 1):
+            lines.append(f"{i}. {q.question}")
+    else:
+        lines.append("（当前没有必须先拍板的高影响问题；若下面默认假设有出入请直接改。）")
     if mids:
         lines.append("")
         lines.append("下面几条如果没特别要求，我们就按默认做，你看一眼有没有问题：")
         for q in mids:
-            lines.append(f"· {q.question.split('？')[0]}？→ 默认：{q.default}")
-    lines += ["", f"我们初步理解是：{card.goal}。有出入的话随时纠正我。"]
+            head = q.question.split("？")[0]
+            lines.append(f"· {head}？→ 默认：{q.default}")
+    goal = card.goal.strip().rstrip("。")
+    if not futures and _FUTURES_Q_HINT.search(goal):
+        goal = _neutral_goal(card)
+    lines += ["", f"我们初步理解是：{goal}。有出入的话随时纠正我。"]
     return "\n".join(lines)
 
 
-def refine_with_llm(text_redacted: str, card: Card, questions: list[Question], llm: LLM) -> tuple[Card, list[Question]]:
-    """api 模式：让模型润色标题 / 目标 / 功能点，并补最多 3 条清单没覆盖的问题。失败则原样返回。"""
+def refine_with_llm(
+    text_redacted: str,
+    card: Card,
+    questions: list[Question],
+    llm: LLM,
+    drafts: list | None = None,
+    repos: list | None = None,
+) -> tuple[Card, list[Question]]:
+    """api 模式：润色标题/功能点并补问题；有 HTML/仓库代码时一并读懂。失败则原样返回。"""
     if llm.mode != "api":
         return card, questions
-    system = load_prompt("intake_refine") or "你是期货公司技术部的需求分析师。只输出 JSON。"
-    user = json.dumps({"原话": text_redacted, "规则抽取": json.loads(card.to_json()),
-                       "已有问题": [q.question for q in questions]}, ensure_ascii=False)
+    from ..drafts import draft_context_for_llm, summarize
+
+    has_materials = bool(drafts or repos)
+    system = load_prompt("intake_refine") or "你是需求分析师。只输出 JSON。有材料时按材料提问，勿套期货模板。"
+    payload = {
+        "原话": text_redacted,
+        "规则抽取": json.loads(card.to_json()),
+        "已有问题": [q.question for q in questions],
+        "有现有材料": has_materials,
+        "提醒": (
+            "已提供 HTML/Git：追问必须针对材料中的具体页面、字段、接口或模块；禁止无关期货模板。"
+            if has_materials
+            else "未提供材料：按原话领域提问；原话非期货业务时不要问期货口径。"
+        ),
+    }
+    if has_materials:
+        payload["现有系统材料"] = draft_context_for_llm(
+            list(drafts or []),
+            list(repos or []),
+            html_limit=14000,
+            code_limit=22000,
+            keywords=card.keywords() | set(card.indicators) | set(card.features),
+        )
+        payload["材料摘要"] = summarize(list(drafts or []), list(repos or []))
+    user = json.dumps(payload, ensure_ascii=False)
     try:
         data = llm.chat_json(system, user)
     except Exception:
@@ -243,14 +412,30 @@ def refine_with_llm(text_redacted: str, card: Card, questions: list[Question], l
         feats = [str(f).strip() for f in data["features"] if str(f).strip() and not re.search(r"上线|排期|周会|按计划|尽快", str(f))]
         if len(feats) >= 2:
             card.features = feats[:12]
-            card.raw_features = (card.raw_features + [""] * 12)[:len(card.features)]
-    for i, q in enumerate(data.get("extra_questions", [])[:3]):
+            card.raw_features = (card.raw_features + [""] * 12)[: len(card.features)]
+    extras: list[Question] = []
+    for i, q in enumerate(data.get("extra_questions", [])[:4]):
         if isinstance(q, dict) and q.get("question"):
-            questions.append(Question(f"L{i+1}", q.get("category", "补充"), "模型", q.get("impact", "中"), q["question"],
-                                      q.get("why", ""), q.get("default", "待业务答复")))
+            extras.append(
+                Question(
+                    f"L{i + 1}",
+                    q.get("category", "补充"),
+                    "模型",
+                    q.get("impact", "中"),
+                    q["question"],
+                    q.get("why", ""),
+                    q.get("default", "待业务答复"),
+                )
+            )
+    if extras and has_materials:
+        # 有材料：模型问题优先；去掉未接地的期货模板，保留通用规则题作补充
+        kept = [q for q in questions if q.tag != "期货"]
+        questions = extras + kept
+    elif extras:
+        questions = list(questions) + extras
     blob = " ".join(card.features)
     for col in textutil.find_added_columns(blob) + textutil.find_indicators(blob):
-        if col not in card.indicators and not any(col != x and col in x for x in card.indicators):
-            card.indicators.append(col)
+        # 模型常把 sortino 写成 Sortino；与原话同词不同大小写只保留一份（保留先抽出的原话写法）
+        textutil.merge_label(card.indicators, col)
     card.engine = "规则 + 模型"
     return card, questions

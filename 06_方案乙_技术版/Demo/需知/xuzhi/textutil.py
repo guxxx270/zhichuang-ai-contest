@@ -86,6 +86,36 @@ def find_symbols(text: str) -> list[str]:
     return seen
 
 
+def label_key(s: str) -> str:
+    """比较用：拉丁字母忽略大小写，中文原样。"""
+    return (s or "").casefold().strip()
+
+
+def same_label(a: str, b: str) -> bool:
+    return bool(a and b) and label_key(a) == label_key(b)
+
+
+def has_label(items: list[str], col: str) -> bool:
+    return any(same_label(x, col) for x in (items or []))
+
+
+def subsumed_by_longer(col: str, items: list[str]) -> bool:
+    """已被更长同名覆盖（单位净值 vs 净值；大小写不敏感）。"""
+    k = label_key(col)
+    if not k:
+        return True
+    return any(k != label_key(x) and k in label_key(x) for x in (items or []) if x)
+
+
+def merge_label(items: list[str], col: str) -> bool:
+    """写入列表；同词不同大小写视为已有，返回是否新加。"""
+    col = (col or "").strip()
+    if not col or has_label(items, col) or subsumed_by_longer(col, items):
+        return False
+    items.append(col)
+    return True
+
+
 def find_indicators(text: str) -> list[str]:
     found = [i for i in INDICATORS if i in text]
     # 去掉被更长词覆盖的（单位净值 vs 净值）
@@ -93,29 +123,86 @@ def find_indicators(text: str) -> list[str]:
 
 
 _COL_PATTERNS = [
-    re.compile(r'(?:加一列|加一栏|增加一列|新增一列)[「"“]([^」"”]{1,24})[」"”]'),
-    re.compile(r'(?:加一列|加一栏|增加一列|新增一列)([^，。；;、\n]{1,24})'),
+    re.compile(r'(?:加一列|加一栏|增加一列|新增一列|添一列)[「"“]([^」"”]{1,24})[」"”]'),
+    re.compile(r'(?:加一列|加一栏|增加一列|新增一列|添一列)([^，。；;、\n]{1,24})'),
+    re.compile(r'(?:在|给|向)(?:已有|原始|原有)?(?:的)?(?:表|表格|html表|列表)[^，。；;\n]{0,12}(?:里|中|内)?(?:再)?(?:新增|增加|添加|加上|加)(?:一列|一栏)?[「"“]?([^」"”，。；;、\n]{1,24})'),
     re.compile(r'新增([^，。；;、\n]{1,16})列'),
     re.compile(r'增加([^，。；;、\n]{1,16})列'),
+    re.compile(r'加一列叫[「"“]?([^」"”，。；;、\n]{1,24})'),
 ]
-_NOT_COLUMNS = {"风险指标", "客户版", "一", "这个", "那个"}
+_DEL_COL_PATTERNS = [
+    re.compile(r'(?:删除|去掉|移除|拿掉|隐藏)(?:掉)?(?:一列|一栏|列)?[「"“]?([^」"”，。；;、\n]{1,24})'),
+    re.compile(r'(?:把|将)[「"“]?([^」"”]{1,24})[」"”]?(?:这一列|这一栏|列|栏)(?:给)?(?:删除|去掉|移除|拿掉|隐藏)'),
+    re.compile(r'(?:不再显示|不要|别显示)[「"“]?([^」"”]{1,16})[」"”]?(?:这一列|列)?'),
+    re.compile(r'(?:表|表格)[^，。；;\n]{0,8}(?:里|中)?(?:删除|去掉|移除)[「"“]?([^」"”，。；;、\n]{1,24})'),
+]
+_RENAME_COL_PATTERNS = [
+    re.compile(
+        r'(?:把|将)[「"“]?([^」"”]{1,24})[」"”]?(?:这一列|列|栏)?'
+        r'(?:改成|改为|改名[为成]?|重命名为|更名为)[「"“]?([^」"”，。；;、\n]{1,24})'
+    ),
+    re.compile(
+        r'[「"“]?([^」"”]{1,24})[」"”]?(?:列|栏)?'
+        r'(?:改成|改为|改名[为成]?|重命名为)[「"“]?([^」"”，。；;、\n]{1,24})[」"”]?(?:列|栏)?'
+    ),
+]
+_NOT_COLUMNS = {
+    "风险指标", "客户版", "一", "这个", "那个", "已有", "原始", "表里", "表格", "html",
+    "一列", "一栏", "表", "列表",
+}
+
+
+def _clean_col_name(raw: str) -> str:
+    s = re.sub(r"^(把|把这|这一|这个|叫|名为|名字叫|的)", "", (raw or "").strip("「」\"“”' 　"))
+    # 拼成 blob 后正则可能吞进后续词；列名取第一个空白分段
+    s = re.split(r"[\s　]+", s, maxsplit=1)[0]
+    s = re.split(r"(就|放在|也要|放进去|就行|就好|旁边|里面|之中)", s, maxsplit=1)[0]
+    s = re.sub(r"^(一列|一栏)", "", s)
+    s = re.sub(r"(这一列|这一栏|列|栏)$", "", s)
+    s = s.strip("的 「」\"“”' 　")
+    if s in ("金额列", "状态列") or (s.endswith("列") and len(s) <= 3):
+        s = s[:-1]
+    if len(s) < 2 or len(s) > 20 or s in _NOT_COLUMNS:
+        return ""
+    return s
 
 
 def find_added_columns(text: str) -> list[str]:
-    """从「加一列 / 新增××列」里抽出要出现在报表上的列名。"""
+    """从「加一列 / 新增××列 / 在表里新增一列」里抽出列名。"""
     found: list[str] = []
-
-    def add(raw: str) -> None:
-        s = re.sub(r"^(把|把这|这一|这个)", "", raw.strip("「」\"“”' 　"))
-        s = re.split(r"(就|放在|也要|放进去|就行|就好|旁边)", s, maxsplit=1)[0]
-        s = s.strip("的 「」\"“”' 　")
-        if len(s) < 2 or len(s) > 20 or s in _NOT_COLUMNS or s in found:
-            return
-        found.append(s)
-
     for pat in _COL_PATTERNS:
-        for m in pat.finditer(text):
-            add(m.group(1))
+        for m in pat.finditer(text or ""):
+            s = _clean_col_name(m.group(1))
+            if s:
+                merge_label(found, s)
+    return found
+
+
+def find_removed_columns(text: str) -> list[str]:
+    """从「删除××列 / 去掉××」抽出要删的列名。"""
+    found: list[str] = []
+    for pat in _DEL_COL_PATTERNS:
+        for m in pat.finditer(text or ""):
+            s = _clean_col_name(m.group(1))
+            if s:
+                merge_label(found, s)
+    return found
+
+
+def find_renamed_columns(text: str) -> list[tuple[str, str]]:
+    """从「把A列改成B」抽出 (旧名, 新名)。"""
+    found: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for pat in _RENAME_COL_PATTERNS:
+        for m in pat.finditer(text or ""):
+            a, b = _clean_col_name(m.group(1)), _clean_col_name(m.group(2))
+            if not a or not b or same_label(a, b):
+                continue
+            key = (label_key(a), label_key(b))
+            if key in seen:
+                continue
+            seen.add(key)
+            found.append((a, b))
     return found
 
 

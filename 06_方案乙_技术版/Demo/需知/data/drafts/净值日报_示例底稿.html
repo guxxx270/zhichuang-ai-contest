@@ -1,0 +1,38 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>净值日报（示例底稿）</title>
+  <style>
+    body { font-family: 'Microsoft YaHei', sans-serif; margin: 0; background: #f6f4ef; color: #1f2937; }
+    .top { background: #14367A; color: #fff; padding: 12px 16px; }
+    .bar { padding: 10px 16px; display: flex; gap: 8px; }
+    table { width: 100%; border-collapse: collapse; background: #fff; }
+    th, td { border: 1px solid #e5e7eb; padding: 8px 10px; text-align: left; font-size: 13px; }
+    th { background: #eef3fb; color: #14367A; }
+  </style>
+</head>
+<body>
+  <div class="top"><h2>净值日报</h2></div>
+  <div class="bar">
+    <input type="date" value="2026-09-08" />
+    <button>查询</button>
+    <button>导出</button>
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th>产品</th>
+        <th>单位净值</th>
+        <th>累计净值</th>
+        <th>回撤</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td>稳健一号</td><td>1.1023</td><td>1.3560</td><td>2.10%</td></tr>
+      <tr><td>量化增强二号</td><td>0.9871</td><td>1.1204</td><td>4.80%</td></tr>
+      <tr><td>商品 CTA 三号</td><td>1.2205</td><td>1.4412</td><td>3.20%</td></tr>
+    </tbody>
+  </table>
+</body>
+</html>

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -16,40 +17,31 @@ from urllib.request import Request, urlopen
 AGENT_NAME = "xuzhi-refine"
 DEFAULT_MODEL = "ultimate"
 AGENT_SYSTEM = (
-    "你是期货公司技术部的需求分析师。只根据用户要求组织文字或 JSON，"
+    "你是需求分析师。只根据用户要求组织文字或 JSON，"
     "不要执行命令、不要读写文件、不要调用工具。直接给出最终答案。"
 )
 
-# 填 PAT 前的兜底目录（官方文档常见值）。有 PAT 后改拉 GET /api/v1/cloud/models。
-CN_MODEL_FALLBACK: list[tuple[str, str]] = [
-    ("auto", "auto · 自动选型"),
-    ("qwen3.7-max", "qwen3.7-max · 通义旗舰"),
-    ("qwen3.7-plus", "qwen3.7-plus · 通义多模态"),
-    ("qwen3.6-flash", "qwen3.6-flash · 通义轻量"),
-    ("deepseek-v4-pro", "deepseek-v4-pro · DeepSeek 旗舰"),
-    ("deepseek-v4-flash", "deepseek-v4-flash · DeepSeek 轻量"),
-    ("glm-5.1", "glm-5.1 · 智谱"),
-    ("kimi-k2.6", "kimi-k2.6 · Kimi"),
-    ("minimax-m2.7", "minimax-m2.7 · MiniMax"),
-    ("ultimate", "ultimate · 国际档位名（部分账号也可用）"),
-]
-INTL_MODEL_FALLBACK: list[tuple[str, str]] = [
-    ("ultimate", "Ultimate"),
-    ("auto", "auto"),
-]
 CUSTOM_MODEL_SENTINEL = "__custom_qoder_model__"
-
-
-def fallback_models(api_base: str) -> list[tuple[str, str]]:
-    b = (api_base or "").lower()
-    if "qoder.com.cn" in b:
-        return list(CN_MODEL_FALLBACK)
-    return list(INTL_MODEL_FALLBACK)
 
 
 def _agent_name_for(model: str) -> str:
     slug = "".join(c if c.isalnum() or c in "._-" else "-" for c in (model or DEFAULT_MODEL).strip())[:48]
     return f"{AGENT_NAME}-{slug or DEFAULT_MODEL}"
+
+
+def _model_id_from_obj(m: Any) -> str:
+    if isinstance(m, str):
+        return m.strip()
+    if isinstance(m, dict):
+        for k in ("id", "model", "model_id", "name"):
+            v = m.get(k)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+            if isinstance(v, dict):
+                inner = _model_id_from_obj(v)
+                if inner:
+                    return inner
+    return ""
 
 
 def parse_model_catalog(raw: Any) -> list[tuple[str, str]]:
@@ -59,28 +51,87 @@ def parse_model_catalog(raw: Any) -> list[tuple[str, str]]:
     out: list[tuple[str, str]] = []
     seen: set[str] = set()
     for m in rows:
-        if not isinstance(m, dict) or m.get("is_enabled") is False:
+        if isinstance(m, str):
+            mid = m.strip()
+            if mid and mid not in seen:
+                seen.add(mid)
+                out.append((mid, mid))
             continue
-        mid = str(m.get("id") or "").strip()
+        if not isinstance(m, dict):
+            continue
+        if m.get("is_enabled") is False:
+            continue
+        mid = _model_id_from_obj(m)
         if not mid or mid in seen:
             continue
         seen.add(mid)
-        name = str(m.get("display_name") or mid).strip()
-        out.append((mid, f"{name}（{mid}）" if name.lower() != mid.lower() else mid))
+        name = str(m.get("display_name") or m.get("name") or mid).strip()
+        tag = ""
+        if m.get("is_new"):
+            tag = " · new"
+        src = str(m.get("source") or "").strip()
+        if src and src != "system":
+            tag += f" · {src}"
+        if name and name.lower() != mid.lower():
+            label = f"{name}（{mid}）{tag}"
+        elif name and name != mid:
+            label = f"{name}（{mid}）{tag}"
+        else:
+            label = f"{mid}{tag}"
+        out.append((mid, label.strip()))
     return out
 
 
-def list_qoder_models(api_base: str, pat: str) -> list[tuple[str, str]]:
-    """有 PAT 时拉账号目录；失败则返回文档兜底列表。"""
-    fb = fallback_models(api_base)
+def merge_model_catalogs(*catalogs: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    seen: set[str] = set()
+    out: list[tuple[str, str]] = []
+    for cat in catalogs:
+        for mid, lab in cat or []:
+            mid = (mid or "").strip()
+            if not mid or mid in seen:
+                continue
+            seen.add(mid)
+            out.append((mid, lab or mid))
+    return out
+
+
+def filter_model_catalog(catalog: list[tuple[str, str]], query: str) -> list[tuple[str, str]]:
+    """在实时目录里按 id / 显示名过滤。"""
+    q = (query or "").strip().lower()
+    if not q:
+        return list(catalog)
+    hit: list[tuple[str, str]] = []
+    soft: list[tuple[str, str]] = []
+    for mid, lab in catalog:
+        blob = f"{mid} {lab}".lower()
+        if q in blob:
+            hit.append((mid, lab))
+            continue
+        compact_q = re.sub(r"[^a-z0-9]", "", q)
+        compact_b = re.sub(r"[^a-z0-9]", "", blob)
+        if compact_q and compact_q in compact_b:
+            soft.append((mid, lab))
+            continue
+        if compact_q and any(
+            compact_q in re.sub(r"[^a-z0-9]", "", x) or re.sub(r"[^a-z0-9]", "", x) in compact_q
+            for x in (mid.lower(), lab.lower())
+        ):
+            soft.append((mid, lab))
+    return hit or soft
+
+
+def list_qoder_models(api_base: str, pat: str) -> tuple[list[tuple[str, str]], str]:
+    """只拉账号实时目录 GET /models，不用本地兜底列表。"""
     if not (pat or "").strip():
-        return fb
+        return [], "请先填写 PAT，再拉取实时模型目录（与 PyCharm 同源）。"
     try:
         client = QoderCloudClient(api_base=api_base, pat=pat)
         live = parse_model_catalog(client._request("GET", "/models"))
-        return live or fb
-    except Exception:
-        return fb
+        if live:
+            return live, f"实时目录 · {len(live)} 个当前可用模型"
+        return [], "账号当前无可用模型（目录为空，可能已下架或未开通）。"
+    except Exception as e:
+        return [], f"拉取实时目录失败：{e}"
 
 
 def _cloud_root(api_base: str) -> str:
