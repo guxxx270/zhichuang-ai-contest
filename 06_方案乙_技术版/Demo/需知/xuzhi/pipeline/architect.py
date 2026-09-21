@@ -294,7 +294,7 @@ def build_decisions(
                            "分钟级轮询" if not re.search(r"公告|秒级", text) else "事件驱动（行情 / 公告推送触发）", "首版求稳，二期升级", "工时 +3～8 人天"))
         ds.append(Decision("D4", "推送渠道", "提醒走什么渠道？", [("企业微信", "触达快、可模板消息", "夜间打扰"), ("邮件", "留痕好", "看得慢"), ("企业微信 + 邮件双发", "兼顾", "重复")],
                            "企业微信" if "企业微信" in card.channels or not card.channels else "、".join(card.channels[:2]), "复用消息推送中心，频控由平台配置", "小"))
-    if card.req_type in ("页面", "报表") or "客户" in card.scope_objects:
+    if card.req_type in ("页面", "报表") or "客户" in card.scope_objects or re.search(r"权限|本人|只能看|自己管理|谁能看", text):
         ds.append(Decision("D5", "权限模型", "谁能看什么：按角色、按产品、按人？",
                            [("角色 + 产品维度（权限中心现成）", "现成、审计友好", "细粒度需配置"), ("自建权限表", "灵活", "重复建设、审计弱")],
                            "角色 + 产品维度（权限中心现成）", "投资经理只看本人产品是常见诉求，权限中心已支持", "工时 -2 人天"))

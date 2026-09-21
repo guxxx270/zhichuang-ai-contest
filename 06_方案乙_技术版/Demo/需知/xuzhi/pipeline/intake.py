@@ -9,7 +9,7 @@ from .. import knowledge, textutil
 from ..llm import LLM, load_prompt
 
 TYPE_RULES: list[tuple[str, str, int]] = [
-    (r"日报|周报|月报|报表|报告|一列|加一列|改版|定期", "报表", 2),
+    (r"日报|周报|月报|报表|报告|一列|加一列|改版|定期|报送|对比表|汇总表|明细表|汇总成一张表|导出 ?Excel|简报", "报表", 2),
     (r"页面|看板|大屏|查询|展示|界面|H5|检索", "页面", 2),
     (r"提醒|预警|告警|通知|推送|提示|别漏", "提醒", 2),
     (r"接口|API|对接|调用", "接口", 2),
@@ -26,6 +26,10 @@ NONFUNC_RULES = [(r"手机(?!_\d)|移动|随时|出差", "手机端可看"), (r"
 
 TITLE_TEMPLATES: list[tuple[str, str]] = [
     (r"净值日报.*对标指数", "净值日报改版：新增对标指数列"),
+    (r"公告.*(汇总|简报|抽出来)", "交易所公告盘前简报（含持仓影响标注）"),
+    (r"适当性.*(匹配|报送)|报送.*适当性", "客户适当性匹配报送表"),
+    (r"套保.*(方案|测算)", "套保方案测算页面"),
+    (r"(仓单|库存).*(周报|日报|报表)", "仓单库存周报"),
     (r"净值日报.*(加|新增|放进|改)", "净值日报改版：新增变动列与风险指标"),
     (r"基差.*(监控|页面|看板)", "基差监控页面（含异常提醒）"),
     (r"(下单|报单).*(限仓|超限)|限仓.*(提示|提醒)", "下单前限仓超限提示"),
@@ -296,7 +300,7 @@ def build_questions(
     seen_cat: dict[str, int] = {}
     for q in qs:
         seen_cat[q.category] = seen_cat.get(q.category, 0) + 1
-    for p in sorted(knowledge.probes(), key=lambda p: (knowledge.IMPACT_ORDER[p.impact], p.tag != "期货")):
+    for p in sorted(knowledge.probes(), key=lambda p: (knowledge.IMPACT_ORDER[p.impact], p.tag != "期货", p.triggers == (".*",))):   # 同档内：期货题优先，常驻通用题（.*）最后
         if not p.hits(body):
             continue
         if has_materials and p.tag == "期货" and not futures_ok:

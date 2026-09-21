@@ -66,6 +66,10 @@ prompts/                模型润色提示词         tests/  pytest（10 项）
 4. `xuzhi/pipeline/tasks.py`：AI 协同系数表（按任务性质），按公司 AI 平台使用情况调整。
 5. `xuzhi/textutil.py`：品种、部门、渠道、数据源词典。
 
+## 评测（成绩单怎么来的）
+
+`python tools/eval_req.py` 把 `data/eval/eval_set.json`（20 条虚构需求，覆盖资管 / 研究 / 投资 / 风控 / 合规 / 营业部 / 财务 / 人力 8 类提出方与报表 / 页面 / 提醒 / 接口 / 数据 / 流程 6 类需求，每条配专家期望）跑一遍规则引擎，对照打分：类型识别、标题、数据来源、指标 / 品种抽取、追问覆盖率与误问率、IT 决策覆盖率、估算落专家区间、时效判断、脱敏漏检、数据地图定位率，成绩单写到 `data/eval/eval_report.md`。`tests/test_eval.py` 把阈值挂进测试，改规则退化会红。**换成公司真实需求（脱敏后）就是真实成绩单**：按同一格式填 `cases`，`python tools/eval_req.py 我的评测集.json`。
+
 ## 数据与合规
 
 所有样例、历史需求、系统目录、原型数据均为虚构。原话与材料（HTML 底稿、仓库代码摘录）进模型前都经隐盾脱敏；不接生产数据库；Git 仓库只在你主动填链接时浅克隆，只放行 http(s)、拒绝本机 / 内网地址，Token 走环境变量不进命令行与 .git/config，凭据类文件不读；原型预览在独立源的沙箱 iframe 里渲染，页面脚本读不到需知本页；每次分析、答复、状态、对账写入 `data/ledger.sqlite3`，对账回写到 `data/history_learned.json`（均已 gitignore）。
