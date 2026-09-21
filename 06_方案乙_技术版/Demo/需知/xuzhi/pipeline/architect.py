@@ -1,4 +1,4 @@
-"""定架：技术栈 / 架构建议 + IT 决策清单（选项 / 推荐 / 理由 / 影响，生成 ADR）+ 复用发现（对照公司系统目录）。
+"""定架：技术栈 / 架构建议 + IT 决策清单（选项 / 推荐 / 理由 / 影响，生成 ADR）+ 复用发现（对照公司系统目录）\n+ 数据地图（需求里的每个数据项定位到 系统 · 数据域 · 接口 · 时效，汇总可复用 / 需申请 / 需新建）。
 有页面底稿时：优先建议在现有 HTML / 前端工程上改，并把底稿写入分层图与 ADR。"""
 from __future__ import annotations
 
@@ -36,6 +36,19 @@ class Decision:
 
 
 @dataclass
+class DataSource:
+    """数据地图的一行：需求里的一个数据项 → 从哪个系统的哪个数据域、走哪个接口取，时效与状态。"""
+    need: str                 # 需求里的数据项（原话口径）
+    system: str               # 来源系统；"—" 表示目录里没有
+    domain: str               # 数据域
+    interface: str            # 接口 / 取数方式
+    freshness: str            # 实时 / T+1 / 日终 / 事件
+    status: str               # 可复用 / 需申请 / 改动受控 / 需新建 / 时效不符
+    owner: str                # 负责团队
+    note: str = ""
+
+
+@dataclass
 class Architecture:
     stack: list[tuple[str, str]]            # (层, 建议)
     layers: dict[str, list[str]]            # 画图用：入口 / 应用 / 服务 / 数据
@@ -45,9 +58,108 @@ class Architecture:
     adr_md: str = ""
     engine: str = "规则"
     draft_names: list[str] = field(default_factory=list)
+    data_map: list[DataSource] = field(default_factory=list)
+    data_map_line: str = ""
+    data_map_stats: dict[str, int] = field(default_factory=dict)
 
 
 AFFINITY = {"报表": "报表平台", "提醒": "消息推送中心", "流程": "OA 移动门户", "接口": "交易系统"}   # 需求类型 → 天然承载平台
+
+STATUS_ORDER = {"需新建": 0, "时效不符": 1, "需计算": 2, "改动受控": 3, "需申请": 4, "可复用": 5}
+
+
+def _realtime_level(card: Card, text: str) -> int:
+    """0 = 日终够用；1 = 偏好实时源（分钟级 / 事件后限时）；2 = 必须实时（下单前 / 盘中 / 秒级）。"""
+    if card.frequency == "实时" or re.search(r"盘中|下单前|报单前|秒级", text):
+        return 2
+    if card.frequency in ("分钟级", "事件后限时") or re.search(r"实时", text):
+        return 1
+    return 0
+
+
+def _data_needs(card: Card) -> list[tuple[str, str]]:
+    """需求里的数据项：(数据项, 来源) —— 先取抽到的数据来源（source），再补指标（indicator，更细、能定位到数据域）。"""
+    needs: list[tuple[str, str]] = []
+    for ds in card.data_sources:
+        if ds and all(ds != n for n, _ in needs):
+            needs.append((ds, "source"))
+    for ind in card.indicators:
+        if ind and not any(ind in n for n, _ in needs):
+            needs.append((ind, "indicator"))
+    return needs[:14]
+
+
+def _interface_for(system: knowledge.System, realtime: bool) -> tuple[str, str]:
+    """挑一个最合适的接口：实时需求优先 SDK / REST，否则优先视图 / 文件；返回 (接口名, 状态)。"""
+    if not system.interfaces:
+        return system.integration or "待确认", "需申请"
+    def rank(i: knowledge.Interface) -> tuple[int, int]:
+        pref = {"REST": 0, "SDK": 1, "SQL 视图": 2, "SQL 表": 2, "文件": 3, "配置": 4} if realtime else \
+               {"SQL 视图": 0, "SQL 表": 0, "文件": 1, "REST": 2, "配置": 3, "SDK": 4}
+        return (0 if i.ready else 1, pref.get(i.type, 5))
+    best = sorted(system.interfaces, key=rank)[0]
+    if best.ready:
+        status = "可复用"
+    elif "受控" in best.status or "审批" in best.status:
+        status = "改动受控"
+    else:
+        status = "需申请"
+    return best.name, status
+
+
+def build_data_map(card: Card, text: str) -> tuple[list[DataSource], str, dict[str, int]]:
+    """数据地图：把需求里的每个数据项定位到「系统 · 数据域 · 接口 · 时效」，并汇总可复用 / 需申请 / 需新建。
+    纯规则：关键词命中数据域 keywords，实时需求优先实时数据域；目录里没有的标为需新建 / 外部接入。"""
+    level = _realtime_level(card, text)
+    realtime = level >= 1
+    rows: list[DataSource] = []
+    for need, origin in _data_needs(card):
+        best: tuple[int, knowledge.System, knowledge.Domain] | None = None
+        for s in knowledge.systems():
+            name_hit = 2 if s.name in need else 0
+            for d in s.domains:
+                hits = sum(len(k) for k in d.keywords if k and k in need)
+                if hits == 0 and not name_hit:
+                    continue
+                score = hits + name_hit * 3 + (3 if (realtime and d.realtime) else 0) + (1 if (not realtime and not d.realtime) else 0)
+                if best is None or score > best[0]:
+                    best = (score, s, d)
+        if best is None:
+            if origin == "indicator":
+                rows.append(DataSource(need, "—", "—", "—", "—", "需计算", "本需求",
+                                       "目录里没有现成字段，由本需求按数据字典口径计算"))
+            else:
+                ext = bool(re.search(r"第三方|外部|研究员维护|交易所日报|手工", need))
+                rows.append(DataSource(need, "—", "—", "—", "—", "需新建", "待定",
+                                       "目录中无此数据源，需外部接入或手工维护表" if ext else "目录中无此数据源，需新建采集 / 落库"))
+            continue
+        _, s, d = best
+        iface, status = _interface_for(s, realtime)
+        note = ""
+        if level >= 2 and not d.realtime and "事件" not in d.freshness:
+            status, note = "时效不符", f"需求要盘中 / 下单前可用，该域为{d.freshness}；需改用实时源或降级为日终口径"
+        rows.append(DataSource(need, s.name, d.name, iface, d.freshness, status, s.owner, note))
+    rows.sort(key=lambda r: STATUS_ORDER.get(r.status, 9))
+    systems = [r.system for r in rows if r.system != "—"]
+    stats = {
+        "systems": len(dict.fromkeys(systems)),
+        "domains": len({(r.system, r.domain) for r in rows if r.system != "—"}),
+        "reuse": sum(1 for r in rows if r.status == "可复用"),
+        "apply": sum(1 for r in rows if r.status in ("需申请", "改动受控")),
+        "new": sum(1 for r in rows if r.status in ("需新建", "时效不符")),
+        "calc": sum(1 for r in rows if r.status == "需计算"),
+    }
+    if not rows:
+        line = "原话里没抽到明确的数据项，数据来源待问清后再定位。"
+    else:
+        line = (f"本需求涉及 {stats['systems']} 个系统、{stats['domains']} 个数据域："
+                f"接口可复用 {stats['reuse']} 项、需申请 / 受控 {stats['apply']} 项、需新建或时效不符 {stats['new']} 项"
+                + (f"、需本需求计算 {stats['calc']} 项" if stats["calc"] else ""))
+        owners = list(dict.fromkeys(r.owner for r in rows if r.owner not in ("", "待定", "本需求")))
+        if owners:
+            line += f"；涉及团队：{'、'.join(owners[:5])}"
+        line += "。"
+    return rows, line, stats
 
 
 def discover_reuse(card: Card, text: str) -> list[Reuse]:
@@ -200,14 +312,26 @@ def build_decisions(
     return ds
 
 
+def data_map_markdown(rows: list[DataSource], line: str = "") -> list[str]:
+    if not rows:
+        return []
+    md = ["## 数据地图（数据从哪取）", line, "", "| 数据项 | 来源系统 | 数据域 | 接口 / 取数方式 | 时效 | 状态 | 负责 |", "|---|---|---|---|---|---|---|"]
+    for r in rows:
+        md.append(f"| {r.need} | {r.system} | {r.domain} | {r.interface} | {r.freshness} | {r.status}{'（' + r.note + '）' if r.note else ''} | {r.owner} |")
+    return md + [""]
+
+
 def adr_markdown(
     card: Card,
     decisions: list[Decision],
     drafts: list[Draft] | None = None,
     repos: list[RepoBundle] | None = None,
+    data_map: list[DataSource] | None = None,
+    data_map_line: str = "",
 ) -> str:
     today = date.today().isoformat()
     md = [f"# ADR · {card.title}", f"日期：{today}　状态：待评审　生成：需知", ""]
+    md += data_map_markdown(data_map or [], data_map_line)
     if drafts or repos:
         md += ["## 现有材料", summarize(drafts or [], repos or []), ""]
         for r in (repos or [])[:2]:
@@ -234,12 +358,26 @@ def build_architecture(
     reuse = discover_reuse(card, text)
     stack, layers = suggest_stack(card, text, reuse, drafts=usable, repos=repos)
     decisions = build_decisions(card, text, reuse, drafts=usable, repos=repos)
+    data_map, map_line, map_stats = build_data_map(card, text)
+    if data_map:
+        # 分层图的数据层改用数据地图定位到的系统；目录里没有的数据项单独标"待接入"
+        located = list(dict.fromkeys(r.system for r in data_map if r.system != "—"))
+        missing = [r.need.split("（")[0] for r in data_map if r.system == "—" and r.status == "需新建"]
+        layers["数据"] = (located + [f"待接入·{m}" for m in missing[:2]]) or layers["数据"]
+        for d in decisions:
+            if d.id == "D2":
+                d.reason += "；数据地图：" + "，".join(
+                    f"{r.need.split('（')[0]}←{r.system}（{r.freshness}）" for r in data_map[:4] if r.system != "—"
+                )
+                if map_stats.get("new"):
+                    d.impact += f"；{map_stats['new']} 项数据需新建或换实时源"
     line = _coverage_line(card, reuse)
     if usable or repos:
         line = f"已加载材料：{summarize(drafts, repos)}。" + line
     arch = Architecture(
         stack, layers, reuse, line, decisions,
         draft_names=[*(d.name for d in usable), *(r.name for r in repos)],
+        data_map=data_map, data_map_line=map_line, data_map_stats=map_stats,
     )
-    arch.adr_md = adr_markdown(card, decisions, drafts=usable, repos=repos)
+    arch.adr_md = adr_markdown(card, decisions, drafts=usable, repos=repos, data_map=data_map, data_map_line=map_line)
     return arch

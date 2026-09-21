@@ -1,38 +1,131 @@
 {
-  "_说明": "公司系统 / 组件目录（虚构示例，用于\"复用发现\"）。capabilities 是能力关键词，需求命中越多，说明该系统能覆盖越多；owner 是负责团队；integration 说明接入方式。换成公司真实目录即可复用。",
+  "_说明": "公司系统 / 组件目录（虚构示例，用于\"复用发现\"与\"数据地图\"）。capabilities 是能力关键词，需求命中越多，说明该系统能覆盖越多；owner 是负责团队；integration 说明接入方式。data_domains 是该系统持有的数据域（keywords 用于把需求里的数据项定位到系统，freshness 是时效）；interfaces 是可用接口及状态（可用 / 需申请 / 改动受控 / 试点）。换成公司真实目录即可复用；没有 data_domains / interfaces 的老格式也能加载。",
   "systems": [
     {"id": "RPT", "name": "报表平台", "owner": "技术部·数据组",
      "capabilities": ["定时报表", "日报", "周报", "Excel", "PDF", "订阅", "分发", "模板", "导出", "看板"],
-     "integration": "配置数据集 + 模板，支持定时任务与订阅推送", "maturity": "成熟"},
+     "integration": "配置数据集 + 模板，支持定时任务与订阅推送", "maturity": "成熟",
+     "data_domains": [
+       {"name": "报表数据集", "keywords": ["报表", "日报", "周报", "看板"], "freshness": "日终"}
+     ],
+     "interfaces": [
+       {"name": "数据集配置 + 报表模板", "type": "配置", "status": "可用"},
+       {"name": "订阅 / 定时分发任务", "type": "定时任务", "status": "可用"}
+     ]},
     {"id": "DWH", "name": "数据仓库", "owner": "技术部·数据组",
      "capabilities": ["行情日终", "结算", "持仓日终", "净值", "历史数据", "回填", "品种", "合约", "主力合约"],
-     "integration": "SQL 视图 / 数据集接口，T+1 可得", "maturity": "成熟"},
+     "integration": "SQL 视图 / 数据集接口，T+1 可得", "maturity": "成熟",
+     "data_domains": [
+       {"name": "行情日终", "keywords": ["行情", "结算价", "收盘价", "涨跌幅", "涨跌停", "主力合约", "合约", "K线", "走势"], "freshness": "T+1"},
+       {"name": "持仓日终", "keywords": ["持仓", "持仓量", "头寸", "敞口", "持仓盈亏"], "freshness": "T+1"},
+       {"name": "产品净值（同步自估值核算）", "keywords": ["净值", "单位净值", "累计净值", "份额"], "freshness": "T+1"},
+       {"name": "指数与比较基准", "keywords": ["对标指数", "指数", "基准", "超额收益", "跟踪误差"], "freshness": "T+1"},
+       {"name": "历史数据", "keywords": ["历史", "回填", "回测"], "freshness": "T+1"}
+     ],
+     "interfaces": [
+       {"name": "SQL 视图 v_mkt_daily / v_pos_daily / v_nav_daily", "type": "SQL 视图", "status": "可用"},
+       {"name": "数据集接口 /dwh/api/dataset", "type": "REST", "status": "可用"}
+     ]},
     {"id": "MKT", "name": "行情服务", "owner": "技术部·交易组",
      "capabilities": ["实时行情", "分钟线", "K线", "盘中", "主力合约", "涨跌幅", "异动"],
-     "integration": "行情推送 SDK / REST 快照，需申请订阅额度", "maturity": "成熟"},
+     "integration": "行情推送 SDK / REST 快照，需申请订阅额度", "maturity": "成熟",
+     "data_domains": [
+       {"name": "实时行情", "keywords": ["实时行情", "行情", "最新价", "盘中", "分钟线", "K线", "异动", "涨跌幅"], "freshness": "实时"}
+     ],
+     "interfaces": [
+       {"name": "行情推送 SDK", "type": "SDK", "status": "需申请订阅额度"},
+       {"name": "REST 快照 /mkt/snapshot", "type": "REST", "status": "可用"}
+     ]},
     {"id": "TRD", "name": "交易系统", "owner": "技术部·交易组",
      "capabilities": ["下单", "实时持仓", "事前风控", "限仓校验", "保证金", "可用资金", "指令"],
-     "integration": "旁路查询接口可用；改交易链路需审批与灰度", "maturity": "成熟·改动受控"},
+     "integration": "旁路查询接口可用；改交易链路需审批与灰度", "maturity": "成熟·改动受控",
+     "data_domains": [
+       {"name": "实时持仓与资金", "keywords": ["实时持仓", "持仓", "可用资金", "保证金", "保证金占用", "风险度", "资金", "追保", "资金缺口"], "freshness": "实时"},
+       {"name": "指令与成交", "keywords": ["下单", "报单", "指令", "成交", "拒单", "成交量"], "freshness": "实时"},
+       {"name": "限仓与风控参数", "keywords": ["限仓", "持仓限额", "超限", "事前风控", "风控参数"], "freshness": "实时"}
+     ],
+     "interfaces": [
+       {"name": "旁路查询接口 /trd/query（只读）", "type": "REST", "status": "可用"},
+       {"name": "事前风控插件（改交易链路）", "type": "进程内插件", "status": "改动受控·需审批"}
+     ]},
+    {"id": "STL", "name": "结算系统", "owner": "技术部·交易组 + 结算部",
+     "capabilities": ["结算", "结算单", "结算价", "手续费", "盈亏", "出入金", "日终"],
+     "integration": "结算后生成日终文件与视图，供数据仓库同步", "maturity": "成熟·外购",
+     "data_domains": [
+       {"name": "结算数据", "keywords": ["结算", "结算单", "结算价", "手续费", "盈亏", "出入金", "结算后"], "freshness": "日终（结算后）"}
+     ],
+     "interfaces": [
+       {"name": "结算后日终文件", "type": "文件", "status": "可用"},
+       {"name": "结算视图 v_settle_daily", "type": "SQL 视图", "status": "可用"}
+     ]},
     {"id": "RSK", "name": "风控系统", "owner": "风控部 + 技术部",
      "capabilities": ["风险指标", "回撤", "集中度", "杠杆", "预警", "限额", "风险度", "日终指标"],
-     "integration": "日终指标表 + 预警规则配置", "maturity": "成熟"},
+     "integration": "日终指标表 + 预警规则配置", "maturity": "成熟",
+     "data_domains": [
+       {"name": "日终风险指标", "keywords": ["风险指标", "回撤", "集中度", "杠杆", "VaR", "风险度"], "freshness": "T+1"},
+       {"name": "预警规则与限额", "keywords": ["预警", "限额", "阈值", "超限"], "freshness": "实时（规则）"}
+     ],
+     "interfaces": [
+       {"name": "日终指标表 t_risk_daily", "type": "SQL 表", "status": "可用"},
+       {"name": "预警规则配置", "type": "配置", "status": "可用"}
+     ]},
     {"id": "MSG", "name": "消息推送中心", "owner": "技术部·基础组",
      "capabilities": ["企业微信", "邮件", "短信", "推送", "提醒", "通知", "去重", "模板消息"],
-     "integration": "统一推送 API，支持渠道与频控配置", "maturity": "成熟"},
+     "integration": "统一推送 API，支持渠道与频控配置", "maturity": "成熟",
+     "data_domains": [],
+     "interfaces": [
+       {"name": "统一推送 API /msg/send", "type": "REST", "status": "可用"},
+       {"name": "模板消息与频控配置", "type": "配置", "status": "可用"}
+     ]},
     {"id": "OAM", "name": "OA 移动门户", "owner": "技术部·应用组",
      "capabilities": ["手机", "移动", "H5", "单点登录", "审批", "待办"],
-     "integration": "H5 嵌入 + SSO", "maturity": "成熟"},
+     "integration": "H5 嵌入 + SSO", "maturity": "成熟",
+     "data_domains": [],
+     "interfaces": [
+       {"name": "H5 嵌入 + SSO", "type": "页面嵌入", "status": "可用"},
+       {"name": "待办 / 审批流接口", "type": "REST", "status": "可用"}
+     ]},
     {"id": "VAL", "name": "估值核算系统", "owner": "资管运营 + 技术部",
      "capabilities": ["净值", "估值", "产品", "份额", "分红", "T+1"],
-     "integration": "日终净值文件 / 视图", "maturity": "成熟·外购"},
+     "integration": "日终净值文件 / 视图", "maturity": "成熟·外购",
+     "data_domains": [
+       {"name": "产品估值", "keywords": ["净值", "单位净值", "累计净值", "估值", "份额", "分红", "产品规模", "估值核算"], "freshness": "T+1"}
+     ],
+     "interfaces": [
+       {"name": "日终净值文件", "type": "文件", "status": "可用"},
+       {"name": "估值视图 v_nav_daily（经数据仓库）", "type": "SQL 视图", "status": "可用"}
+     ]},
+    {"id": "CRM", "name": "客户管理系统", "owner": "技术部·应用组 + 客户服务部",
+     "capabilities": ["客户", "资金账号", "投资者", "客户经理", "适当性", "联系方式"],
+     "integration": "客户主数据接口（字段级权限，敏感字段脱敏输出）", "maturity": "成熟",
+     "data_domains": [
+       {"name": "客户与账户主数据", "keywords": ["客户", "资金账号", "投资者", "账户", "客户经理", "适当性", "客户管理"], "freshness": "实时（主数据）"}
+     ],
+     "interfaces": [
+       {"name": "客户主数据接口 /crm/customer（脱敏输出）", "type": "REST", "status": "需申请字段权限"}
+     ]},
     {"id": "IAM", "name": "权限中心", "owner": "技术部·基础组",
      "capabilities": ["角色", "数据权限", "产品授权", "部门", "审计", "留痕"],
-     "integration": "统一鉴权 SDK；数据权限按产品 / 部门维度", "maturity": "成熟"},
+     "integration": "统一鉴权 SDK；数据权限按产品 / 部门维度", "maturity": "成熟",
+     "data_domains": [],
+     "interfaces": [
+       {"name": "统一鉴权 SDK", "type": "SDK", "status": "可用"},
+       {"name": "数据权限（产品 / 部门维度）配置", "type": "配置", "status": "可用"}
+     ]},
     {"id": "AIP", "name": "公司 AI 平台", "owner": "信息技术部",
      "capabilities": ["大模型", "LLM", "解析", "摘要", "文本", "问答", "生成"],
-     "integration": "OpenAI 兼容 API，key 申请制", "maturity": "试点"},
+     "integration": "OpenAI 兼容 API，key 申请制", "maturity": "试点",
+     "data_domains": [],
+     "interfaces": [
+       {"name": "OpenAI 兼容 API", "type": "REST", "status": "需申请 key"}
+     ]},
     {"id": "ANN", "name": "公告采集服务", "owner": "技术部·数据组",
      "capabilities": ["公告", "交易所", "抓取", "保证金调整", "手续费", "涨跌停", "解析"],
-     "integration": "定时抓取五家交易所公告，提供原文与初步结构化字段", "maturity": "试点"}
+     "integration": "定时抓取五家交易所公告，提供原文与初步结构化字段", "maturity": "试点",
+     "data_domains": [
+       {"name": "交易所公告", "keywords": ["公告", "交易所公告", "保证金调整", "手续费调整", "涨跌停调整", "交易所通知", "公告采集"], "freshness": "事件（抓取后 10 分钟内）"}
+     ],
+     "interfaces": [
+       {"name": "公告原文 + 结构化字段 /ann/list", "type": "REST", "status": "试点·可用"}
+     ]}
   ]
 }

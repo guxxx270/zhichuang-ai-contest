@@ -24,15 +24,17 @@ def list_openai_models(api_base: str, api_key: str) -> tuple[list[tuple[str, str
     if not base:
         return [], "缺少 API Base。"
     url = base if base.endswith("/models") else base + "/models"
-    req = Request(
-        url,
-        headers={
-            "Authorization": f"Bearer {api_key.strip()}",
-            "Accept": "application/json",
-        },
-        method="GET",
-    )
+    if not re.match(r"^https?://", url, re.I):
+        return [], "API Base 须以 http:// 或 https:// 开头。"
     try:
+        req = Request(
+            url,
+            headers={
+                "Authorization": f"Bearer {api_key.strip()}",
+                "Accept": "application/json",
+            },
+            method="GET",
+        )
         with urlopen(req, timeout=30) as resp:
             raw = json.loads(resp.read().decode("utf-8", errors="replace") or "{}")
     except HTTPError as e:
@@ -42,7 +44,7 @@ def list_openai_models(api_base: str, api_key: str) -> tuple[list[tuple[str, str
         except Exception:
             pass
         return [], f"拉取实时目录失败：HTTP {e.code} {detail}".strip()
-    except (URLError, TimeoutError, json.JSONDecodeError, OSError) as e:
+    except (URLError, TimeoutError, json.JSONDecodeError, OSError, ValueError) as e:
         return [], f"拉取实时目录失败：{e}"
     live = parse_model_catalog(raw)
     if live:

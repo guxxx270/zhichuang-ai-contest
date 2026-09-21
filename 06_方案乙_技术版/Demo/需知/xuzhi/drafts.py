@@ -303,6 +303,9 @@ def normalize_url(url: str) -> str:
 
 def fetch_url(url: str) -> bytes:
     url = normalize_url(url)
+    why = check_clone_url(url)
+    if why:
+        raise RuntimeError(why)
     req = urllib.request.Request(
         url,
         headers={"User-Agent": "XuZhi-DraftFetcher/0.3", "Accept": "*/*"},
@@ -351,6 +354,8 @@ def _collect_source_files(root: Path) -> list[Path]:
             continue
         if p.stat().st_size > MAX_FILE_BYTES:
             continue
+        if is_secret_path(str(p.relative_to(root))):
+            continue   # 凭据类文件不读
         found.append(p)
     found.sort(key=lambda p: (-_file_priority(str(p.relative_to(root)).replace("\\", "/")), str(p)))
     return found
@@ -408,20 +413,90 @@ def ingest_repo_dir(root: Path, url: str = "") -> tuple[list[Draft], RepoBundle]
     return drafts, bundle
 
 
+def _is_private_host(host: str) -> bool:
+    """回环 / 内网 / 链路本地地址一律拒绝：仓库只允许拉公网或公司代码托管平台，防止把需知当内网探针。"""
+    import ipaddress
+    import socket
+
+    h = (host or "").strip().lower().strip("[]")
+    if not h or h in ("localhost", "localhost.localdomain") or h.endswith(".local") or h.endswith(".localhost"):
+        return True
+    candidates: list[str] = []
+    try:
+        ipaddress.ip_address(h)
+        candidates.append(h)
+    except ValueError:
+        try:
+            candidates = sorted({ai[4][0] for ai in socket.getaddrinfo(h, None)})
+        except (socket.gaierror, OSError):
+            return False   # 解析不了就交给 git 报错，不在此处误判
+    for ip in candidates:
+        try:
+            addr = ipaddress.ip_address(ip.split("%")[0])
+        except ValueError:
+            return True
+        if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved or addr.is_multicast or addr.is_unspecified:
+            return True
+    return False
+
+
+def check_clone_url(clone_url: str) -> str:
+    """仓库地址白名单：只放行 http(s)，拒绝 file:// ssh:// git@ 与内网地址。返回不通过的原因，空串为通过。"""
+    parsed = urlparse(clone_url)
+    if parsed.scheme not in ("http", "https"):
+        return "仓库地址只支持 http(s)://（不支持 file://、ssh、git@）"
+    if parsed.username or parsed.password:
+        return "仓库地址里不要带用户名 / 密码，Token 请填在右侧输入框"
+    if _is_private_host(parsed.hostname or ""):
+        return "仓库地址指向本机 / 内网地址，需知不拉取内网资源"
+    return ""
+
+
+def _git_auth_env(token: str = "", username: str = "", host: str = "") -> dict[str, str]:
+    """Token 不进命令行、不进 .git/config：通过 GIT_CONFIG_* 环境变量以 Authorization 头传给 git（git ≥ 2.31）。"""
+    import base64
+
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "echo"}
+    token = (token or "").strip()
+    if not token:
+        return env
+    user = (username or "").strip()
+    if not user:
+        h = (host or "").lower()
+        user = "x-access-token" if h == "github.com" or h.endswith(".github.com") else "oauth2"
+    basic = base64.b64encode(f"{user}:{token}".encode("utf-8")).decode("ascii")
+    env.update({
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "http.extraHeader",
+        "GIT_CONFIG_VALUE_0": f"Authorization: Basic {basic}",
+    })
+    return env
+
+
 def load_from_git(
     url: str,
     token: str = "",
     username: str = "",
 ) -> tuple[list[Draft], list[RepoBundle]]:
     clone_url, sub = _repo_clone_url(url)
-    auth_url = inject_git_auth(clone_url, token=token, username=username)
+    why = check_clone_url(clone_url)
+    if why:
+        raise RuntimeError(f"{why}：{redact_secrets(clone_url, token)}")
     display_url = redact_secrets(clone_url, token)
     with tempfile.TemporaryDirectory(prefix="xuzhi_git_") as tmp:
         dest = Path(tmp) / "repo"
-        env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+        env = _git_auth_env(token, username, urlparse(clone_url).hostname or "")
         try:
             subprocess.run(
-                ["git", "clone", "--depth", "1", auth_url, str(dest)],
+                [
+                    "git",
+                    "-c", "protocol.allow=never",
+                    "-c", "protocol.http.allow=always",
+                    "-c", "protocol.https.allow=always",
+                    "-c", "credential.helper=",
+                    "clone", "--depth", "1",
+                    clone_url, str(dest),
+                ],
                 check=True,
                 capture_output=True,
                 text=True,
@@ -667,6 +742,10 @@ def _trim_html(html: str, limit: int) -> str:
     head_m = re.search(r"(?is)(<head\b[^>]*>.*?</head>)", s)
     body_m = re.search(r"(?is)(<body\b[^>]*>)(.*?)(</body>)", s)
     head = head_m.group(1) if head_m else ""
+    head_budget = max(1500, limit // 3)
+    if len(head) > head_budget:
+        # 另存为的页面常带整站内联 CSS；head 也按预算截，不能整段送模型
+        head = head[:head_budget] + "\n/* …样式过长已截断… */\n</style></head>"
     if body_m:
         open_b, body, close_b = body_m.group(1), body_m.group(2), body_m.group(3)
         budget = max(2000, limit - len(head) - 80)
@@ -674,6 +753,27 @@ def _trim_html(html: str, limit: int) -> str:
             body = body[:budget] + "\n<!-- …底稿过长已截断… -->\n"
         return f"<!doctype html><html>{head}{open_b}{body}{close_b}</html>"
     return s[:limit] + "\n<!-- …底稿过长已截断… -->\n"
+
+
+_SECRET_FILE_RE = re.compile(
+    r"(?i)(^|/)(\.env(\..*)?|.*\.(pem|key|p12|pfx|jks|keystore)|id_(rsa|dsa|ecdsa|ed25519)(\.pub)?|"
+    r".*(secret|credential|password|passwd|token)s?[^/]*)$"
+)
+
+
+def is_secret_path(path: str) -> bool:
+    """密钥 / 凭据类文件不进模型，也不进代码包。"""
+    return bool(_SECRET_FILE_RE.search((path or "").replace("\\", "/")))
+
+
+def redact_material(text: str, mapping: dict[str, str] | None = None) -> str:
+    """材料（底稿 HTML、仓库代码摘录）进模型前也过一遍隐盾；mapping 若给出则累计标签→原文，供输出还原。"""
+    from .privacy import Redactor
+
+    r = Redactor().redact(text or "")
+    if mapping is not None:
+        mapping.update(r.mapping)
+    return r.text
 
 
 def _rank_code_files(files: list[CodeFile], keywords: set[str]) -> list[CodeFile]:
@@ -697,8 +797,11 @@ def draft_context_for_llm(
     html_limit: int = 18000,
     code_limit: int = 28000,
     keywords: set[str] | list[str] | None = None,
+    mapping: dict[str, str] | None = None,
 ) -> dict:
-    """问清 / 定架 / 出样共用：HTML 底稿 + Git 前后端代码摘录。"""
+    """问清 / 定架 / 出样共用：HTML 底稿 + Git 前后端代码摘录。
+    所有 html / excerpt 都先过隐盾（redact_material）再返回；mapping 给出时累计标签→原文，供调用方还原模型输出。
+    凭据类文件（.env、*.pem、*secret* …）直接跳过。"""
     drafts = list(drafts or [])
     repos = list(repos or [])
     keys = set(keywords or [])
@@ -713,10 +816,10 @@ def draft_context_for_llm(
         html_briefs.append({
             "name": d.name,
             "source": d.source,
-            "title": d.title,
-            "headings": d.headings[:8],
+            "title": redact_material(d.title, mapping),
+            "headings": [redact_material(h, mapping) for h in d.headings[:8]],
             "table_headers": d.table_headers[:20],
-            "html": _trim_html(d.html, share),
+            "html": redact_material(_trim_html(d.html, share), mapping),
         })
         remain_html = max(0, remain_html - len(html_briefs[-1]["html"]))
         if remain_html < 1200:
@@ -730,8 +833,10 @@ def draft_context_for_llm(
         for f in ranked:
             if remain_code < 800:
                 break
+            if is_secret_path(f.path):
+                continue
             share = min(4000, remain_code)
-            excerpt = _trim_text(f.text, share)
+            excerpt = redact_material(_trim_text(f.text, share), mapping)
             repo_files.append({"path": f.path, "kind": f.kind, "excerpt": excerpt})
             remain_code -= len(excerpt)
         code_briefs.append({

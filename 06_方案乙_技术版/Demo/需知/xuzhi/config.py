@@ -43,6 +43,7 @@ LIVE_OPENAI_PROVIDERS: dict[str, str] = {
 DATA_DIR = ROOT / "data"
 SAMPLES_DIR = DATA_DIR / "samples"
 HISTORY_PATH = DATA_DIR / "history_requirements.json"
+HISTORY_LEARNED_PATH = DATA_DIR / "history_learned.json"   # 台账对账回写的真实样本（gitignore），与样本库合并使用
 KNOWLEDGE_DIR = ROOT / "knowledge"
 PROBES_PATH = KNOWLEDGE_DIR / "futures_probes.json"
 CATALOG_PATH = KNOWLEDGE_DIR / "system_catalog.json"
@@ -53,7 +54,7 @@ PRODUCT_NAME = "需知"
 PRODUCT_EN = "XuZhi"
 PRODUCT_SLOGAN = "一堆话进来，一份能开工的需求出去。"
 SKILLS = [("问清", "先问清，再开工"), ("写单", "业务版 · 技术版"), ("估量", "不拍脑袋的工时"),
-          ("定架", "告诉领导要拍板什么"), ("出样", "看得见的需求"), ("对账", "改了什么一眼看 · 二期")]
+          ("定架", "拍板什么 · 数据从哪取"), ("出样", "看得见的需求"), ("对账", "一本账 · 估了多少实际多少")]
 BRAND = {"navy": "#14367A", "accent": "#E07A1F", "paper": "#F6F4EF", "ink": "#1F2937", "mist": "#E5E7EB", "teal": "#0F766E"}
 
 DAYS_PER_COMPLEXITY_POINT = 1.6

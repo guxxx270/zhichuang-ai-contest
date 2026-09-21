@@ -414,17 +414,24 @@ def refine_with_llm(
             card.features = feats[:12]
             card.raw_features = (card.raw_features + [""] * 12)[: len(card.features)]
     extras: list[Question] = []
-    for i, q in enumerate(data.get("extra_questions", [])[:4]):
-        if isinstance(q, dict) and q.get("question"):
+    raw_extras = data.get("extra_questions")
+    if not isinstance(raw_extras, list):
+        raw_extras = []
+    for i, q in enumerate(raw_extras[:4]):
+        if isinstance(q, dict) and isinstance(q.get("question"), str) and q["question"].strip():
+            impact = str(q.get("impact") or "中").strip()
+            impact = {"high": "高", "medium": "中", "low": "低"}.get(impact.lower(), impact)
+            if impact not in ("高", "中", "低"):
+                impact = "中"
             extras.append(
                 Question(
                     f"L{i + 1}",
-                    q.get("category", "补充"),
+                    str(q.get("category") or "补充"),
                     "模型",
-                    q.get("impact", "中"),
-                    q["question"],
-                    q.get("why", ""),
-                    q.get("default", "待业务答复"),
+                    impact,
+                    q["question"].strip(),
+                    str(q.get("why") or ""),
+                    str(q.get("default") or "待业务答复"),
                 )
             )
     if extras and has_materials:

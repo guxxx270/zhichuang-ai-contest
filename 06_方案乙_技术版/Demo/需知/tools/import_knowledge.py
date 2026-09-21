@@ -177,9 +177,33 @@ def rows_to_catalog(df: pd.DataFrame) -> list[dict]:
         if not name or name == "nan":
             continue
         caps = [c.strip() for c in re.split(r"[、,，;；|/ ]+", str(r.get("能力关键词（顿号分隔）", r.get("能力关键词", "")))) if c.strip()]
-        out.append({"id": str(r.get("编号", name[:3])).strip(), "name": name, "owner": str(r.get("负责团队", "")).strip(), "capabilities": caps,
-                    "integration": str(r.get("接入方式", "")).strip(), "maturity": str(r.get("成熟度（成熟/试点/改动受控）", r.get("成熟度", "成熟"))).strip()})
+        item = {"id": str(r.get("编号", name[:3])).strip(), "name": name, "owner": str(r.get("负责团队", "")).strip(), "capabilities": caps,
+                "integration": str(r.get("接入方式", "")).strip(), "maturity": str(r.get("成熟度（成熟/试点/改动受控）", r.get("成熟度", "成熟"))).strip()}
+        # 可选两列（数据地图用）：数据域 "名称:关键词1/关键词2:时效；…"，接口 "名称:类型:状态；…"
+        dom_raw = str(r.get("数据域（名称:关键词/关键词:时效；分号分隔）", r.get("数据域", "")) or "").strip()
+        if dom_raw and dom_raw != "nan":
+            item["data_domains"] = [d for d in (_parse_domain(x) for x in re.split(r"[;；\n]+", dom_raw)) if d]
+        if_raw = str(r.get("接口（名称:类型:状态；分号分隔）", r.get("接口", "")) or "").strip()
+        if if_raw and if_raw != "nan":
+            item["interfaces"] = [i for i in (_parse_interface(x) for x in re.split(r"[;；\n]+", if_raw)) if i]
+        out.append(item)
     return out
+
+
+def _parse_domain(x: str) -> dict | None:
+    parts = [p.strip() for p in re.split(r"[:：]", x.strip()) if p.strip()]
+    if not parts:
+        return None
+    name = parts[0]
+    kws = [k.strip() for k in re.split(r"[/、,，|]+", parts[1])] if len(parts) > 1 else [name]
+    return {"name": name, "keywords": [k for k in kws if k] or [name], "freshness": parts[2] if len(parts) > 2 else ""}
+
+
+def _parse_interface(x: str) -> dict | None:
+    parts = [p.strip() for p in re.split(r"[:：]", x.strip()) if p.strip()]
+    if not parts:
+        return None
+    return {"name": parts[0], "type": parts[1] if len(parts) > 1 else "", "status": parts[2] if len(parts) > 2 else "可用"}
 
 
 def write_json(path: Path, key: str, items: list[dict], note: str, dry: bool) -> None:

@@ -1276,11 +1276,13 @@ def adapt_draft_with_llm(card: Card, drafts: list[Draft], llm, repos: list | Non
     """有可复刻底稿则在原 HTML 上改；SPA 空壳 / 无底稿则按需求+仓库生成完整原型。"""
     if getattr(llm, "mode", "") != "api":
         return None, None
-    from ..drafts import draft_context_for_llm, _trim_html
+    from ..drafts import draft_context_for_llm, _trim_html, redact_material
     from ..llm import load_prompt
+    from ..privacy import Redactor
     from .. import textutil as _tu
     import json
 
+    mapping: dict[str, str] = {}   # 材料脱敏标签 → 原文；模型输出后还原
     keys = set(card.keywords()) | set(card.indicators) | set(card.features) | {card.title, card.req_type}
     usable = visual_drafts(drafts)
     draft = pick_draft(usable, keys) if usable else None
@@ -1325,7 +1327,7 @@ def adapt_draft_with_llm(card: Card, drafts: list[Draft], llm, repos: list | Non
             "改表时只动原 <table>：加列只加「明确要加的列」里写出的名字，说加一列就只加一列；"
             "不要把标题、页面名、指标词典里的词当成新列；原表已有的列不要再加一份。"
         )
-        payload["底稿完整HTML"] = _trim_html(draft.html, 28000)
+        payload["底稿完整HTML"] = redact_material(_trim_html(draft.html, 28000), mapping)
         if repos:
             payload["现有系统材料"] = draft_context_for_llm(
                 [],
@@ -1334,6 +1336,7 @@ def adapt_draft_with_llm(card: Card, drafts: list[Draft], llm, repos: list | Non
                 html_limit=2000,
                 code_limit=12000,
                 keywords=keys,
+                mapping=mapping,
             )
     else:
         payload["硬性要求"] = (
@@ -1349,6 +1352,7 @@ def adapt_draft_with_llm(card: Card, drafts: list[Draft], llm, repos: list | Non
                 html_limit=8000,
                 code_limit=22000,
                 keywords=keys,
+                mapping=mapping,
             )
         else:
             payload["说明"] = "用户未提供 HTML 或 Git，请仅根据需求卡片自行设计一版合理原型页。"
@@ -1357,100 +1361,14 @@ def adapt_draft_with_llm(card: Card, drafts: list[Draft], llm, repos: list | Non
     except Exception:
         return None, draft
     page = _extract_html(raw)
+    if mapping and page:
+        page = Redactor.restore(page, mapping)   # 材料里被隐盾替换的标签还原成原文
     if draft:
         if not _html_ok(page, card, draft):
             return None, draft
         rng = _rng(card.title + (draft.name or ""))
         page, cols = _mutate_draft_table(page, card, rng, client_view=False, demand_text=demand_text)
         banner_cols = cols or add_cols[:5]
-        if "需知" not in page[:800]:
-            page = _inject_banner(page, card, draft, banner_cols)
-        return page, draft
-    if not page or ("<html" not in page.lower() and "<body" not in page.lower() and "<svg" not in page.lower() and "<table" not in page.lower()):
-        return None, None
-    if "需知" not in page[:800]:
-        who = html.escape(card.requester or "业务方")
-        banner = (
-            f'<div style="background:#111;color:#fff;padding:6px 12px;font-size:12px;">'
-            f'<b>需知 · 出样</b>　按需求生成原型（无静态底稿可复刻）　{html.escape(card.title)}　{who}</div>'
-        )
-        if "<body" in page.lower():
-            page = re.sub(r"(<body[^>]*>)", r"\1" + banner, page, count=1, flags=re.I)
-        else:
-            page = banner + page
-    return page, None
-    """有可复刻底稿则在原 HTML 上改；SPA 空壳 / 无底稿则按需求+仓库生成完整原型。"""
-    if getattr(llm, "mode", "") != "api":
-        return None, None
-    from ..drafts import draft_context_for_llm, _trim_html
-    from ..llm import load_prompt
-    import json
-
-    keys = set(card.keywords()) | set(card.indicators) | set(card.features) | {card.title, card.req_type}
-    usable = visual_drafts(drafts)
-    draft = pick_draft(usable, keys) if usable else None
-    system = load_prompt("prototype_adapt") or (
-        "有可复刻静态底稿时在原 HTML 上改；SPA 空壳不算底稿，须按需求生成完整可交互 HTML。只输出 HTML。"
-    )
-    spa_notes = [d.note for d in (drafts or []) if d.note]
-    payload = {
-        "需求标题": card.title,
-        "需求类型": card.req_type,
-        "功能点": card.features,
-        "指标与新增列": card.indicators,
-        "提出方": card.requester,
-        "使用者": card.users,
-        "渠道": card.channels,
-        "主底稿": draft.name if draft else "",
-        "有现有材料": bool(drafts or repos),
-        "材料备注": spa_notes,
-    }
-    if draft:
-        payload["硬性要求"] = (
-            "下面「底稿完整HTML」是唯一视觉基准：保留全部 style/class/布局，只按需求做最小改动。"
-            "禁止重画成另一套页面。"
-        )
-        payload["底稿完整HTML"] = _trim_html(draft.html, 28000)
-        if repos:
-            payload["现有系统材料"] = draft_context_for_llm(
-                [],
-                list(repos or []),
-                prefer=None,
-                html_limit=2000,
-                code_limit=12000,
-                keywords=keys,
-            )
-    else:
-        payload["硬性要求"] = (
-            "没有可复刻的静态页面（可能是 Vue/React SPA 入口或仅有后端仓库）。"
-            "必须按功能点生成完整自包含 HTML 原型：把 Tab、筛选、图表、默认因子/品种都画出来，不要只出说明条。"
-            "不相干菜单可保留外观但点击不跳转。"
-        )
-        if drafts or repos:
-            payload["现有系统材料"] = draft_context_for_llm(
-                list(drafts or []),
-                list(repos or []),
-                prefer=None,
-                html_limit=8000,
-                code_limit=22000,
-                keywords=keys,
-            )
-        else:
-            payload["说明"] = "用户未提供 HTML 或 Git，请仅根据需求卡片自行设计一版合理原型页。"
-    try:
-        raw = llm.chat(system, user=json.dumps(payload, ensure_ascii=False), temperature=0.1)
-    except Exception:
-        return None, draft
-    page = _extract_html(raw)
-    if draft:
-        if not _html_ok(page, card, draft):
-            return None, draft
-        # 模型可能漏改表结构：规则强制在原始表上补增/删/改列
-        rng = _rng(card.title + (draft.name or ""))
-        # demand 文本尽量带上功能点，便于抽删列/改名
-        demand_bits = " ".join([card.title or ""] + list(card.features or []) + list(card.raw_features or []))
-        page, cols = _mutate_draft_table(page, card, rng, client_view=False, demand_text=demand_bits)
-        banner_cols = cols or [c for c in card.indicators if c not in (draft.table_headers or [])][:5]
         if "需知" not in page[:800]:
             page = _inject_banner(page, card, draft, banner_cols)
         return page, draft

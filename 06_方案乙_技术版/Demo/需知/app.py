@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import html
 import re
-from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -18,7 +17,6 @@ from xuzhi.drafts import (
     draft_usability_hints,
     load_urls,
     materials_report,
-    summarize,
     visual_drafts,
 )
 from xuzhi.ledger import Ledger
@@ -52,9 +50,16 @@ def _sandbox_preview_html(html_src: str) -> str:
 
 
 def _iframe(html_src: str, height: int) -> None:
-    """预览 HTML：必须用 components.html（srcdoc）。勿用 st.iframe——它把参数当 URL，
-    原型里一点链接就会跳到需知本页。"""
-    components.html(_sandbox_preview_html(html_src or ""), height=height, scrolling=True)
+    """预览 HTML：外层仍用 components.html（勿用 st.iframe——它把参数当 URL），
+    但内容再包一层 sandbox="allow-scripts" 的 iframe（不给 allow-same-origin）：
+    仓库 / 模型产出的 HTML 里的脚本跑在独立源上，读不到需知页面、Key 输入框和 cookie。"""
+    inner = _sandbox_preview_html(html_src or "")
+    wrapper = (
+        '<iframe sandbox="allow-scripts" '
+        f'srcdoc="{html.escape(inner, quote=True)}" '
+        f'style="width:100%;height:{height}px;border:0;background:#fff" title="xuzhi_preview"></iframe>'
+    )
+    components.html(wrapper, height=height + 8, scrolling=False)
 
 st.set_page_config(page_title=f"{config.PRODUCT_NAME} · 需求分析智能体", page_icon="📋", layout="wide")
 st.markdown(f"""
@@ -464,6 +469,7 @@ def _render_draft_link_rows() -> None:
 ledger = get_ledger()
 samples = sorted(config.SAMPLES_DIR.glob("*.md"))
 stats = ledger.stats()
+dash0 = ledger.dashboard()
 if "api_keys" not in st.session_state:
     st.session_state.api_keys = {}
 
@@ -485,7 +491,8 @@ st.markdown(f"""
 </div>""", unsafe_allow_html=True)
 k = st.columns(4)
 for col, n, l in ((k[0], f"{stats['count']} 份", "已分析需求"), (k[1], f"{len(knowledge.probes())} 条", "期货追问知识库"),
-                  (k[2], f"{len(knowledge.history())} 条 / {len(knowledge.systems())} 个", "历史需求库 / 系统目录"), (k[3], f"~{stats['minutes_saved'] // 60} 小时", "累计为技术部节省（估）")):
+                  (k[2], f"{len(knowledge.history())} 条 / {len(knowledge.systems())} 个 / {knowledge.data_domains()} 域", "历史需求库 / 系统目录 / 数据域"),
+                  (k[3], f"{dash0['saved_days']} 人天" + (f" · 偏差 {dash0['mape_trad']}%" if dash0.get("mape_trad") is not None else ""), "AI 协同累计省时（估）· 已对账估算偏差")):
     col.markdown(f'<div class="xz-kpi"><div class="n">{n}</div><div class="l">{l}</div></div>', unsafe_allow_html=True)
 st.write("")
 
@@ -606,12 +613,16 @@ if go:
             spin = "模型正在理解需求并出结果……"
         else:
             spin = "规则引擎正在拆需求、估工、出原型……"
-        with st.spinner(spin):
-            a = analyze(
-                text, "" if src == "自动识别" else src, llm, answers=None,
-                mobile=mobile, client_view=client, llm_polish=do_polish,
-                drafts=drafts, repos=repos,
-            )
+        try:
+            with st.spinner(spin):
+                a = analyze(
+                    text, "" if src == "自动识别" else src, llm, answers=None,
+                    mobile=mobile, client_view=client, llm_polish=do_polish,
+                    drafts=drafts, repos=repos,
+                )
+        except Exception as e:
+            st.error(f"分析失败：{e}。可换模型或去掉材料后重试；若仍失败请把上面这行错误发给技术部。")
+            st.stop()
         st.session_state.analysis = a
         st.session_state.drafts = drafts
         st.session_state.repos = repos
@@ -650,7 +661,7 @@ if _mat:
         for line in _mat:
             st.markdown(line)
 
-tabs = st.tabs(["🗣️ 问清", "📄 写单", "📏 估量", "🏗️ 定架", "🖼️ 出样", "📒 台账", "🛡️ 隐盾"])
+tabs = st.tabs(["🗣️ 问清", "📄 写单", "📏 估量", "🏗️ 定架", "🖼️ 出样", "📒 一本账", "🛡️ 隐盾"])
 
 # ---------- 问清 ----------
 with tabs[0]:
@@ -719,7 +730,7 @@ with tabs[0]:
         st.markdown(f"#### 待确认清单（{len(a.questions)} 条，按影响排序；期货问题带 🌾）")
         answers = st.session_state.get("answers", {})
         for q in a.questions:
-            cls = {"高": "hi", "中": "md", "低": "lo"}[q.impact]
+            cls = {"高": "hi", "中": "md", "低": "lo"}.get(q.impact, "md")
             fut = '<span class="xz-chip fut">🌾 期货</span>' if q.tag == "期货" else ""
             st.markdown(f'<div class="xz-q"><span class="xz-chip {cls}">影响{q.impact}</span>{fut}<span class="xz-chip">{q.category}</span> '
                         f'<b>{html.escape(q.question)}</b><div class="why">不问会怎样：{html.escape(q.why)}　｜　默认：{html.escape(q.default)}</div></div>', unsafe_allow_html=True)
@@ -736,7 +747,9 @@ with tabs[0]:
                     repos=getattr(a, "repos", None) or st.session_state.get("repos") or [],
                 )
             st.session_state.analysis = a2
-            ledger.event(st.session_state.get("req_id", 0), "业务答复重算", f"{sum(1 for v in answers.values() if v.strip())} 条")
+            _rid = st.session_state.get("req_id", 0)
+            ledger.event(_rid, "业务答复重算", f"{sum(1 for v in answers.values() if v.strip())} 条")
+            ledger.update_answers(_rid, sum(1 for q in a2.questions if q.answer.strip()), int(getattr(a2.estimate, "unanswered_high", 0) or 0))
             st.rerun()
     with right:
         st.markdown("**发给业务的确认消息**（一键复制到企业微信）")
@@ -793,6 +806,19 @@ with tabs[3]:
     st.markdown(f"**复用发现**：{arch.coverage_line}")
     if getattr(arch, "draft_names", None):
         st.caption("本需求已绑定页面底稿：" + "、".join(arch.draft_names))
+    dmap = getattr(arch, "data_map", None) or []
+    st.markdown(f"#### 数据地图：数据从哪取")
+    st.markdown(getattr(arch, "data_map_line", "") or "原话里没抽到明确的数据项。")
+    if dmap:
+        _st = getattr(arch, "data_map_stats", {}) or {}
+        _chips = [("lo", f"可复用 {_st.get('reuse', 0)}"), ("md", f"需申请 / 受控 {_st.get('apply', 0)}"),
+                  ("hi", f"需新建 / 时效不符 {_st.get('new', 0)}")] + ([("", f"需计算 {_st['calc']}")] if _st.get("calc") else [])
+        st.markdown("".join(f'<span class="xz-chip {c}">{t}</span>' for c, t in _chips), unsafe_allow_html=True)
+        st.dataframe(pd.DataFrame([{"数据项": x.need, "来源系统": x.system, "数据域": x.domain, "接口 / 取数方式": x.interface,
+                                    "时效": x.freshness, "状态": x.status, "负责": x.owner, "说明": x.note} for x in dmap]),
+                     hide_index=True, width="stretch", height=min(60 + 36 * len(dmap), 480))
+        st.markdown('<div class="xz-foot">数据地图来自「系统目录」里的数据域与接口（knowledge/system_catalog.json，换成公司真实目录即生效）：'
+                    '需求里的每个数据项定位到 系统 · 数据域 · 接口 · 时效；盘中 / 下单前的需求自动检查时效是否够用。</div>', unsafe_allow_html=True)
     l, r = st.columns([1, 1])
     with l:
         st.markdown("**可复用的系统 / 组件**")
@@ -847,22 +873,89 @@ with tabs[4]:
     with t2:
         _iframe(proto, height=640 if not mob else 760)
 
-# ---------- 台账 ----------
+# ---------- 一本账 ----------
 with tabs[5]:
+    from xuzhi.ledger import STATUSES
+
     rid = st.session_state.get("req_id", 0)
-    f1, f2, f3 = st.columns([1, 1, 5])
-    if f1.button("👍 有用", key="fb_up"):
-        ledger.feedback(rid, "整体", 1)
-        st.toast("已记录")
-    if f2.button("👎 没用", key="fb_down"):
-        ledger.feedback(rid, "整体", -1)
-        st.toast("已记录")
+    row_now = ledger.get(rid) if rid else None
+    st.markdown("#### 本条需求：状态与对账")
+    st.caption("需求从受理到交付全程在一本账上；交付后把实际人天回写，估量的类比库就多一条真实样本，下次估得更准。")
+    c1, c2, c3 = st.columns([1.2, 2.2, 1.2])
+    with c1:
+        cur_status = (row_now or {}).get("status") or "受理"
+        new_status = st.selectbox("状态", STATUSES, index=STATUSES.index(cur_status) if cur_status in STATUSES else 0, key="ledger_status")
+        if new_status != cur_status and new_status != "已对账" and st.button("更新状态", key="ledger_set_status"):
+            ledger.set_status(rid, new_status)
+            st.toast(f"已更新为「{new_status}」")
+            st.rerun()
+        f1, f2 = st.columns(2)
+        if f1.button("👍 有用", key="fb_up"):
+            ledger.feedback(rid, "整体", 1)
+            st.toast("已记录")
+        if f2.button("👎 没用", key="fb_down"):
+            ledger.feedback(rid, "整体", -1)
+            st.toast("已记录")
+    with c2:
+        with st.form("xuzhi_reconcile"):
+            st.markdown("**对账：交付后回写实际人天**（写进历史需求库，估量飞轮）")
+            r1, r2, r3 = st.columns([1, 1, 1])
+            actual_days = r1.number_input("实际人天", min_value=0.0, step=0.5, value=float((row_now or {}).get("actual_days") or est.mid), key="rec_actual")
+            ai_used = r2.toggle("用了 AI 协同", value=bool((row_now or {}).get("ai_assisted")), key="rec_ai")
+            ai_share = r3.slider("AI 参与度", 0.0, 1.0, float((row_now or {}).get("ai_share") or 0.5), 0.1, key="rec_share")
+            rec_note = st.text_input("备注（可空）", value=(row_now or {}).get("close_note") or "", key="rec_note", placeholder="例：范围比估时多了客户版")
+            if st.form_submit_button("✅ 对账并回写历史需求库"):
+                if not rid:
+                    st.warning("先开工一条需求再对账。")
+                else:
+                    res = ledger.reconcile(rid, actual_days, ai_used, ai_share if ai_used else 0.0, rec_note)
+                    st.success(f"已对账：估 {res['estimate']} 人天，实际 {res['actual']} 人天，偏差 {res['deviation']:+.0%}；已写入历史需求库（{res['history_id']}），下次估量即用。")
+                    st.rerun()
+    with c3:
+        st.markdown("**本条流水**")
+        for ev in (ledger.events_of(rid) if rid else [])[-8:]:
+            st.caption(f"{ev['ts'][5:16]}　{ev['action']}　{ev['detail']}")
+
+    st.markdown("#### 需求经营看板")
+    dash = ledger.dashboard()
+    if not dash["count"]:
+        st.info("台账里还没有需求。")
+    else:
+        k1, k2, k3, k4, k5, k6 = st.columns(6)
+        k1.metric("需求数", f"{dash['count']}", help=f"来自 {dash['depts']} 个部门")
+        k2.metric("平均追问", f"{dash['avg_questions']} 条", help=f"业务答复率 {dash['answer_rate']:.0%}")
+        k3.metric("平均澄清轮次", f"{dash['avg_rounds']}", help="开工一轮 + 每次按业务答复重算算一轮；人工通常三四轮")
+        k4.metric("AI 协同省时", f"{dash['saved_days']} 人天", delta=f"-{dash['saving_pct']}%", delta_color="inverse",
+                  help=f"传统估 {dash['trad_days']} → AI 协同估 {dash['ai_days']}")
+        k5.metric("估算偏差", "—" if dash["mape_trad"] is None else f"{dash['mape_trad']}%",
+                  help=("已对账 " + str(dash["closed"]) + " 条；平均绝对偏差（估 vs 实际）" + (f"，AI 轨 {dash['mape_ai']}%" if dash["mape_ai"] is not None else ""))
+                  if dash["closed"] else "还没有对账记录：交付后在上方回写实际人天")
+        k6.metric("出稿用时", ("<1 s" if dash["avg_seconds"] < 1 else f"{dash['avg_seconds']} s"), help=f"规则引擎毫秒级，模型润色另计；👍 {dash['thumbs_up']} / 👎 {dash['thumbs_down']}")
+        g1, g2, g3 = st.columns(3)
+        with g1:
+            st.markdown("**各部门需求量**")
+            st.bar_chart(pd.DataFrame({"需求数": dash["by_dept"]}), height=220)
+        with g2:
+            st.markdown("**按类型**")
+            st.bar_chart(pd.DataFrame({"需求数": dash["by_type"]}), height=220)
+        with g3:
+            st.markdown("**状态漏斗**")
+            _ord = "①②③④⑤"
+            st.bar_chart(pd.DataFrame({"条数": {f"{_ord[i]} {k}": v for i, (k, v) in enumerate(dash["by_status"].items())}}), height=220)
+        if len(dash["by_month"]) >= 2:
+            st.markdown("**按月受理**")
+            st.line_chart(pd.DataFrame({"需求数": dash["by_month"]}), height=180)
+
+    st.markdown("#### 台账明细")
     rows = ledger.recent(30)
     if rows:
-        st.dataframe(pd.DataFrame(rows).rename(columns={"id": "编号", "ts": "时间", "title": "需求", "source": "来源", "req_type": "类型", "requester": "提出方", "engine": "引擎",
-                                                        "n_questions": "问题数", "n_answered": "已答复", "mid_days": "传统(人天)", "ai_days": "AI 协同(人天)", "confidence": "置信度", "redacted": "脱敏处"}),
+        st.dataframe(pd.DataFrame(rows).rename(columns={"id": "编号", "ts": "时间", "title": "需求", "dept": "部门", "source": "来源", "req_type": "类型", "requester": "提出方", "engine": "引擎",
+                                                        "status": "状态", "n_questions": "问题数", "n_answered": "已答复", "n_high_open": "高影响未答", "mid_days": "传统(人天)",
+                                                        "ai_days": "AI 协同(人天)", "actual_days": "实际(人天)", "confidence": "置信度", "redacted": "脱敏处"}),
                      hide_index=True, width="stretch")
-    st.markdown('<div class="xz-foot">台账 = 审计留痕 + 飞轮数据：谁提、AI 说了什么、业务怎么答、估了多少；上线后回写实际工时，估算越来越准。</div>', unsafe_allow_html=True)
+        export = pd.DataFrame(ledger.export_rows())
+        st.download_button("导出审计台账 .csv", export.to_csv(index=False).encode("utf-8-sig"), file_name="需知_需求一本账.csv", mime="text/csv")
+    st.markdown('<div class="xz-foot">一本账 = 审计留痕 + 飞轮数据：谁提、AI 说了什么、业务怎么答、估了多少、实际多少；对账回写后估算越来越准。看板全部由台账实时算出，无人工填报。</div>', unsafe_allow_html=True)
 
 # ---------- 隐盾 ----------
 with tabs[6]:
