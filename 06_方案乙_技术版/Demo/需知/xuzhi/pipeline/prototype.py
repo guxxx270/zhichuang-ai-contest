@@ -1106,6 +1106,109 @@ def _patch_draft_for_demand(
     return page, changes
 
 
+def _is_static_browser_html(html_src: str) -> bool:
+    """浏览器不跑 Vue/React 时能否看见界面（真 table/form，而非 el-table 组件标签）。"""
+    s = html_src or ""
+    if not s.strip():
+        return False
+    fw = len(re.findall(r"<(?:el-|a-|van-|router-|i-|n-)[a-z0-9-]*\b", s, re.I))
+    native_table = bool(re.search(r"(?is)<table\b", s)) and bool(re.search(r"(?is)<t[hd]\b", s))
+    native_ctrl = len(re.findall(r"(?is)<(input|select|button|textarea|form)\b", s))
+    if native_table or native_ctrl >= 2:
+        return True
+    # 满屏组件标签、没有原生控件 → iframe 里几乎是白的
+    if fw >= 2:
+        return False
+    return is_visual_html(s)
+
+
+def _extract_vue_template(text: str) -> str:
+    m = re.search(r"(?is)<template\b[^>]*>(.*)</template>", text or "")
+    return (m.group(1) if m else "") or ""
+
+
+def _column_labels_from_markup(tpl: str) -> list[str]:
+    """从 Element/Ant Vue 表列标签抽出表头文字。"""
+    labels: list[str] = []
+
+    def _add(lab: str) -> None:
+        lab = (lab or "").strip()
+        if not lab or lab.startswith("{{") or lab in labels:
+            return
+        if len(lab) > 40:
+            return
+        labels.append(lab)
+
+    for m in re.finditer(
+        r"<(?:el-table-column|a-table-column|vxe-column|vxe-table-column)\b([^>]*?)/?>",
+        tpl or "",
+        re.I,
+    ):
+        attrs = m.group(1) or ""
+        hit = False
+        for attr in ("label", "title", "header"):
+            am = re.search(rf"""(?:^|\s):?{attr}\s*=\s*['"]([^'"]+)['"]""", attrs, re.I)
+            if not am:
+                continue
+            raw = am.group(1).strip()
+            lit = re.match(r"""^['"]([^'"]+)['"]$""", raw)
+            _add(lit.group(1) if lit else raw)
+            hit = True
+            break
+        if not hit:
+            pm = re.search(r"""\bprop\s*=\s*['"]([^'"]+)['"]""", attrs, re.I)
+            if pm:
+                _add(pm.group(1))
+    return labels[:24]
+
+
+def _vue_sfc_to_static_html(path: str, text: str, page_title: str = "") -> str | None:
+    """把 Vue SFC 转成可 iframe 的静态 HTML；转不出真表格则返回 None。"""
+    from pathlib import Path as _P
+
+    tpl = _extract_vue_template(text)
+    if not tpl.strip():
+        return None
+    title = page_title or _P(path).stem
+
+    # 模板里已有原生 table
+    if re.search(r"(?is)<table\b", tpl) and re.search(r"(?is)<t[hd]\b", tpl):
+        body = re.sub(r"(?is)</?template\b[^>]*>", "", tpl)
+        # 去掉只会空白的组件壳，保留 table
+        body = re.sub(r"(?is)</?(?:el-|a-|van-|router-)[a-z0-9-]*\b[^>]*>", "", body)
+        page = (
+            f"<!doctype html><html><head><meta charset='utf-8'>"
+            f"<title>{html.escape(title)}</title>{CSS}</head><body>"
+            f'<div class="xz-wrap"><h2>{html.escape(title)}</h2>{body}</div>'
+            f"</body></html>"
+        )
+        return page if _is_static_browser_html(page) else None
+
+    cols = _column_labels_from_markup(tpl)
+    if len(cols) < 2:
+        return None
+
+    th = "".join(f"<th>{html.escape(c)}</th>" for c in cols)
+    body_rows = []
+    for i in range(5):
+        tds = "".join(
+            f"<td>{html.escape(str(round(1.0 + i * 0.01 + j * 0.1, 4) if j else f'产品{i+1}'))}</td>"
+            for j, _c in enumerate(cols)
+        )
+        body_rows.append(f"<tr>{tds}</tr>")
+    table = (
+        f'<table class="xz"><thead><tr>{th}</tr></thead>'
+        f"<tbody>{''.join(body_rows)}</tbody></table>"
+    )
+    page = (
+        f"<!doctype html><html><head><meta charset='utf-8'>"
+        f"<title>{html.escape(title)}</title>{CSS}</head><body>"
+        f'<div class="xz-wrap"><h2>{html.escape(title)}</h2>{table}</div>'
+        f"</body></html>"
+    )
+    return page
+
+
 def render_from_drafts(
     card: Card,
     drafts: list[Draft],
@@ -1115,7 +1218,7 @@ def render_from_drafts(
 ) -> str | None:
     """只复刻有真实界面且与需求相关的静态底稿，并按需求做可见改动。
     用户上传的底稿可弱匹配；Git 里与需求无关或不可见的 HTML 一律不用。"""
-    usable = visual_drafts(drafts)
+    usable = [d for d in visual_drafts(drafts) if _is_static_browser_html(d.html or "")]
     if not usable:
         return None
     keys = _card_page_keys(card)
@@ -1124,11 +1227,32 @@ def render_from_drafts(
     if not pool and uploaded:
         pool = related_drafts(uploaded, keys, limit=3, allow_unrelated_fallback=True)
     if not pool:
+        # 仓库 Vue→静态表：关键词可能对不上文件名，但上游已按表头/路径选过
+        git_tables = [
+            d
+            for d in usable
+            if d.source == "git"
+            and re.search(r"(?is)<table\b", d.html or "")
+            and _is_static_browser_html(d.html or "")
+        ]
+        if git_tables:
+            pool = git_tables[:3]
+    if not pool:
         return None
     draft = pick_draft(pool, keys)
     if not draft or not (draft.html or "").strip():
+        # pick_draft 在全不相关时可能仍返回第一名；保证有表就用第一张
+        draft = pool[0] if pool else None
+    if not draft or not (draft.html or "").strip():
         return None
     if draft.source == "git" and draft_relevance(draft, keys) <= 0:
+        # 仓库 Vue→静态表已由上游筛过；允许弱相关，避免只剩黑条横幅
+        if not (
+            re.search(r"(?is)<table\b", draft.html or "")
+            and _is_static_browser_html(draft.html or "")
+        ):
+            return None
+    if not _is_static_browser_html(draft.html):
         return None
     rng = _rng(card.title + draft.name)
     page = draft.html
@@ -1150,8 +1274,8 @@ def render_from_drafts(
     return page
 
 
-def render_from_repos(card: Card, repos: list) -> str | None:
-    """仓库里仅当存在与需求相关的可复刻 HTML/Vue 时才复刻；否则 None，走按需求生成。"""
+def render_from_repos(card: Card, repos: list, demand_text: str = "") -> str | None:
+    """仓库里仅当能转成浏览器可看的静态 HTML 时才复刻；裸 Vue 组件标签不算。"""
     from ..drafts import parse_draft
 
     html_drafts: list[Draft] = []
@@ -1161,24 +1285,69 @@ def render_from_repos(card: Card, repos: list) -> str | None:
             kind = getattr(f, "kind", "") or ""
             text = getattr(f, "text", "") or ""
             note = getattr(f, "note", "") or ""
-            if note == "spa-shell":
+            if note in ("spa-shell", "iconfont"):
                 continue
             if kind == "html" or path.lower().endswith((".html", ".htm")):
                 d = parse_draft(path, text, source="git")
-                if is_visual_html(d.html):
+                if _is_static_browser_html(d.html):
                     html_drafts.append(d)
-            elif kind == "frontend" and ("<template" in text or "<html" in text.lower()) and len(html_drafts) < 8:
-                rough = re.sub(r"(?is)<script\b[^>]*>.*?</script>", "", text)
-                wrapped = f"<html><body>{rough}</body></html>"
-                if is_visual_html(wrapped):
-                    html_drafts.append(parse_draft(path + ".preview.html", wrapped, source="git"))
+            elif kind == "frontend" and path.lower().endswith((".vue", ".tsx", ".jsx")):
+                static = _vue_sfc_to_static_html(path, text)
+                if static and _is_static_browser_html(static):
+                    html_drafts.append(parse_draft(path + ".preview.html", static, source="git"))
+            elif kind == "frontend" and ("<template" in text or "<html" in text.lower()):
+                static = _vue_sfc_to_static_html(path, text)
+                if static and _is_static_browser_html(static):
+                    html_drafts.append(parse_draft(path + ".preview.html", static, source="git"))
     if not html_drafts:
         return None
     keys = _card_page_keys(card)
     focused = related_drafts(html_drafts, keys, limit=3)
     if not focused:
+        focused = _pick_repo_table_drafts(html_drafts, card, keys, demand_text=demand_text, limit=3)
+    if not focused:
         return None
-    return render_from_drafts(card, focused, mobile=False, client_view=False)
+    return render_from_drafts(card, focused, mobile=False, client_view=False, demand_text=demand_text)
+
+
+def _pick_repo_table_drafts(
+    drafts: list[Draft],
+    card: Card,
+    keys: set[str],
+    *,
+    demand_text: str = "",
+    limit: int = 3,
+) -> list[Draft]:
+    """关键词对不上时：用路径/表头弱匹配（如 incomeRisk + 夏普 ↔ Sortino 需求）。"""
+    blob_demand = " ".join(
+        [card.title or "", demand_text or "", *list(card.features or []), *list(card.indicators or [])]
+    )
+    want_col = bool(re.search(r"新增|加一列|加列|增加.{{0,6}}列|Sortino|夏普|回撤", blob_demand, re.I))
+
+    def score(d: Draft) -> int:
+        s = draft_relevance(d, keys)
+        name = (d.name or "").lower()
+        html_src = d.html or ""
+        for hint in (
+            "risk", "income", "factor", "perf", "nav", "sharpe", "return",
+            "observe", "pool", "cta", "收益", "风险", "因子", "表现", "净值", "夏普",
+        ):
+            if hint in name or hint in html_src[:3000].lower():
+                s += 2
+        if re.search(r"sortino", blob_demand, re.I) and ("夏普" in html_src or "sharpe" in html_src.lower()):
+            s += 6
+        if want_col and re.search(r"(?is)<table\b", html_src):
+            s += 3
+        return s
+
+    ranked = sorted(drafts, key=lambda d: (-score(d), d.name))
+    good = [d for d in ranked if score(d) > 0]
+    if good:
+        return good[:limit]
+    table_ones = [d for d in ranked if re.search(r"(?is)<table\b", d.html or "")]
+    if want_col and table_ones:
+        return table_ones[:1]
+    return []
 
 
 def _finish_view(page: str, mobile: bool = False) -> str:
@@ -1218,8 +1387,34 @@ def _extract_html(text: str) -> str:
                 raw = "<!doctype html>\n" + raw
             elif "<body" in raw.lower():
                 raw = f"<!doctype html><html><head><meta charset='utf-8'></head>{raw}</html>"
+        if _is_source_code_dump(raw):
+            return ""
         return raw
     return ""
+
+
+def _is_source_code_dump(page: str) -> bool:
+    """模型偶发把仓库 .ts/.js 接口层整段贴进「原型」——这种不算可出样界面。"""
+    if not page or len(page) < 80:
+        return False
+    # 去掉 script/style 后再看正文，避免误伤内联脚本很少的正常页
+    stripped = re.sub(r"(?is)<script\b[^>]*>.*?</script>", " ", page)
+    stripped = re.sub(r"(?is)<style\b[^>]*>.*?</style>", " ", stripped)
+    text = re.sub(r"<[^>]+>", " ", stripped)
+    signals = 0
+    if re.search(r"\bimport\s+.+\s+from\s+['\"]", text):
+        signals += 2
+    if re.search(r"\bexport\s+(default\s+)?(class|async\s+function|function|const)\b", text):
+        signals += 2
+    if re.search(r"\b(this\.http|HttpService|responseType\s*:\s*['\"]blob['\"])\b", text):
+        signals += 2
+    if text.count("async ") >= 4 and re.search(r"\bawait\s+this\.", text):
+        signals += 2
+    if re.search(r"\b(require\(|module\.exports|from\s+['\"]@/)", text):
+        signals += 1
+    ui = len(re.findall(r"<(?:table|button|input|form|nav|thead|select|label)\b", stripped, re.I))
+    # 大段源码特征明显、几乎没有表单/表格控件 → 判定为抄源码
+    return signals >= 3 and ui < 2
 
 
 def _style_classes(html_src: str) -> set[str]:
@@ -1338,7 +1533,9 @@ def adapt_draft_with_llm(card: Card, drafts: list[Draft], llm, repos: list | Non
     else:
         payload["硬性要求"] = (
             "没有可复刻的静态页面（可能是 Vue/React SPA 入口或仅有后端仓库）。"
-            "必须按功能点生成完整自包含 HTML 原型：把 Tab、筛选、图表、默认因子/品种都画出来，不要只出说明条。"
+            "必须按功能点生成完整自包含 HTML 原型：把 Tab、筛选、表格、按钮都画出来，不要只出说明条。"
+            "仓库源码（.ts/.js Api、HttpService、import/export）只作字段/模块命名参考，"
+            "禁止把源码整段贴进页面或包在 pre 里当原型。"
             "不相干菜单可保留外观但点击不跳转。"
         )
         if drafts or repos:
@@ -1368,93 +1565,7 @@ def adapt_draft_with_llm(card: Card, drafts: list[Draft], llm, repos: list | Non
         return page, draft
     if not page or ("<html" not in page.lower() and "<body" not in page.lower() and "<svg" not in page.lower() and "<table" not in page.lower()):
         return None, None
-    if "需知" not in page[:800]:
-        who = html.escape(card.requester or "业务方")
-        banner = (
-            f'<div style="background:#111;color:#fff;padding:6px 12px;font-size:12px;">'
-            f'<b>需知 · 出样</b>　按需求生成原型（无静态底稿可复刻）　{html.escape(card.title)}　{who}</div>'
-        )
-        if "<body" in page.lower():
-            page = re.sub(r"(<body[^>]*>)", r"\1" + banner, page, count=1, flags=re.I)
-        else:
-            page = banner + page
-    return page, None
-    """有可复刻底稿则在原 HTML 上改；SPA 空壳 / 无底稿则按需求+仓库生成完整原型。"""
-    if getattr(llm, "mode", "") != "api":
-        return None, None
-    from ..drafts import draft_context_for_llm, _trim_html
-    from ..llm import load_prompt
-    import json
-
-    keys = set(card.keywords()) | set(card.indicators) | set(card.features) | {card.title, card.req_type}
-    usable = visual_drafts(drafts)
-    draft = pick_draft(usable, keys) if usable else None
-    system = load_prompt("prototype_adapt") or (
-        "有可复刻静态底稿时在原 HTML 上改；SPA 空壳不算底稿，须按需求生成完整可交互 HTML。只输出 HTML。"
-    )
-    spa_notes = [d.note for d in (drafts or []) if d.note]
-    payload = {
-        "需求标题": card.title,
-        "需求类型": card.req_type,
-        "功能点": card.features,
-        "指标与新增列": card.indicators,
-        "提出方": card.requester,
-        "使用者": card.users,
-        "渠道": card.channels,
-        "主底稿": draft.name if draft else "",
-        "有现有材料": bool(drafts or repos),
-        "材料备注": spa_notes,
-    }
-    if draft:
-        payload["硬性要求"] = (
-            "下面「底稿完整HTML」是唯一视觉基准：保留全部 style/class/布局，只按需求做最小改动。"
-            "禁止重画成另一套页面。"
-        )
-        payload["底稿完整HTML"] = _trim_html(draft.html, 28000)
-        if repos:
-            payload["现有系统材料"] = draft_context_for_llm(
-                [],
-                list(repos or []),
-                prefer=None,
-                html_limit=2000,
-                code_limit=12000,
-                keywords=keys,
-            )
-    else:
-        payload["硬性要求"] = (
-            "没有可复刻的静态页面（可能是 Vue/React SPA 入口或仅有后端仓库）。"
-            "必须按功能点生成完整自包含 HTML 原型：把 Tab、筛选、图表、默认因子/品种都画出来，不要只出说明条。"
-            "不相干菜单可保留外观但点击不跳转。"
-        )
-        if drafts or repos:
-            payload["现有系统材料"] = draft_context_for_llm(
-                list(drafts or []),
-                list(repos or []),
-                prefer=None,
-                html_limit=8000,
-                code_limit=22000,
-                keywords=keys,
-            )
-        else:
-            payload["说明"] = "用户未提供 HTML 或 Git，请仅根据需求卡片自行设计一版合理原型页。"
-    try:
-        raw = llm.chat(system, user=json.dumps(payload, ensure_ascii=False), temperature=0.1)
-    except Exception:
-        return None, draft
-    page = _extract_html(raw)
-    if draft:
-        if not _html_ok(page, card, draft):
-            return None, draft
-        # 模型可能漏改表结构：规则强制在原始表上补增/删/改列
-        rng = _rng(card.title + (draft.name or ""))
-        # demand 文本尽量带上功能点，便于抽删列/改名
-        demand_bits = " ".join([card.title or ""] + list(card.features or []) + list(card.raw_features or []))
-        page, cols = _mutate_draft_table(page, card, rng, client_view=False, demand_text=demand_bits)
-        banner_cols = cols or [c for c in card.indicators if c not in (draft.table_headers or [])][:5]
-        if "需知" not in page[:800]:
-            page = _inject_banner(page, card, draft, banner_cols)
-        return page, draft
-    if not page or ("<html" not in page.lower() and "<body" not in page.lower() and "<svg" not in page.lower() and "<table" not in page.lower()):
+    if _is_source_code_dump(page):
         return None, None
     if "需知" not in page[:800]:
         who = html.escape(card.requester or "业务方")
@@ -1538,7 +1649,7 @@ def render(
         return rule_adapted
 
     if repos:
-        repo_page = render_from_repos(card, repos)
+        repo_page = render_from_repos(card, repos, demand_text=demand_text)
         if repo_page:
             if client_view:
                 repo_page = _hide_client_columns(repo_page)
@@ -1580,7 +1691,7 @@ def render_source(
     if rule_base:
         return rule_base
     if repos:
-        repo_page = render_from_repos(card, repos)
+        repo_page = render_from_repos(card, repos, demand_text=demand_text)
         if repo_page:
             return repo_page if repo_page.lower().lstrip().startswith("<!doctype") else "<!doctype html>\n" + repo_page
     if llm is not None and getattr(llm, "mode", "") == "api":

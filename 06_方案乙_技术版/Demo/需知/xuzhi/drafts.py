@@ -7,17 +7,21 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
+import ssl
 import subprocess
 import tempfile
+import urllib.error
 import urllib.request
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import quote, urlparse, urlunparse
 
 MAX_FILE_BYTES = 400_000
 MAX_HTML_DRAFTS = 12
-MAX_CODE_FILES = 24
-MAX_TREE_ENTRIES = 200
+# 单文件进内存时截断，避免个别超大文件撑爆内存；源文件数量不设上限
+MAX_INGEST_CHARS = 120_000
 FETCH_TIMEOUT = 25
 CLONE_TIMEOUT = 90
 
@@ -31,6 +35,10 @@ SKIP_DIR_NAMES = {
     ".git", ".svn", ".hg", ".idea", ".vscode", ".venv", "venv", "node_modules",
     "dist", "build", "out", "target", "coverage", "__pycache__", ".next",
     ".nuxt", "vendor", "bin", "obj", ".turbo", ".cache", "eggs", ".tox",
+}
+SKIP_FILE_NAMES = {
+    "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "composer.lock",
+    "cargo.lock", "poetry.lock", "npm-shrinkwrap.json",
 }
 
 FRONTEND_EXT = {".html", ".htm", ".vue", ".tsx", ".jsx", ".ts", ".js", ".css", ".scss", ".less", ".svelte"}
@@ -78,6 +86,8 @@ class RepoBundle:
     tree: list[str] = field(default_factory=list)
     files: list[CodeFile] = field(default_factory=list)
     note: str = ""
+    ref: str = ""  # 分支/tag/commit；空=仓库默认分支
+    scanned: int = 0  # 仓内扫描到的源文件数（含未全文收录的）
 
     @property
     def name(self) -> str:
@@ -107,6 +117,8 @@ def is_visual_html(html_src: str) -> bool:
     s = html_src or ""
     if not s.strip():
         return False
+    if _is_iconfont_catalog(s):
+        return False
     stripped = re.sub(r"(?is)<script\b[^>]*>.*?</script>", " ", s)
     stripped = re.sub(r"(?is)<style\b[^>]*>.*?</style>", " ", stripped)
     stripped = re.sub(r"(?is)<link\b[^>]*>", " ", stripped)
@@ -129,11 +141,35 @@ def is_visual_html(html_src: str) -> bool:
     return len(visible) >= 200
 
 
+def _is_iconfont_catalog(html_src: str, name: str = "") -> bool:
+    """iconfont 演示页（Unicode / Font class / Symbol 列表）不是业务界面。"""
+    name_l = (name or "").replace("\\", "/").lower()
+    if re.search(r"(?:^|/)(?:demo_index|iconfont|icon-?demo)[^/]*\.(?:html?|htm)$", name_l):
+        return True
+    if "iconfont" in name_l and name_l.endswith((".html", ".htm", ".css")):
+        return True
+    head = (html_src or "")[:12000]
+    low = head.lower()
+    if "unicode font class symbol" in re.sub(r"\s+", " ", low):
+        return True
+    # 私用区实体 &#xe640; 一类：演示页会堆几十上百个
+    entities = len(re.findall(r"&#x[eEfF][0-9a-fA-F]{2,4};", head))
+    if entities >= 15:
+        real_ui = len(re.findall(r"(?is)<(table|form|input|select|textarea)\b", head))
+        if real_ui < 2:
+            return True
+    if entities >= 8 and re.search(r"icon[_-]?name|font-class|icon_lists|unicode", low):
+        return True
+    return False
+
+
 def visual_drafts(drafts: list[Draft] | None) -> list[Draft]:
     """可复刻底稿。用户主动上传/示例：只要不是 SPA 空壳就保留（哪怕内容较短）。"""
     out: list[Draft] = []
     for d in drafts or []:
         html_src = d.html or ""
+        if _is_iconfont_catalog(html_src, d.name or ""):
+            continue
         if is_visual_html(html_src):
             out.append(d)
             continue
@@ -159,11 +195,17 @@ def draft_usability_hints(drafts: list[Draft] | None) -> list[str]:
         html_src = d.html or ""
         name = d.name or "底稿"
         if not is_visual_html(html_src):
-            hints.append(
-                f"「{name}」几乎没有静态可见内容（常见于 Vue/React「另存为」只存到空 #app）。"
-                "浏览器里看到的界面是 JS 画出来的，单文件 HTML 带不进需知。"
-                "请用开发者工具复制已渲染节点，或上传含完整标签/表格的静态页。"
-            )
+            if _is_iconfont_catalog(html_src, name):
+                hints.append(
+                    f"「{name}」是图标字体演示页（iconfont），不是业务界面，已忽略。"
+                    "请上传「因子产品表现」等真实页面 HTML，或修好 Git Token 后拉仓库里的 Vue 页面。"
+                )
+            else:
+                hints.append(
+                    f"「{name}」几乎没有静态可见内容（常见于 Vue/React「另存为」只存到空 #app）。"
+                    "浏览器里看到的界面是 JS 画出来的，单文件 HTML 带不进需知。"
+                    "请用开发者工具复制已渲染节点，或上传含完整标签/表格的静态页。"
+                )
             continue
         # 另存为「网页，全部」会引用 xxx_files/，只上传单个 html 时样式/图全断
         if re.search(r"""(?:src|href)\s*=\s*['"][^'"]*_files/""", html_src, re.I) or re.search(
@@ -232,44 +274,113 @@ def _github_raw(url: str) -> str | None:
 
 
 def _looks_like_repo(url: str) -> bool:
-    u = url.rstrip("/")
+    """判断是否应按 git clone 拉取（含内网 / 自建 GitLab）。"""
+    u = (url or "").strip().rstrip("/")
+    if not u:
+        return False
+    if u.startswith("git@"):
+        return True
     if u.endswith(".git"):
         return True
     if re.match(r"https?://(github\.com|gitee\.com|gitlab\.com)/[^/]+/[^/]+/?$", u):
         return True
     if re.match(r"https?://(github\.com|gitee\.com|gitlab\.com)/[^/]+/[^/]+/tree/", u):
         return True
+    # 自建 / 内网：http(s)://host/group/repo…；允许 /-/tree/分支 浏览链
+    nu = normalize_url(u)
+    parsed = urlparse(nu)
+    if parsed.scheme in ("http", "https") and parsed.hostname and parsed.path:
+        path = parsed.path.strip("/")
+        if "/-/" in path:
+            proj = path.split("/-/", 1)[0]
+            if proj.count("/") >= 1:
+                return True
+        if path.count("/") >= 1 and not Path(path.split("/")[-1]).suffix:
+            if not re.search(
+                r"(?:^|/)(?:blob|raw|commits?|issues|pulls?|merge_requests|wiki|releases)(?:/|$)",
+                path,
+                re.I,
+            ):
+                return True
     return False
 
 
-def _repo_clone_url(url: str) -> tuple[str, str]:
-    u = url.strip().rstrip("/")
+def _parse_repo_browse(url: str) -> tuple[str, str, str]:
+    """从仓库/浏览 URL 解析 (repo_https无.git, branch或空, 子目录)。
+
+    支持 GitLab ``/-/tree|blob/ref/...``、GitHub/Gitee ``/tree|blob/ref/...``。
+    branch 为空表示用远端默认分支。
+    """
+    u = normalize_url(url or "").rstrip("/")
+    if u.endswith(".git"):
+        u = u[:-4]
+    if u.startswith("git@"):
+        # git@host:group/repo
+        m = re.match(r"git@([^:]+):(.+)$", u)
+        if m:
+            return f"https://{m.group(1)}/{m.group(2).rstrip('/')}", "", ""
+        return u, "", ""
+
+    # GitLab：…/group/…/repo/-/(tree|blob|raw|commits)/REF[/path]
     m = re.match(
-        r"https?://(github\.com|gitee\.com|gitlab\.com)/([^/]+)/([^/]+?)(?:\.git)?(?:/tree/[^/]+/?(.*))?$",
+        r"^(https?://[^/]+/.+?)/-/(?:tree|blob|raw|commits)/([^/]+)(?:/(.*))?$",
         u,
+        re.I,
     )
     if m:
-        host, owner, repo, sub = m.group(1), m.group(2), m.group(3), (m.group(4) or "").strip("/")
-        return f"https://{host}/{owner}/{repo}.git", sub
-    if u.endswith(".git"):
-        return u, ""
-    return u + ".git", ""
+        return m.group(1).rstrip("/"), m.group(2), (m.group(3) or "").strip("/")
+
+    # GitHub / Gitee / 部分 GitLab 旧式：host/owner/repo/(tree|blob)/REF[/path]
+    m = re.match(
+        r"^(https?://(?:github\.com|gitee\.com|gitlab\.com)/[^/]+/[^/]+?)(?:\.git)?"
+        r"/(?:tree|blob)/([^/]+)(?:/(.*))?$",
+        u,
+        re.I,
+    )
+    if m:
+        return m.group(1).rstrip("/"), m.group(2), (m.group(3) or "").strip("/")
+
+    # 纯仓库地址（可能带嵌套组）
+    return u, "", ""
+
+
+def _repo_clone_url(url: str) -> tuple[str, str, str]:
+    """返回 (clone_url, branch, subdir)。branch 空=默认分支。"""
+    raw = (url or "").strip()
+    if raw.startswith("git@"):
+        repo, branch, sub = _parse_repo_browse(raw)
+        if repo.startswith("https://"):
+            return repo + ".git", branch, sub
+        return raw, branch, sub
+    repo, branch, sub = _parse_repo_browse(raw)
+    if not repo:
+        return raw, "", ""
+    clone = repo if repo.endswith(".git") else repo + ".git"
+    return clone, branch, sub
 
 
 def inject_git_auth(clone_url: str, token: str = "", username: str = "") -> str:
-    """把 token 写进 http(s) clone URL。GitHub 用 x-access-token；其余默认 oauth2（GitLab/Gitee/多数自建）。"""
+    """把 token 写进 http(s) clone URL。
+
+    - GitHub：固定 ``x-access-token:TOKEN``（页面上的「用户名」会被忽略，避免填错账号导致 401）。
+    - Gitee / GitLab / 自建：优先用填写的用户名，否则 ``oauth2:TOKEN``。
+    """
     token = (token or "").strip()
     if not token:
         return clone_url
     parsed = urlparse(clone_url)
     if parsed.scheme not in ("http", "https"):
         return clone_url
+    # 已有账密则不覆盖（例如链接里自带）
     if parsed.username or parsed.password:
         return clone_url
     host = (parsed.hostname or "").lower()
+    is_github = host == "github.com" or host.endswith(".github.com")
     user = (username or "").strip()
-    if not user:
-        user = "x-access-token" if host == "github.com" or host.endswith(".github.com") else "oauth2"
+    if is_github:
+        user = "x-access-token"
+    elif not user:
+        user = "oauth2"
     auth = f"{quote(user, safe='')}:{quote(token, safe='')}"
     hostport = parsed.hostname or ""
     if parsed.port:
@@ -322,6 +433,18 @@ def _should_skip_path(path: Path, root: Path) -> bool:
     return any(p in SKIP_DIR_NAMES or p.startswith(".") for p in rel_parts[:-1])
 
 
+def _should_skip_file(path: Path) -> bool:
+    name = path.name.lower()
+    if name in SKIP_FILE_NAMES:
+        return True
+    if name.endswith((".min.js", ".min.css", ".map", ".woff", ".woff2", ".ttf", ".eot", ".ico")):
+        return True
+    # iconfont 资源本身对需求分析几乎无用
+    if "iconfont" in name and path.suffix.lower() in {".css", ".js", ".json", ".svg"}:
+        return True
+    return False
+
+
 def _file_priority(rel: str) -> int:
     low = rel.lower().replace("\\", "/")
     score = 0
@@ -345,7 +468,7 @@ def _collect_source_files(root: Path) -> list[Path]:
     for p in root.rglob("*"):
         if not p.is_file():
             continue
-        if _should_skip_path(p, root):
+        if _should_skip_path(p, root) or _should_skip_file(p):
             continue
         if p.suffix.lower() not in CODE_EXT and p.name.lower() not in ("dockerfile", "makefile"):
             continue
@@ -356,24 +479,30 @@ def _collect_source_files(root: Path) -> list[Path]:
     return found
 
 
+def _trim_ingest_text(text: str) -> str:
+    s = text or ""
+    if len(s) <= MAX_INGEST_CHARS:
+        return s
+    return s[: MAX_INGEST_CHARS - 24] + "\n/* …单文件过长已截断… */\n"
+
+
 def _build_tree(root: Path, files: list[Path]) -> list[str]:
     entries: list[str] = []
     seen_dirs: set[str] = set()
-    for p in files[:MAX_TREE_ENTRIES]:
+    for p in files:
         rel = str(p.relative_to(root)).replace("\\", "/")
         parent = str(Path(rel).parent).replace("\\", "/")
         if parent and parent != "." and parent not in seen_dirs:
             seen_dirs.add(parent)
             entries.append(parent + "/")
         entries.append(rel)
-        if len(entries) >= MAX_TREE_ENTRIES:
-            break
     return entries
 
 
 def ingest_repo_dir(root: Path, url: str = "") -> tuple[list[Draft], RepoBundle]:
     """从本地目录抽出 HTML 底稿 + 前后端代码包。
-    只有可复刻的静态 HTML 才进 drafts；看不见界面的空壳页只进代码摘要，不当「已有页面」。"""
+    只有可复刻的静态 HTML 才进 drafts；看不见界面的空壳页只进代码摘要，不当「已有页面」。
+    源文件数量不设上限（仍跳过 node_modules 等噪音目录）。"""
     sources = _collect_source_files(root)
     drafts: list[Draft] = []
     code_files: list[CodeFile] = []
@@ -381,22 +510,26 @@ def ingest_repo_dir(root: Path, url: str = "") -> tuple[list[Draft], RepoBundle]
     for p in sources:
         rel = str(p.relative_to(root)).replace("\\", "/")
         try:
-            text = _decode_bytes(p.read_bytes())
+            text = _trim_ingest_text(_decode_bytes(p.read_bytes()))
         except OSError:
             continue
         kind = _kind_for(rel)
         if kind == "html" and len(drafts) < MAX_HTML_DRAFTS:
+            if _is_iconfont_catalog(text, rel):
+                code_files.append(CodeFile(path=rel, kind="html", text=text, note="iconfont"))
+                continue
             d = parse_draft(rel, text, source="git")
             if is_visual_html(d.html):
                 drafts.append(d)
             else:
                 shell_n += 1
-                if len(code_files) < MAX_CODE_FILES:
-                    code_files.append(CodeFile(path=rel, kind="html", text=text, note="spa-shell"))
+                code_files.append(CodeFile(path=rel, kind="html", text=text, note="spa-shell"))
                 continue
-        if len(code_files) < MAX_CODE_FILES:
-            code_files.append(CodeFile(path=rel, kind=kind, text=text))
-    note = f"{len(code_files)} 个源文件 / {len(drafts)} 个可复刻 HTML"
+        code_files.append(CodeFile(path=rel, kind=kind, text=text))
+
+    scanned = len(sources)
+    retained = len(code_files)
+    note = f"已读全文 {retained} 个源文件 / {len(drafts)} 个可复刻 HTML"
     if shell_n:
         note += f" / {shell_n} 个空壳入口已忽略"
     bundle = RepoBundle(
@@ -404,49 +537,284 @@ def ingest_repo_dir(root: Path, url: str = "") -> tuple[list[Draft], RepoBundle]
         tree=_build_tree(root, sources),
         files=code_files,
         note=note,
+        scanned=scanned,
     )
     return drafts, bundle
+
+
+def _is_ssl_handshake_error(detail: str) -> bool:
+    low = (detail or "").lower()
+    return (
+        "schannel" in low
+        or "ssl/tls" in low
+        or ("ssl" in low and "handshake" in low)
+        or "certificate verify failed" in low
+        or "unable to get local issuer" in low
+        or "ssl routines" in low
+    )
+
+
+def _run_git_clone(
+    auth_url: str,
+    dest: Path,
+    *,
+    ssl_no_verify: bool,
+    ssl_backend: str | None,
+    branch: str = "",
+) -> None:
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    git_args = ["git", "-c", "credential.helper="]
+    if ssl_backend:
+        git_args += ["-c", f"http.sslBackend={ssl_backend}"]
+    if ssl_no_verify:
+        git_args += ["-c", "http.sslVerify=false"]
+        env["GIT_SSL_NO_VERIFY"] = "true"
+    git_args += ["clone", "--depth", "1"]
+    if (branch or "").strip():
+        git_args += ["--branch", branch.strip(), "--single-branch"]
+    git_args += [auth_url, str(dest)]
+    subprocess.run(
+        git_args,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=CLONE_TIMEOUT,
+        env=env,
+    )
+
+
+def _gitlab_api_target(url: str) -> tuple[str, str, str] | None:
+    """从仓库 URL 解析 (api_root, project_path, ref)。GitHub/Gitee 返回 None。ref 可为空。"""
+    u = normalize_url(url).rstrip("/")
+    if u.endswith(".git"):
+        u = u[:-4]
+    parsed = urlparse(u)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return None
+    host = parsed.hostname.lower()
+    if host in ("github.com", "gitee.com") or host.endswith(".github.com"):
+        return None
+    repo, ref, _sub = _parse_repo_browse(u)
+    parsed_repo = urlparse(repo)
+    path = (parsed_repo.path or "").strip("/")
+    if path.count("/") < 1:
+        return None
+    root = f"{parsed.scheme}://{parsed.hostname}"
+    if parsed.port:
+        root += f":{parsed.port}"
+    return root, path, ref
+
+
+def _http_get_bytes(url: str, headers: dict[str, str], *, ssl_no_verify: bool, timeout: int) -> bytes:
+    req = urllib.request.Request(url, headers=headers)
+    ctx = ssl._create_unverified_context() if ssl_no_verify else None
+    kwargs: dict = {"timeout": timeout}
+    if ctx is not None:
+        kwargs["context"] = ctx
+    with urllib.request.urlopen(req, **kwargs) as resp:
+        return resp.read()
+
+
+def _load_via_gitlab_archive(
+    url: str,
+    token: str,
+    *,
+    ssl_no_verify: bool,
+    sub: str = "",
+    branch: str = "",
+) -> tuple[list[Draft], list[RepoBundle]]:
+    """本机 git/schannel 拉不动时：用 GitLab API 下 archive.zip（走 Python SSL，与 curl -k 同类）。"""
+    target = _gitlab_api_target(url)
+    if not target:
+        raise RuntimeError("不是可识别的 GitLab 仓库地址，无法走 API 归档兜底")
+    api_root, project_path, url_ref = target
+    ref = (branch or url_ref or "").strip()
+    if not (token or "").strip():
+        raise RuntimeError("Git clone 失败后改走 GitLab API 需要 Token（PRIVATE-TOKEN）")
+    api_url = f"{api_root}/api/v4/projects/{quote(project_path, safe='')}/repository/archive.zip"
+    if ref:
+        api_url += f"?sha={quote(ref, safe='')}"
+    headers_list = [
+        {"User-Agent": "XuZhi-DraftFetcher/0.3", "PRIVATE-TOKEN": token.strip()},
+        {"User-Agent": "XuZhi-DraftFetcher/0.3", "Authorization": f"Bearer {token.strip()}"},
+    ]
+    data: bytes | None = None
+    last_err = ""
+    for headers in headers_list:
+        try:
+            data = _http_get_bytes(api_url, headers, ssl_no_verify=ssl_no_verify or True, timeout=CLONE_TIMEOUT)
+            if data[:2] == b"PK" or len(data) > 100:
+                break
+            last_err = "返回内容不像 zip"
+            data = None
+        except urllib.error.HTTPError as e:
+            body = ""
+            try:
+                body = e.read().decode("utf-8", errors="replace")[:200]
+            except Exception:
+                pass
+            last_err = f"HTTP {e.code} {body}".strip()
+            if e.code in (401, 403):
+                continue
+            if e.code == 404:
+                raise RuntimeError(
+                    f"GitLab API 找不到项目「{project_path}」"
+                    + (f" 或分支「{ref}」" if ref else "")
+                    + "，或 Token 无读权限（Guest 通常不够，需 Reporter+）"
+                ) from e
+        except Exception as e:
+            last_err = str(e)
+            data = None
+    if not data:
+        if "401" in last_err or "Unauthorized" in last_err:
+            raise RuntimeError(
+                "GitLab Token 无效或未授权（HTTP 401）。"
+                "请核对：① 填的是 Git 用 Access Token（不是上方模型 Key）；"
+                "② Token 未过期且勾选了 read_api / read_repository；"
+                "③ 项目成员角色 ≥ Reporter（Guest 拉不了归档）。"
+                f" 详情：{redact_secrets(last_err, token)}"
+            )
+        if "403" in last_err or "Forbidden" in last_err:
+            raise RuntimeError(
+                "GitLab 拒绝访问（HTTP 403）。Token 可能有效但项目角色不够，请升到 Reporter+。"
+                f" 详情：{redact_secrets(last_err, token)}"
+            )
+        raise RuntimeError(f"GitLab API 拉取归档失败：{redact_secrets(last_err, token)}")
+
+    with tempfile.TemporaryDirectory(prefix="xuzhi_glapi_") as tmp:
+        zpath = Path(tmp) / "repo.zip"
+        zpath.write_bytes(data)
+        extract_to = Path(tmp) / "extracted"
+        extract_to.mkdir()
+        try:
+            with zipfile.ZipFile(zpath) as zf:
+                zf.extractall(extract_to)
+        except zipfile.BadZipFile as e:
+            raise RuntimeError("GitLab API 返回的不是有效 zip（可能是登录页/权限错误页）") from e
+        # 归档通常多一层 项目名-sha/ 目录
+        kids = [p for p in extract_to.iterdir() if p.is_dir()]
+        root = kids[0] if len(kids) == 1 else extract_to
+        if sub:
+            cand = root / sub
+            if cand.exists():
+                root = cand
+        drafts, bundle = ingest_repo_dir(root, url=url)
+        if not drafts and not bundle.files:
+            raise RuntimeError(f"归档里没有可识别的前端/后端源码：{url}")
+        auth = "已带账号" if token.strip() else "匿名"
+        ref_note = f"分支 {ref}" if ref else "默认分支"
+        bundle.ref = ref
+        bundle.note = (bundle.note + " · " if bundle.note else "") + f"{auth} · GitLab API归档 · {ref_note} · SSL未校验"
+        return drafts, [bundle]
 
 
 def load_from_git(
     url: str,
     token: str = "",
     username: str = "",
+    *,
+    ssl_no_verify: bool = False,
+    branch: str = "",
 ) -> tuple[list[Draft], list[RepoBundle]]:
-    clone_url, sub = _repo_clone_url(url)
+    raw = (url or "").strip()
+    if raw.startswith("git@"):
+        raise RuntimeError(
+            "不支持 SSH 地址（git@…）。请改成 http(s)://主机/组/仓.git，并在旁填写 Token"
+            + ("（Gitee/自建还需用户名）" if not (username or "").strip() else "")
+            + "。"
+        )
+    clone_url, url_branch, sub = _repo_clone_url(url)
+    # 表单指定分支优先；否则用 URL 里的 /-/tree/…；再空则拉远端默认分支
+    branch = (branch or "").strip() or (url_branch or "").strip()
     auth_url = inject_git_auth(clone_url, token=token, username=username)
     display_url = redact_secrets(clone_url, token)
+    auth_note = "已带账号" if (token or "").strip() else "匿名"
+    if not ssl_no_verify:
+        ssl_no_verify = (os.getenv("XUZHI_GIT_SSL_NO_VERIFY") or os.getenv("GIT_SSL_NO_VERIFY") or "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+    attempts: list[tuple[bool, str | None]] = [(ssl_no_verify, None)]
+    if ssl_no_verify:
+        attempts.append((True, "openssl"))
+    else:
+        attempts.append((True, None))
+        attempts.append((True, "openssl"))
+
+    last_detail = ""
+    used_no_verify = ssl_no_verify
+    used_backend = ""
+    clone_ok = False
     with tempfile.TemporaryDirectory(prefix="xuzhi_git_") as tmp:
         dest = Path(tmp) / "repo"
-        env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
-        try:
-            subprocess.run(
-                ["git", "clone", "--depth", "1", auth_url, str(dest)],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=CLONE_TIMEOUT,
-                env=env,
-            )
-        except FileNotFoundError as e:
-            raise RuntimeError("本机未安装 git，无法拉取仓库") from e
-        except subprocess.TimeoutExpired as e:
-            raise RuntimeError(f"拉取 git 仓库超时：{display_url}") from e
-        except subprocess.CalledProcessError as e:
-            detail = redact_secrets((e.stderr or e.stdout or str(e)).strip(), token, username)
-            hint = ""
-            if token:
-                hint = "（已带 Token；若仍失败请确认 Token 权限/用户名，Gitee 等常需填用户名）"
-            else:
-                hint = "（私有仓请填写 Git Token）"
-            raise RuntimeError(f"拉取 git 仓库失败：{display_url}{hint}：{detail[:300]}") from e
-        root = dest / sub if sub else dest
-        if not root.exists():
-            root = dest
-        drafts, bundle = ingest_repo_dir(root, url=url)
-        if not drafts and not bundle.files:
-            raise RuntimeError(f"仓库里没有可识别的前端/后端源码：{url}")
-        return drafts, [bundle]
+        for i, (no_verify, backend) in enumerate(attempts):
+            if dest.exists():
+                shutil.rmtree(dest, ignore_errors=True)
+            try:
+                _run_git_clone(
+                    auth_url, dest, ssl_no_verify=no_verify, ssl_backend=backend, branch=branch
+                )
+                used_no_verify = no_verify
+                used_backend = backend or ""
+                clone_ok = True
+                break
+            except FileNotFoundError as e:
+                raise RuntimeError("本机未安装 git，无法拉取仓库") from e
+            except subprocess.TimeoutExpired:
+                last_detail = "timeout"
+                used_no_verify = no_verify
+                if i >= len(attempts) - 1:
+                    break
+                continue
+            except subprocess.CalledProcessError as e:
+                last_detail = redact_secrets((e.stderr or e.stdout or str(e)).strip(), token, username)
+                used_no_verify = no_verify
+                used_backend = backend or ""
+                if not _is_ssl_handshake_error(last_detail) or i >= len(attempts) - 1:
+                    break
+                continue
+
+        if clone_ok:
+            root = dest / sub if sub else dest
+            if not root.exists():
+                root = dest
+            drafts, bundle = ingest_repo_dir(root, url=url)
+            if not drafts and not bundle.files:
+                raise RuntimeError(f"仓库里没有可识别的前端/后端源码：{url}")
+            note_bits = [auth_note]
+            ref_note = f"分支 {branch}" if branch else "默认分支"
+            note_bits.append(ref_note)
+            if used_no_verify:
+                note_bits.append("SSL未校验")
+            if used_backend:
+                note_bits.append(f"sslBackend={used_backend}")
+            bundle.ref = branch
+            bundle.note = (bundle.note + " · " if bundle.note else "") + " · ".join(note_bits)
+            return drafts, [bundle]
+
+    # git 不通（本机已验证：curl/Python 可访问该 GitLab，git/schannel 不行）→ API 归档兜底
+    api_err = ""
+    try:
+        return _load_via_gitlab_archive(
+            url, token, ssl_no_verify=True, sub=sub, branch=branch
+        )
+    except Exception as e:
+        api_err = redact_secrets(str(e), token, username)
+
+    detail = last_detail or "clone failed"
+    if _is_ssl_handshake_error(detail):
+        hint = (
+            "（本机 Git/schannel 无法完成 TLS，已自动改走 GitLab API 归档仍失败。"
+            f"API：{api_err or '无详情'}。"
+            "请确认 Token 有效且项目角色≥Reporter；或改用左侧上传 HTML/源码包）"
+        )
+    elif not token:
+        hint = "（私有仓请填写 Token；Git 失败后的 API 兜底也需要 Token）"
+    else:
+        hint = f"（git 失败后 API 兜底也失败：{api_err or '无详情'}）"
+    raise RuntimeError(f"拉取 git 仓库失败：{display_url}{hint}：{detail[:240]}")
 
 
 def load_from_url(
@@ -455,16 +823,21 @@ def load_from_url(
     username: str = "",
     *,
     git_only: bool = False,
+    ssl_no_verify: bool = False,
+    branch: str = "",
 ) -> tuple[list[Draft], list[RepoBundle]]:
     url = normalize_url(url)
     if not url:
         return [], []
     if _looks_like_repo(url):
-        return load_from_git(url, token=token, username=username)
+        return load_from_git(
+            url, token=token, username=username, ssl_no_verify=ssl_no_verify, branch=branch
+        )
     if git_only:
         raise RuntimeError(
-            "此处只拉 Git 仓库（地址建议带 .git）；网页/线上页请用左侧「上传 HTML」，"
-            "不要贴浏览器地址（多为空壳）"
+            "此处只拉 Git 仓库。请填 http(s)://主机/组/仓 或 …/仓.git；"
+            "内网自建仓也可。网页请左侧上传 HTML。账号填在本条链接旁的 Token/用户名里"
+            + ("（已检测到 Token，但仍不像仓库地址）" if (token or "").strip() else "（当前未识别为仓库地址）")
         )
     parsed = urlparse(url)
     fragment = (parsed.fragment or "").strip()
@@ -506,9 +879,11 @@ def load_urls(
     entries: list[dict] | None = None,
     *,
     git_only: bool = False,
+    ssl_no_verify: bool = False,
 ) -> tuple[list[Draft], list[RepoBundle], list[str]]:
-    """拉取多条链接。entries 优先：每项 {url, token?, username?}；token 均可选。
-    git_only=True 时只接受仓库地址（页面入口用）；网页请上传 HTML。"""
+    """拉取多条链接。entries 优先：每项 {url, token?, username?, branch?}；token/branch 均可选。
+    git_only=True 时只接受仓库地址（页面入口用）；网页请上传 HTML。
+    branch 空：拉仓库默认分支（或 URL 里已带的 /-/tree/分支）。"""
     items: list[dict] = []
     if entries is not None:
         for e in entries:
@@ -520,6 +895,7 @@ def load_urls(
                     "url": u,
                     "token": (e.get("token") or "").strip(),
                     "username": (e.get("username") or "").strip(),
+                    "branch": (e.get("branch") or "").strip(),
                 }
             )
     else:
@@ -527,7 +903,14 @@ def load_urls(
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
-            items.append({"url": line, "token": (token or "").strip(), "username": (username or "").strip()})
+            items.append(
+                {
+                    "url": line,
+                    "token": (token or "").strip(),
+                    "username": (username or "").strip(),
+                    "branch": "",
+                }
+            )
 
     drafts: list[Draft] = []
     repos: list[RepoBundle] = []
@@ -536,8 +919,16 @@ def load_urls(
         line = item["url"]
         tok = item["token"]
         user = item["username"]
+        br = item.get("branch") or ""
         try:
-            d, r = load_from_url(line, token=tok, username=user, git_only=git_only)
+            d, r = load_from_url(
+                line,
+                token=tok,
+                username=user,
+                git_only=git_only,
+                ssl_no_verify=ssl_no_verify,
+                branch=br,
+            )
             room = MAX_HTML_DRAFTS - len(drafts)
             if room > 0:
                 drafts.extend(d[:room])
@@ -626,18 +1017,31 @@ def materials_report(drafts: list[Draft] | None = None, repos: list[RepoBundle] 
         lines.append(f"✅ 已拉取仓库：{r.url or r.name}")
         if r.note:
             lines.append(f"　摘要：{r.note}")
+        ref = (r.ref or "").strip()
+        if ref:
+            lines.append(f"　分支/标签：{ref}")
+        elif r.note and "默认分支" not in (r.note or ""):
+            lines.append("　分支/标签：默认分支（链接未指定）")
+        scanned = int(getattr(r, "scanned", 0) or 0)
+        retained = len(r.files or [])
+        if scanned or retained:
+            lines.append(f"　收录：全文 {retained or scanned} 个源文件（不设数量上限）")
         kinds: dict[str, int] = {}
         for f in r.files or []:
             kinds[f.kind or "other"] = kinds.get(f.kind or "other", 0) + 1
         if kinds:
             lines.append("　源码分类：" + "、".join(f"{k} {v} 个" for k, v in sorted(kinds.items())))
-        paths = [f.path for f in (r.files or [])[:10]]
+        # 材料明细里多列一些路径，剩余用总数提示
+        show_n = 80
+        paths = [f.path for f in (r.files or [])[:show_n]]
         if paths:
-            more = f" 等共 {len(r.files)} 个" if len(r.files or []) > 10 else ""
+            more = f" 等共 {len(r.files)} 个" if len(r.files or []) > show_n else ""
             lines.append("　已读文件：" + "、".join(paths) + more)
-        tree = [t for t in (r.tree or [])[:12]]
+        show_t = 40
+        tree = [t for t in (r.tree or [])[:show_t]]
         if tree:
-            lines.append("　目录摘取：" + "、".join(tree))
+            more_t = f" …共 {len(r.tree)} 项" if len(r.tree or []) > show_t else ""
+            lines.append("　目录摘取：" + "、".join(tree) + more_t)
     usable = visual_drafts(drafts)
     for d in usable[:8]:
         lines.append(
@@ -677,13 +1081,24 @@ def _trim_html(html: str, limit: int) -> str:
 
 
 def _rank_code_files(files: list[CodeFile], keywords: set[str]) -> list[CodeFile]:
-    """按与需求关键词、入口文件相关性排序；前后端同等参与，不拆开两套队列。"""
+    """按与需求关键词、入口/界面文件相关性排序；纯 API 封装靠后。"""
     keys = {k.lower() for k in keywords if k and len(k) >= 2}
 
     def score(f: CodeFile) -> int:
         low = (f.path + "\n" + f.text[:3000]).lower()
         s = _file_priority(f.path)
         s += sum(3 for k in keys if k in low)
+        # 出样更需要有界面结构的文件，避免 Api.ts 这类纯接口层抢占上下文
+        if "<template" in f.text or re.search(r"<(?:table|form|el-|a-table|van-)", f.text[:4000], re.I):
+            s += 8
+        if re.search(r"(^|/)(api|apis|http|request)s?\.[jt]sx?$", f.path.replace("\\", "/"), re.I):
+            s -= 6
+        if re.search(r"\bexport\s+default\s+class\s+Api\b", f.text[:2000]):
+            s -= 8
+        if f.note == "spa-shell":
+            s -= 4
+        if f.note == "iconfont" or _is_iconfont_catalog(f.text, f.path):
+            s -= 20
         return s
 
     return sorted(files, key=lambda f: (-score(f), f.path))

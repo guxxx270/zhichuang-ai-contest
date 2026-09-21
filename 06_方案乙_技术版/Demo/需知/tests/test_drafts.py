@@ -41,6 +41,90 @@ def test_extract_html_from_model_output():
     assert "<table" in out.lower()
 
 
+def test_extract_html_rejects_api_ts_dump():
+    from xuzhi.pipeline.prototype import _is_source_code_dump
+
+    dump = """<!doctype html><html><body><pre>
+import HttpService from '@/assets/ts/http';
+import { inject } from '@vue/runtime-core';
+export default class Api {
+  http = inject('http') as HttpService;
+  async getTestData(params: any) { return await this.http.post('/do/3617.23', params); }
+  async getUserName() { return await this.http.post('/do/3617.24', {}); }
+  async getDetail(params: any) { return await this.http.post('/do/3617.34', params); }
+  async addReport(params: any) { return await this.http.post('/do/3613.162', params); }
+  async attachmentDownload(params: any) {
+    const res: any = await this.http.post('/do/3617.56', params, { responseType: 'blob' });
+  }
+}
+</pre></body></html>"""
+    assert _is_source_code_dump(dump)
+    assert _extract_html(dump) == ""
+
+
+def test_gitlab_archive_passes_branch(monkeypatch):
+    """表单分支 / URL tree 分支都会带到 API sha=；不填则走默认分支（无 sha）。"""
+    from xuzhi import drafts as D
+    import io
+    import subprocess
+    import zipfile
+
+    def boom(*a, **k):
+        raise subprocess.CalledProcessError(1, "git", stderr="schannel: failed to receive handshake")
+
+    monkeypatch.setattr(D, "_run_git_clone", boom)
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("p-abc/readme.md", "# hi\n")
+        zf.writestr("p-abc/app.py", "print(1)\n")
+    payload = buf.getvalue()
+    seen = {}
+
+    def fake_get(url, headers, *, ssl_no_verify, timeout):
+        seen["url"] = url
+        return payload
+
+    monkeypatch.setattr(D, "_http_get_bytes", fake_get)
+
+    _d, repos = D.load_from_git(
+        "https://gitlab.example.com/g/p.git",
+        token="glpat-test",
+        ssl_no_verify=True,
+        branch="hotfix",
+    )
+    assert "sha=hotfix" in seen["url"]
+    assert repos and repos[0].ref == "hotfix"
+
+    _d, repos = D.load_from_git(
+        "https://gitlab.example.com/g/p/-/tree/release",
+        token="glpat-test",
+        ssl_no_verify=True,
+    )
+    assert "sha=release" in seen["url"]
+    assert repos and repos[0].ref == "release"
+
+    # 表单分支优先于 URL 里的 tree
+    _d, repos = D.load_from_git(
+        "https://gitlab.example.com/g/p/-/tree/release",
+        token="glpat-test",
+        ssl_no_verify=True,
+        branch="develop",
+    )
+    assert "sha=develop" in seen["url"]
+    assert repos[0].ref == "develop"
+
+    seen.clear()
+    _d, repos = D.load_from_git(
+        "https://gitlab.example.com/g/p.git",
+        token="glpat-test",
+        ssl_no_verify=True,
+    )
+    assert "sha=" not in seen.get("url", "")
+    assert repos and repos[0].ref == ""
+    assert "默认分支" in (repos[0].note or "")
+
+
 def test_ingest_repo_reads_frontend_and_backend(tmp_path: Path):
     (tmp_path / "frontend").mkdir()
     (tmp_path / "backend").mkdir()
@@ -68,6 +152,25 @@ def test_ingest_repo_reads_frontend_and_backend(tmp_path: Path):
     arch = build_architecture(extract_card("净值日报加一列对标指数"), "净值日报加一列对标指数", drafts=drafts, repos=[bundle])
     assert "代码仓库" in [s[0] for s in arch.stack]
     assert any(d.id == "D0" for d in arch.decisions)
+
+
+def test_ingest_repo_reads_many_source_files(tmp_path: Path):
+    """源文件数量不设上限，应全部全文收录。"""
+    from xuzhi.drafts import ingest_repo_dir, materials_report
+
+    src = tmp_path / "src"
+    src.mkdir()
+    for i in range(60):
+        (src / f"page_{i:02d}.vue").write_text(
+            f"<template><div>页{i}</div></template>\n<script>export default {{ name: 'P{i}' }}</script>\n",
+            encoding="utf-8",
+        )
+    (tmp_path / "package-lock.json").write_text("{}", encoding="utf-8")
+    drafts, bundle = ingest_repo_dir(tmp_path, url="https://example.com/big.git")
+    assert bundle.scanned == 60
+    assert len(bundle.files) == 60
+    assert "已读全文 60" in (bundle.note or "")
+    assert any("60 个源文件" in x for x in materials_report([], [bundle]))
 
 
 def test_prototype_from_draft_adds_column():
@@ -336,6 +439,49 @@ def test_materials_report_lists_repo_files(tmp_path: Path):
     assert any("src/api.py" in x for x in lines)
 
 
+def test_vue_el_table_becomes_static_html_with_sortino():
+    """Vue el-table 不能直接 iframe；应转成真 table，并按需求加 Sortino 列。"""
+    from xuzhi.drafts import CodeFile, RepoBundle
+    from xuzhi.pipeline.intake import extract_card
+    from xuzhi.pipeline.prototype import render_source, _is_static_browser_html
+
+    vue = """
+<template>
+  <div class="income-risk">
+    <el-table :data="rows">
+      <el-table-column prop="name" label="产品名称" />
+      <el-table-column prop="sharpe" label="夏普比率" />
+      <el-table-column prop="maxdd" label="最大回撤" />
+      <el-table-column prop="vol" label="波动率" />
+    </el-table>
+  </div>
+</template>
+<script>
+export default { name: 'incomeRiskIndex' }
+</script>
+"""
+    # 裸组件标签不是静态页
+    assert not _is_static_browser_html(f"<html><body>{vue}</body></html>")
+
+    repo = RepoBundle(
+        url="https://example.com/invest-pre.git",
+        files=[
+            CodeFile(
+                path="src/components/observePool/table/incomeRiskIndex.vue",
+                kind="frontend",
+                text=vue,
+            )
+        ],
+    )
+    text = "CTA因子表现新增Sortino"
+    html_out = render_source(extract_card(text), repos=[repo], demand_text=text)
+    assert "<table" in html_out.lower()
+    assert "<th>" in html_out.lower()
+    assert "el-table" not in html_out
+    assert "Sortino" in html_out or "sortino" in html_out.lower()
+    assert "夏普" in html_out or "产品" in html_out
+
+
 def test_with_draft_ignores_llm_redesign():
     """有底稿时即使给了 api 模式假 LLM，也应走底稿复刻，不落到需知模板。"""
     class FakeApi:
@@ -356,7 +502,7 @@ def test_with_draft_ignores_llm_redesign():
 
 
 def test_spa_shell_is_not_visual():
-    from xuzhi.drafts import is_visual_html
+    from xuzhi.drafts import is_visual_html, _is_iconfont_catalog
 
     spa = """<!doctype html><html><head><title>九瑞投研平台</title>
     <script src="/static/js/chunk-vendors.js"></script>
@@ -364,6 +510,30 @@ def test_spa_shell_is_not_visual():
     <body><div id="app"></div></body></html>"""
     assert not is_visual_html(spa)
     assert is_visual_html(SAMPLE_DRAFT.read_text(encoding="utf-8"))
+
+    icon = """<!doctype html><html><head><title>Unicode Font class Symbol</title></head><body>
+<div>查看项目</div>
+<div>资产维护 &#xe640;</div>
+<div>指数管理 &#xe753;</div>
+<div>股票指标 &#xe66b;</div>
+<div>批量修改 &#xe681;</div>
+<div>退出全屏 &#xe63f;</div>
+<div>隐藏 &#xe654;</div>
+<div>邮件 &#xe609;</div>
+<div>拆分 &#xe67c;</div>
+<div>产品拆解与资产配置 &#xe6ff;</div>
+<div>上传 &#xe651;</div>
+<div>基金 &#xe703;</div>
+<div>可转债 &#xe63e;</div>
+<div>T0指标 &#xe63d;</div>
+<div>权益市场指标 &#xe63b;</div>
+<div>icon_dbfx &#xe65e;</div>
+<div>heartSvg &#xe638;</div>
+<div>投资管理 &#xe635;</div>
+<div>管理人画像 &#xe819;</div>
+</body></html>"""
+    assert _is_iconfont_catalog(icon, "demo_index.html")
+    assert not is_visual_html(icon)
 
 
 def test_spa_shell_generates_named_tabs_from_demand():
@@ -435,17 +605,50 @@ def test_normalize_url_adds_https():
 
 
 def test_inject_git_auth_and_redact():
-    from xuzhi.drafts import inject_git_auth, redact_secrets
+    from xuzhi.drafts import inject_git_auth, redact_secrets, _looks_like_repo, _repo_clone_url
 
     gh = inject_git_auth("https://github.com/org/repo.git", token="ghp_secret123")
     assert "x-access-token:ghp_secret123@" in gh
     assert inject_git_auth("https://github.com/org/repo.git", token="") == "https://github.com/org/repo.git"
+    # 填错用户名也不应破坏 GitHub 认证：始终用 x-access-token
+    gh2 = inject_git_auth("https://github.com/org/repo.git", token="ghp_secret123", username="wrong-user")
+    assert "x-access-token:ghp_secret123@" in gh2
+    assert "wrong-user" not in gh2
 
     gl = inject_git_auth("http://10.66.200.208/root/app.git", token="glpat-abc")
     assert gl.startswith("http://oauth2:glpat-abc@10.66.200.208/")
 
     gitee = inject_git_auth("https://gitee.com/org/repo.git", token="tok", username="alice")
     assert "alice:tok@" in gitee
+
+    # 内网仓不带 .git 也应识别为仓库（否则账号填了也不会去 clone）
+    assert _looks_like_repo("http://10.66.200.208/root/app")
+    assert _repo_clone_url("http://10.66.200.208/root/app")[0].endswith(".git")
+    assert _repo_clone_url("http://10.66.200.208/root/app")[1] == ""
+
+    from xuzhi.drafts import _gitlab_api_target, _parse_repo_browse
+
+    assert _gitlab_api_target("https://gitlab.gtjaqh.net/qiuer/invest/invest-pre.git") == (
+        "https://gitlab.gtjaqh.net",
+        "qiuer/invest/invest-pre",
+        "",
+    )
+    assert _gitlab_api_target(
+        "https://gitlab.gtjaqh.net/qiuer/invest/invest-pre/-/tree/develop"
+    ) == (
+        "https://gitlab.gtjaqh.net",
+        "qiuer/invest/invest-pre",
+        "develop",
+    )
+    assert _gitlab_api_target("https://github.com/org/repo.git") is None
+    assert _looks_like_repo("https://gitlab.gtjaqh.net/qiuer/invest/invest-pre/-/tree/main")
+    clone, branch, sub = _repo_clone_url(
+        "https://gitlab.gtjaqh.net/qiuer/invest/invest-pre/-/tree/feature-x/src"
+    )
+    assert clone.endswith("invest-pre.git")
+    assert branch == "feature-x"
+    assert sub == "src"
+    assert _parse_repo_browse("https://github.com/org/repo/tree/main/docs")[1] == "main"
 
     msg = redact_secrets(
         "fail https://oauth2:glpat-abc@10.66.200.208/root/app.git glpat-abc",
@@ -455,10 +658,48 @@ def test_inject_git_auth_and_redact():
     assert "***" in msg
 
 
+def test_gitlab_archive_fallback(monkeypatch, tmp_path):
+    """git/schannel 失败时改走 GitLab API zip。"""
+    import io
+    import subprocess
+    import zipfile
+
+    from xuzhi import drafts as D
+
+    def boom(*a, **k):
+        raise subprocess.CalledProcessError(1, "git", stderr="schannel: failed to receive handshake")
+
+    monkeypatch.setattr(D, "_run_git_clone", boom)
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr(
+            "invest-pre-abc/index.html",
+            "<html><body><h1>A</h1><h2>B</h2><table><tr><th>x</th><td>1</td></tr></table>"
+            "<button>a</button><button>b</button></body></html>",
+        )
+        zf.writestr("invest-pre-abc/app.py", "print(1)\n")
+    payload = buf.getvalue()
+
+    def fake_get(url, headers, *, ssl_no_verify, timeout):
+        assert "api/v4/projects/" in url
+        assert "PRIVATE-TOKEN" in headers or "Authorization" in headers
+        return payload
+
+    monkeypatch.setattr(D, "_http_get_bytes", fake_get)
+    drafts, repos = D.load_from_git(
+        "https://gitlab.example.com/g/p/repo.git",
+        token="glpat-test",
+        ssl_no_verify=True,
+    )
+    assert repos and "GitLab API归档" in (repos[0].note or "")
+    assert drafts or repos[0].files
+
+
 def test_load_urls_entries_per_link_errors(monkeypatch):
     from xuzhi import drafts as D
 
-    def fake_load(url, token="", username="", git_only=False):
+    def fake_load(url, token="", username="", git_only=False, **_kwargs):
         if "fail" in url:
             raise RuntimeError(f"auth failed tok={token}")
         if "empty" in url:
