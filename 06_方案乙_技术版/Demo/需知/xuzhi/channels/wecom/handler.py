@@ -8,13 +8,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 from .config import WecomConfig
 from .connection import WeComLongConnection
 from .dedup import TTLSet
 from .models import Inbound
-from .parsing import looks_like_answers, parse_answers, strip_mention
+from .parsing import ask_prefix as _ask_prefix, looks_like_answers, parse_answers, strip_mention
+from .askcode import CodeAsker
 from .render import GUIDE_TEXT, HELP_TEXT, render_analysis
 from .session import SessionStore
 from .streaming import StreamReply
@@ -45,8 +47,20 @@ class WecomHandler:
         self.sem = asyncio.Semaphore(cfg.limits.max_concurrent)
         self.started_at = time.time()
         self.handled = 0
+        self._asker: Optional[CodeAsker] = None
 
     # ---------------- 依赖 ----------------
+    @property
+    def asker(self) -> CodeAsker:
+        if self._asker is None:
+            a = self.cfg.ask
+            repo = Path(a.repo_path) if a.repo_path else Path(__file__).resolve().parents[3]
+            self._asker = CodeAsker(repo, a.max_turns, a.timeout_seconds, a.model)
+        return self._asker
+
+    def mode_of(self, session) -> str:
+        return session.mode or self.cfg.default_mode
+
     @property
     def analyze(self) -> Callable[..., Any]:
         if self._analyze_fn is None:
@@ -69,11 +83,28 @@ class WecomHandler:
             await self._reply_once(m, f"未授权：{reason}\n把你的 userid 加进 .env 的 WECOM_ALLOW_USERS 即可（发 /whoami 可查）。")
             return
 
+        session = self.sessions.get(m.session_key)
+
+        # 「问码」的 /问 前缀要在命令分发之前判，否则会被当成未知命令
+        question = _ask_prefix(text)
+        if question is not None:
+            if not question:
+                await self._reply_once(m, "`/问` 后面要跟问题，比如 `/问 隐盾的脱敏规则在哪实现的`。")
+                return
+            await self._ask(m, session, question)
+            return
+
         if text.startswith("/"):
             await self._command(m, text)
             return
 
-        session = self.sessions.get(m.session_key)
+        if self.mode_of(session) == "ask":
+            if len(text) < 4:
+                await self._reply_once(m, "问题太短了。现在是**问码**模式，直接问关于需知代码的问题即可；"
+                                          "回需求分析发 `/模式 需求`。")
+                return
+            await self._ask(m, session, text)
+            return
 
         # 在回答上一轮的问清？
         if looks_like_answers(text, len(session.numbered)):
@@ -104,6 +135,30 @@ class WecomHandler:
             return
         session.touch()
         await self._run(m, session, answered=applied)
+
+    async def _ask(self, m: Inbound, session, question: str) -> None:
+        """问码：不跑需求流水线，让 Agent 去翻需知自己的代码。"""
+        if not self.cfg.ask.enabled:
+            await self._reply_once(m, "问码已关闭（.env 里 WECOM_ASK_ENABLED=0）。")
+            return
+        try:
+            await asyncio.wait_for(self.sem.acquire(), timeout=self.cfg.limits.queue_wait_seconds)
+        except asyncio.TimeoutError:
+            await self._reply_once(m, "正在处理的请求有点多，排队超时了，稍后再问一次。")
+            return
+        try:
+            async with StreamReply(self.conn, m, self.cfg.limits) as sr:
+                await sr.update("🔎 收到，正在翻需知的代码…", force=True)
+
+                async def progress(content: str) -> None:
+                    await sr.update(content, force=True)
+
+                answer = await self.asker.ask(question, progress, session)
+                await sr.finish(answer)
+                session.touch()
+                self.handled += 1
+        finally:
+            self.sem.release()
 
     async def _run(self, m: Inbound, session, answered: int) -> None:
         try:
@@ -166,11 +221,30 @@ class WecomHandler:
             await self._reply_once(m, f"pong · 已运行 {up}s · 已处理 {self.handled} 条 · 连接 {self.conn.stats['connects']} 次")
         elif cmd == "/whoami":
             await self._reply_once(m, f"userid={m.userid}\nchattype={m.chattype}\nchatid={m.chatid}")
+        elif cmd in ("/模式", "/mode"):
+            await self._switch_mode(m, text)
         elif cmd in ("/reset", "/重来", "/换需求"):
             self.sessions.reset(m.session_key)
             await self._reply_once(m, "已清空上一条需求，把新的需求发过来吧。")
         else:
             await self._reply_once(m, f"没有 {cmd} 这个命令。\n\n{HELP_TEXT}")
+
+    async def _switch_mode(self, m: Inbound, text: str) -> None:
+        session = self.sessions.get(m.session_key)
+        arg = text.split(maxsplit=1)[1].strip().lower() if len(text.split(maxsplit=1)) > 1 else ""
+        if not arg:
+            cur = "问码（问需知的代码）" if self.mode_of(session) == "ask" else "需求分析"
+            await self._reply_once(m, f"当前模式：**{cur}**\n切换：`/模式 问码` 或 `/模式 需求`。\n"
+                                      "也可以不切模式，单条用 `/问 你的问题`。")
+            return
+        if arg in ("ask", "问码", "问答", "代码", "code"):
+            session.mode = "ask"
+            await self._reply_once(m, "已切到**问码**模式：之后直接发问题，我去翻需知的代码回答。\n回需求分析发 `/模式 需求`。")
+        elif arg in ("req", "需求", "需求分析", "requirement"):
+            session.mode = "req"
+            await self._reply_once(m, "已切回**需求分析**模式：之后发一堆话我当需求拆。\n临时问代码可以用 `/问 …`。")
+        else:
+            await self._reply_once(m, f"不认识模式「{arg}」。可选：`问码` / `需求`。")
 
     def _authorized(self, m: Inbound) -> tuple[bool, str]:
         auth = self.cfg.auth

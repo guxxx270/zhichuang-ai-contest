@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 from typing import Dict, List, Tuple
 
-__all__ = ["strip_mention", "parse_answers", "looks_like_answers"]
+__all__ = ["strip_mention", "parse_answers", "looks_like_answers", "ask_prefix"]
 
 # "1 需要"/"1. 需要"/"1、需要"/"答1：需要"/"#1 需要"
 _ANSWER_LINE = re.compile(r"^\s*(?:答|#)?\s*(\d{1,2})\s*[\.．、：:）)\]】]?\s*(.+?)\s*$")
@@ -47,3 +47,14 @@ def looks_like_answers(text: str, numbered_count: int) -> bool:
     if len(answers) < max(1, len(lines) // 2):
         return False
     return all(n <= numbered_count for n in answers)
+
+
+# /问 /问码 /ask /代码 + 问题；返回问题正文，不是这个前缀则返回 None
+_ASK_PREFIX = re.compile(r"^/(?:问码|问|ask|code|代码)(?:\s+|$)", re.I)
+
+
+def ask_prefix(text: str) -> "str | None":
+    m = _ASK_PREFIX.match(text or "")
+    if not m:
+        return None
+    return (text[m.end():] or "").strip()

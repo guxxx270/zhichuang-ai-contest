@@ -352,6 +352,8 @@ def _collect_drafts(
     uploads,
     url_entries: list[dict] | None,
     use_sample: bool,
+    *,
+    ssl_no_verify: bool = False,
 ) -> tuple[list[Draft], list[RepoBundle], list[str]]:
     drafts: list[Draft] = []
     repos: list[RepoBundle] = []
@@ -363,7 +365,7 @@ def _collect_drafts(
             except Exception as e:
                 errors.append(f"未读到：{getattr(f, 'name', 'upload')} — {e}")
     if url_entries:
-        more_d, more_r, err = load_urls(entries=url_entries, git_only=True)
+        more_d, more_r, err = load_urls(entries=url_entries, git_only=True, ssl_no_verify=ssl_no_verify)
         drafts.extend(more_d)
         repos.extend(more_r)
         errors.extend(err)
@@ -413,6 +415,7 @@ def _read_draft_link_entries() -> list[dict]:
                 "url": url,
                 "token": (st.session_state.get(f"draft_link_tok_{rid}") or "").strip(),
                 "username": (st.session_state.get(f"draft_link_user_{rid}") or "").strip(),
+                "branch": (st.session_state.get(f"draft_link_branch_{rid}") or "").strip(),
             }
         )
     return entries
@@ -420,15 +423,18 @@ def _read_draft_link_entries() -> list[dict]:
 
 def _render_draft_link_rows() -> None:
     rows = _ensure_draft_link_rows()
-    st.caption("只填 Git 仓库。每条可单独带 Token（可选）；公有仓留空即可。")
+    st.caption(
+        "只填 Git 仓库 http(s) 地址。Token / 分支填在本行旁（不是上方模型 Key）。"
+        "分支可不填：不填则拉该仓**默认分支**（GitLab/GitHub 上设置的 default，常见 main / master）。"
+    )
     for idx, row in enumerate(list(rows)):
         rid = row["id"]
-        c1, c2, c3, c4 = st.columns([3.2, 2.0, 1.5, 0.6])
+        c1, c2, c3, c4, c5 = st.columns([2.8, 1.6, 1.3, 1.3, 0.5])
         with c1:
             st.text_input(
                 f"Git 仓库 {idx + 1}",
                 key=f"draft_link_url_{rid}",
-                placeholder="https://…/repo.git",
+                placeholder="https://主机/组/仓.git 或内网 http://…/组/仓",
                 label_visibility="collapsed" if idx else "visible",
             )
         with c2:
@@ -442,17 +448,25 @@ def _render_draft_link_rows() -> None:
             )
         with c3:
             st.text_input(
+                "分支（可选）",
+                key=f"draft_link_branch_{rid}",
+                placeholder="默认分支",
+                label_visibility="collapsed" if idx else "visible",
+                help="不填则拉取仓库默认分支；也可在 URL 里写 /-/tree/分支名。",
+            )
+        with c4:
+            st.text_input(
                 "用户名（可选）",
                 key=f"draft_link_user_{rid}",
                 placeholder="多数可空",
                 label_visibility="collapsed" if idx else "visible",
-                help="Gitee / 部分自建仓需要；默认 oauth2 / x-access-token。",
+                help="GitHub 可空（只用 Token）；Gitee 填登录用户名。",
             )
-        with c4:
+        with c5:
             label = "删" if len(rows) > 1 else " "
             if st.button(label, key=f"draft_link_del_{rid}", disabled=len(rows) <= 1):
                 st.session_state.draft_link_rows = [r for r in rows if r["id"] != rid]
-                for suffix in ("url", "tok", "user"):
+                for suffix in ("url", "tok", "user", "branch"):
                     st.session_state.pop(f"draft_link_{suffix}_{rid}", None)
                 st.rerun()
     b1, b2 = st.columns([1, 4])
@@ -463,8 +477,7 @@ def _render_draft_link_rows() -> None:
             st.session_state.draft_link_next_id = nid + 1
             st.rerun()
     with b2:
-        st.caption("网页请左侧上传 HTML；Token 仅会话内使用。")
-
+        st.caption("网页请左侧上传 HTML；Token 仅会话内使用。内网 SSL 选项在下方「开工」表单里勾选。")
 
 ledger = get_ledger()
 samples = sorted(config.SAMPLES_DIR.glob("*.md"))
@@ -548,6 +561,11 @@ with st.form("xuzhi_go"):
         src = st.selectbox("来源（可不选）", ["自动识别", "企业微信", "会议纪要", "邮件", "需求单", "口述"], key="src")
         mobile = st.toggle("原型按手机版出", value=False, key="mobile")
         client = st.toggle("原型出客户版（脱敏）", value=False, key="client")
+        git_ssl_no_verify = st.toggle(
+            "内网 Git 跳过 SSL 校验",
+            key="git_ssl_no_verify",
+            help="勾选后与「开工」一起生效。Windows 访问内网 GitLab 出现 schannel 握手失败时请勾选（会自动再试 openssl）。",
+        )
     with c2:
         default_text = next((p.read_text(encoding="utf-8") for p in samples if p.stem == choice), "")
         if choice == "（粘贴自己的）":
@@ -589,6 +607,7 @@ if go:
             draft_uploads,
             _read_draft_link_entries(),
             use_sample_draft,
+            ssl_no_verify=bool(git_ssl_no_verify),
         )
         for e in draft_errs:
             if e.startswith("未读到："):

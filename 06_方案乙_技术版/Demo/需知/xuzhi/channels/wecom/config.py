@@ -10,7 +10,7 @@ from typing import Set
 
 from ... import config as xuzhi_config   # 导入即触发 .env 加载
 
-__all__ = ["BotConfig", "AuthConfig", "Limits", "WecomConfig", "load_wecom_config"]
+__all__ = ["BotConfig", "AuthConfig", "Limits", "AskConfig", "WecomConfig", "load_wecom_config"]
 
 
 def _env(key: str, default: str = "") -> str:
@@ -68,10 +68,22 @@ class Limits:
 
 
 @dataclass
+class AskConfig:
+    """问码：基于需知自己的代码库回答问题（走 Claude Agent SDK，只读）。"""
+    enabled: bool = True
+    repo_path: str = ""             # 空 = 需知 Demo 根目录
+    max_turns: int = 20
+    timeout_seconds: int = 240
+    model: str = ""                 # 空 = SDK 默认
+
+
+@dataclass
 class WecomConfig:
     bot: BotConfig
     auth: AuthConfig
     limits: Limits
+    ask: AskConfig = field(default_factory=AskConfig)
+    default_mode: str = "req"         # req 需求分析 | ask 问码
     min_requirement_chars: int = 15   # 短于这个字数且不像命令/答复 → 回引导语，不跑流水线
 
     @property
@@ -100,5 +112,13 @@ def load_wecom_config() -> WecomConfig:
             analyze_timeout_seconds=_env_int("WECOM_ANALYZE_TIMEOUT", 240),
             stream_min_interval=_env_float("WECOM_STREAM_MIN_INTERVAL", 0.6),
         ),
+        ask=AskConfig(
+            enabled=_env("WECOM_ASK_ENABLED", "1") not in ("0", "false", "no"),
+            repo_path=_env("WECOM_ASK_REPO"),
+            max_turns=_env_int("WECOM_ASK_MAX_TURNS", 20),
+            timeout_seconds=_env_int("WECOM_ASK_TIMEOUT", 240),
+            model=_env("WECOM_ASK_MODEL"),
+        ),
+        default_mode="ask" if _env("WECOM_DEFAULT_MODE").lower() in ("ask", "问码", "问答") else "req",
         min_requirement_chars=_env_int("WECOM_MIN_CHARS", 15),
     )

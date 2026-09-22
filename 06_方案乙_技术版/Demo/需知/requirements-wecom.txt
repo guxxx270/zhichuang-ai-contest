@@ -1,0 +1,4 @@
+# 企微入口专用依赖（Streamlit 端不需要，所以从 requirements.txt 里分出来）
+-r requirements.txt
+websockets>=12          # 智能机器人长连接
+claude-agent-sdk>=0.2   # 问码：在需知代码库里查证回答（自带引擎二进制，安装略慢）

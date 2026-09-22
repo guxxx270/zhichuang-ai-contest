@@ -15,6 +15,8 @@ class Session:
     answers: Dict[str, str] = field(default_factory=dict)  # 问题 id -> 业务答复
     numbered: List[Tuple[int, str]] = field(default_factory=list)  # (序号, 问题 id)，把"1 xxx"映射回 id
     analysis: Optional[Any] = None                         # 最近一次 Analysis，供重算
+    mode: str = ""                                         # "" 跟随默认 | req 需求分析 | ask 问码
+    ask_session_id: Optional[str] = None                   # 问码的 Agent SDK 会话 id，用于追问
     turns: int = 0
     last_active: float = field(default_factory=time.time)
 

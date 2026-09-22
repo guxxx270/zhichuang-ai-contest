@@ -10,7 +10,8 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
 import pytest
-import websockets
+
+websockets = pytest.importorskip("websockets", reason="企微入口依赖：pip install -r requirements-wecom.txt")
 
 from xuzhi.channels.wecom.config import AuthConfig, BotConfig, Limits, WecomConfig
 from xuzhi.channels.wecom.connection import WeComLongConnection
@@ -388,3 +389,102 @@ def test_render_against_real_pipeline():
     assert "**工时**" in out and "AI 协同" in out
     assert "需要 IT 拍板" in out
     assert len(out.encode("utf-8")) < 20000
+
+
+# ---------------------------------------------------------------- 双模式路由
+class FakeAsker:
+    """假问码引擎：记录被问了什么，不碰 Agent SDK。"""
+
+    name = "askcode"
+
+    def __init__(self) -> None:
+        self.questions: List[str] = []
+
+    async def ask(self, question: str, progress, session=None) -> str:
+        self.questions.append(question)
+        await progress("🔎 正在翻需知的代码…\n- 搜 `Redactor`")
+        return "隐盾在 `xuzhi/privacy.py:36` 实现。\n\n— 翻了 2 处"
+
+
+def run_with_asker(body):
+    async def main():
+        async with Rig() as rig:
+            rig.asker = FakeAsker()
+            rig.handler._asker = rig.asker
+            await body(rig)
+
+    asyncio.run(main())
+
+
+def test_ask_prefix_routes_to_askcode():
+    async def body(rig):
+        await rig.mock.push("a1", "025058", "@需知 /问 隐盾的脱敏规则在哪实现的")
+        final = await rig.mock.wait_final("a1")
+        assert "xuzhi/privacy.py:36" in final
+        assert rig.asker.questions == ["隐盾的脱敏规则在哪实现的"]
+        assert rig.rec.calls == []                      # 没走需求流水线
+        # 中间有进度帧
+        assert any(not f["body"]["stream"]["finish"] for f in rig.mock.streams("a1"))
+    run_with_asker(body)
+
+
+def test_ask_prefix_variants():
+    async def body(rig):
+        for i, cmd in enumerate(["/问码", "/ask", "/代码"], start=1):
+            await rig.mock.push(f"b{i}", "025058", f"{cmd} estimate 的双轨口径")
+            await rig.mock.wait_final(f"b{i}")
+        assert rig.asker.questions == ["estimate 的双轨口径"] * 3
+    run_with_asker(body)
+
+
+def test_sticky_mode_switch():
+    async def body(rig):
+        mock = rig.mock
+        # 默认是需求分析：一整段话走流水线
+        await mock.push("c1", "025058", REQ)
+        assert "先和业务确认" in await mock.wait_final("c1")
+        assert len(rig.rec.calls) == 1
+
+        # 切到问码：普通消息改走问码
+        await mock.push("c2", "025058", "/模式 问码")
+        assert "问码" in await mock.wait_final("c2")
+        await mock.push("c3", "025058", "estimate.py 里历史混合的权重是多少")
+        assert "xuzhi/privacy.py:36" in await mock.wait_final("c3")
+        assert rig.asker.questions == ["estimate.py 里历史混合的权重是多少"]
+        assert len(rig.rec.calls) == 1                  # 流水线没再被调
+
+        # 切回需求分析
+        await mock.push("c4", "025058", "/模式 需求")
+        assert "需求分析" in await mock.wait_final("c4")
+        await mock.push("c5", "025058", REQ)
+        assert "先和业务确认" in await mock.wait_final("c5")
+        assert len(rig.rec.calls) == 2
+    run_with_asker(body)
+
+
+def test_mode_query_and_unknown():
+    async def body(rig):
+        await rig.mock.push("d1", "025058", "/模式")
+        out = await rig.mock.wait_final("d1")
+        assert "当前模式" in out and "需求分析" in out
+        await rig.mock.push("d2", "025058", "/模式 随便")
+        assert "不认识模式" in await rig.mock.wait_final("d2")
+    run_with_asker(body)
+
+
+def test_ask_mode_rejects_too_short():
+    async def body(rig):
+        await rig.mock.push("e1", "025058", "/模式 问码")
+        await rig.mock.wait_final("e1")
+        await rig.mock.push("e2", "025058", "?")
+        assert "问题太短" in await rig.mock.wait_final("e2")
+        assert rig.asker.questions == []
+    run_with_asker(body)
+
+
+def test_help_mentions_both_modes():
+    async def body(rig):
+        await rig.mock.push("f1", "025058", "/help")
+        out = await rig.mock.wait_final("f1")
+        assert "需求分析" in out and "问码" in out and "/模式" in out
+    run_with_asker(body)
