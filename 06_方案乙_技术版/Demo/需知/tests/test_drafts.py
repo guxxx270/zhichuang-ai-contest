@@ -1,6 +1,8 @@
 from pathlib import Path
 import re
 
+import pytest
+
 from xuzhi.drafts import (
     draft_context_for_llm,
     draft_from_bytes,
@@ -73,6 +75,7 @@ def test_gitlab_archive_passes_branch(monkeypatch):
         raise subprocess.CalledProcessError(1, "git", stderr="schannel: failed to receive handshake")
 
     monkeypatch.setattr(D, "_run_git_clone", boom)
+    monkeypatch.setattr(D, "_is_private_host", lambda _host: False)
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:
@@ -658,15 +661,22 @@ def test_inject_git_auth_and_redact():
     assert "***" in msg
 
 
-def test_gitlab_archive_fallback(monkeypatch, tmp_path):
-    """git/schannel 失败时改走 GitLab API zip。"""
+@pytest.mark.parametrize("skip_verify", [False, True])
+def test_gitlab_archive_fallback(monkeypatch, tmp_path, skip_verify):
+    """git/schannel 失败时改走 GitLab API zip，并沿用用户选择的证书校验设置。"""
     import io
     import subprocess
     import zipfile
 
     from xuzhi import drafts as D
 
+    monkeypatch.delenv("XUZHI_GIT_SSL_NO_VERIFY", raising=False)
+    monkeypatch.delenv("GIT_SSL_NO_VERIFY", raising=False)
+    monkeypatch.setattr(D, "_is_private_host", lambda _host: False)
+    attempts = []
+
     def boom(*a, **k):
+        attempts.append(k["ssl_no_verify"])
         raise subprocess.CalledProcessError(1, "git", stderr="schannel: failed to receive handshake")
 
     monkeypatch.setattr(D, "_run_git_clone", boom)
@@ -684,15 +694,18 @@ def test_gitlab_archive_fallback(monkeypatch, tmp_path):
     def fake_get(url, headers, *, ssl_no_verify, timeout):
         assert "api/v4/projects/" in url
         assert "PRIVATE-TOKEN" in headers or "Authorization" in headers
+        assert ssl_no_verify is skip_verify
         return payload
 
     monkeypatch.setattr(D, "_http_get_bytes", fake_get)
     drafts, repos = D.load_from_git(
         "https://gitlab.example.com/g/p/repo.git",
         token="glpat-test",
-        ssl_no_verify=True,
+        ssl_no_verify=skip_verify,
     )
+    assert attempts == [skip_verify, skip_verify]
     assert repos and "GitLab API归档" in (repos[0].note or "")
+    assert ("SSL未校验" in repos[0].note) is skip_verify
     assert drafts or repos[0].files
 
 

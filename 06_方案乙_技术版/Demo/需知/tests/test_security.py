@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from xuzhi.drafts import (
     CodeFile,
     RepoBundle,
@@ -17,7 +19,14 @@ from xuzhi.pipeline.intake import build_questions, extract_card, refine_with_llm
 from xuzhi.privacy import Redactor
 
 
-def test_clone_url_whitelist():
+def test_clone_url_whitelist(monkeypatch):
+    import socket
+
+    def resolve(host, port):
+        ip = "10.1.2.3" if host == "private.example.com" else "93.184.216.34"
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, 0))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
     assert check_clone_url("https://github.com/acme/demo.git") == ""
     assert check_clone_url("https://gitee.com/acme/demo.git") == ""
     for bad in (
@@ -27,11 +36,70 @@ def test_clone_url_whitelist():
         "http://127.0.0.1/repo.git",
         "http://localhost:8080/repo.git",
         "http://10.1.2.3/repo.git",
+        "http://private.example.com/repo.git",
         "http://192.168.1.10/repo.git",
         "http://169.254.169.254/latest/meta-data.git",
         "https://user:pw@github.com/acme/demo.git",
     ):
         assert check_clone_url(bad), bad
+
+
+@pytest.mark.parametrize("host, username, auth_user", [
+    ("github.com", "wrong-user", "x-access-token"),
+    ("gitee.com", "alice", "alice"),
+])
+def test_clone_keeps_token_out_of_command_with_branch(monkeypatch, host, username, auth_user):
+    """合并分支选择后，真实 clone 入口仍只通过环境变量传递 Token。"""
+    import base64
+    from xuzhi import drafts as D
+
+    token = "test-clone-token"
+    clone_url = f"https://{host}/acme/demo.git"
+    monkeypatch.setattr(D, "_is_private_host", lambda host: False)
+    monkeypatch.delenv("XUZHI_GIT_SSL_NO_VERIFY", raising=False)
+    monkeypatch.delenv("GIT_SSL_NO_VERIFY", raising=False)
+    calls = []
+
+    def clone(args, **kwargs):
+        calls.append(args)
+        assert token not in " ".join(args)
+        assert args[-2] == clone_url
+        assert args[args.index("--branch") + 1] == "release"
+        assert "protocol.allow=never" in args
+        assert "protocol.http.allow=always" in args
+        assert "protocol.https.allow=always" in args
+        env = kwargs["env"]
+        encoded = base64.b64encode(f"{auth_user}:{token}".encode()).decode()
+        assert env["GIT_CONFIG_VALUE_0"] == f"Authorization: Basic {encoded}"
+        dest = Path(args[-1])
+        dest.mkdir()
+        (dest / "app.py").write_text("print(1)\n", encoding="utf-8")
+
+    monkeypatch.setattr(D.subprocess, "run", clone)
+    _, repos = D.load_from_git(clone_url, token=token, username=username, branch="release")
+    assert len(calls) == 1
+    assert repos[0].ref == "release"
+    assert token not in repos[0].url + repos[0].note
+
+
+@pytest.mark.parametrize("url", [
+    "file:///tmp/repo.git",
+    "ssh://git@github.com/acme/demo.git",
+    "git@github.com:acme/demo.git",
+    "http://127.0.0.1/repo.git",
+    "http://10.1.2.3/group/repo",
+    "https://user:password@github.com/acme/demo.git",
+])
+def test_rejected_clone_cannot_reach_archive_fallback(monkeypatch, url):
+    from xuzhi import drafts as D
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("被拒绝的仓库地址不应触发 Git 或归档网络请求")
+
+    monkeypatch.setattr(D.subprocess, "run", unexpected)
+    monkeypatch.setattr(D, "_http_get_bytes", unexpected)
+    with pytest.raises(RuntimeError):
+        D.load_from_git(url, token="test-clone-token")
 
 
 def test_secret_paths_skipped(tmp_path: Path):

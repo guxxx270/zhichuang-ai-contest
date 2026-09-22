@@ -434,7 +434,7 @@ def _render_draft_link_rows() -> None:
             st.text_input(
                 f"Git 仓库 {idx + 1}",
                 key=f"draft_link_url_{rid}",
-                placeholder="https://主机/组/仓.git 或内网 http://…/组/仓",
+                placeholder="https://主机/组/仓.git（不支持本机 / 内网地址）",
                 label_visibility="collapsed" if idx else "visible",
             )
         with c2:
@@ -477,7 +477,7 @@ def _render_draft_link_rows() -> None:
             st.session_state.draft_link_next_id = nid + 1
             st.rerun()
     with b2:
-        st.caption("网页请左侧上传 HTML；Token 仅会话内使用。内网 SSL 选项在下方「开工」表单里勾选。")
+        st.caption("网页请左侧上传 HTML；Token 仅会话内使用。自建 Git 的 SSL 选项在下方「开工」表单里勾选。")
 
 ledger = get_ledger()
 samples = sorted(config.SAMPLES_DIR.glob("*.md"))
@@ -562,9 +562,9 @@ with st.form("xuzhi_go"):
         mobile = st.toggle("原型按手机版出", value=False, key="mobile")
         client = st.toggle("原型出客户版（脱敏）", value=False, key="client")
         git_ssl_no_verify = st.toggle(
-            "内网 Git 跳过 SSL 校验",
+            "自建 Git 跳过 SSL 校验",
             key="git_ssl_no_verify",
-            help="勾选后与「开工」一起生效。Windows 访问内网 GitLab 出现 schannel 握手失败时请勾选（会自动再试 openssl）。",
+            help="仅在确认自建 GitLab 使用可信的私有证书时勾选；默认校验证书。本机 / 内网地址仍不支持。",
         )
     with c2:
         default_text = next((p.read_text(encoding="utf-8") for p in samples if p.stem == choice), "")
