@@ -7,6 +7,7 @@
 
 - **Windows**：双击 `启动需知.bat`（首次自动建虚拟环境并装依赖），浏览器打开即可。需要 **Python 3.10+**（推荐 3.12）。若 PATH 里的 `python` 是 3.7，脚本会改用 `py -3.12`。
 - Mac：双击 `启动需知.command`（首次自动建虚拟环境并装依赖），浏览器打开即可。
+- **企微入口**：双击 `启动企微入口.command`，之后在企业微信里 @需知 发需求即可（见下文「企微入口」）。
 - 手动（Mac/Linux）：`pip install -r requirements.txt && streamlit run app.py`
 - 手动（Windows PowerShell，在本目录执行）：
 
@@ -45,6 +46,7 @@ xuzhi/privacy.py        隐盾                  xuzhi/ledger.py  SQLite 台账�
 xuzhi/knowledge.py      知识层加载            xuzhi/textutil.py  领域词典与文本工具
 xuzhi/pipeline/         intake 问清 · spec 写单 · estimate 估量 · tasks 双轨任务层 · architect 定架 · prototype 出样
 xuzhi/drafts.py         页面底稿：上传 HTML / URL / git 拉取与解析
+xuzhi/channels/wecom/   企微入口：长连接 · 消息分发 · 答问会话 · 企微 markdown 渲染
 knowledge/futures_probes.json   期货追问知识库（36 条示例，可增删）
 knowledge/system_catalog.json   公司系统 / 组件目录（11 个虚构系统）
 data/history_requirements.json  历史需求库（30 条虚构，含估算与实际人天）
@@ -52,6 +54,28 @@ data/samples/           四个样例：微信 / 纪要 / 邮件 / Word
 data/drafts/            示例页面底稿（净值日报 HTML）
 prompts/                模型润色提示词         tests/  pytest（10 项）
 ```
+
+## 企微入口（需求直接从企业微信进来）
+
+同事不用打开网页：在企业微信里 **@需知** 把一堆话发过去，需知当场跑完「隐盾 → 问清 → 写单 → 估量 → 定架」，
+把**要和业务确认什么 / 大概多少人天 / 哪几处要 IT 拍板**回到聊天里；问题可以直接在聊天里回答，它按答复重算。
+
+- **启动**：Mac 双击 `启动企微入口.command`；手动 `python -m xuzhi.channels.wecom.app`
+- **配置**：`.env` 里填 `WECOM_BOT_ID` / `WECOM_BOT_SECRET` / `WECOM_ALLOW_USERS`（说明见 `.env.example`）
+- **机器人怎么建**：企微管理后台 → 安全与管理 → 管理工具 → 智能机器人 → 手动创建 → **API 模式** → 连接方式选「**使用长连接**」。
+  长连接由本机主动连出去，**内网不需要公网回调地址**，也不用做消息加解密。Secret 只显示一次，丢了在机器人详情页重新生成。
+- **聊天里怎么用**
+  - 发一段需求 → 回需求卡 + 要确认的问题（带编号）+ 双轨工时 + IT 决策点
+  - 回「`1 按合约`」这样的编号行（可多行）→ 按答复重算，把握度和工时跟着变
+  - `/help` 用法 ｜ `/whoami` 查自己的 userid（配白名单用）｜ `/reset` 换一个需求 ｜ `/ping` 存活检查
+
+**对着评分表看**：需求本来就产生在聊天里，把入口放到企微等于零学习成本地接进现有工作流（可复制推广性）；
+答问在同一个会话里闭环，现场能做真实环境交互演示（附加分）；进模型前先过隐盾、只放行白名单用户、
+回复里不回显明文敏感信息（安全与合规）。
+
+**边界**（企微官方限制，已在代码里兜住）：同一机器人同一时间只允许一条长连接，新连接会踢掉旧的；
+最多 3 个并发交互；流式回复最长 6 分钟、单条 20480 字节 —— 所以聊天里只给当场要用的结论，
+完整需求单 / 可点原型 / 数据地图仍在 Web 端。群聊只支持文本与图文混排。
 
 ## 怎么换成公司真实的（全部在本机完成，不经过任何外部服务）
 

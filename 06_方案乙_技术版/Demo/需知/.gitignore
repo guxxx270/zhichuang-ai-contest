@@ -6,3 +6,4 @@ __pycache__/
 *.pyc
 data/logs/
 data/history_learned.json
+.env.bak*
