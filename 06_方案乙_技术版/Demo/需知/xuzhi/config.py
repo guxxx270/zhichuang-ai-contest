@@ -48,7 +48,7 @@ KNOWLEDGE_DIR = ROOT / "knowledge"
 PROBES_PATH = KNOWLEDGE_DIR / "futures_probes.json"
 CATALOG_PATH = KNOWLEDGE_DIR / "system_catalog.json"
 PROMPT_DIR = ROOT / "prompts"
-LEDGER_DB = DATA_DIR / "ledger.sqlite3"
+LEDGER_DB = Path(os.getenv("XUZHI_LEDGER_DB", "").strip() or (DATA_DIR / "ledger.sqlite3"))   # 一本账 + 追问记忆 + 模型调用审计 同一个库
 
 PRODUCT_NAME = "需知"
 PRODUCT_EN = "XuZhi"

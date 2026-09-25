@@ -4,3 +4,4 @@ python-dotenv>=1.0
 openai>=1.30
 pytest>=8.0
 openpyxl>=3.1
+pyyaml>=6.0            # sandbox.yaml 沙箱策略（缺了按内置默认值跑）

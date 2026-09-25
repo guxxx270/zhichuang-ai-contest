@@ -1,4 +1,4 @@
-# 需知 · 需求分析智能体（Demo v0.2）
+# 需知 · 需求分析智能体（Demo v0.4）
 
 > 一堆话进来，一份能开工的需求出去。
 > 团队赛方案乙（技术部视角）的 Demo。微信三句话、一段会议纪要、一封邮件、一页 Word 扔进去，它先出一版需求，然后告诉你：要和业务确认哪几件事、这活多复杂、大概多少人天、哪几处要 IT 拍板，顺手把可点的原型页画出来。
@@ -8,6 +8,7 @@
 - **Windows**：双击 `启动需知.bat`（首次自动建虚拟环境并装依赖），浏览器打开即可。需要 **Python 3.10+**（推荐 3.12）。若 PATH 里的 `python` 是 3.7，脚本会改用 `py -3.12`。
 - Mac：双击 `启动需知.command`（首次自动建虚拟环境并装依赖），浏览器打开即可。
 - **企微入口**：双击 `启动企微入口.command`，之后在企业微信里 @需知 发需求即可（见下文「企微入口」）。
+- **REST API / MCP**：双击 `启动接口.command` 起 REST（http://127.0.0.1:8770/docs）；`python mcp_server.py` 起 MCP（见下文「接口」）。
 - 手动（Mac/Linux）：`pip install -r requirements.txt && streamlit run app.py`
 - 手动（Windows PowerShell，在本目录执行）：
 
@@ -33,9 +34,19 @@ streamlit run app.py
 | **定架** | 技术栈建议、分层架构图、**复用发现**（对照公司系统目录）、**数据地图**（需求里的每个数据项定位到 系统 · 数据域 · 接口 · 时效，汇总可复用 / 需申请 / 需新建，盘中类需求自动查时效够不够）、**IT 决策清单**（选项 / 推荐 / 理由 / 影响）→ ADR（含数据地图）；有页面底稿时优先建议「在现页增量改」 | 规则 |
 | **出样** | 可点的 HTML 原型：有底稿且调模型时，模型读 HTML 复刻布局再按需求改；失败则规则插列；无底稿用四套模板。手机版、客户版可切 | 模型读底稿 + 规则兜底 |
 | **对账 · 一本账** | 需求从受理到交付全程一本账（受理 / 已确认 / 开发中 / 已交付 / 已对账）；交付后回写实际人天 → 写入 `data/history_learned.json`，下次估量即用（估算飞轮）；**需求经营看板**（各部门需求量、类型、状态漏斗、平均追问与澄清轮次、AI 协同省时、估算偏差）全部由台账实时算出；审计台账可导出 CSV | 纯程序计算 |
-| 隐盾 | 原话、上传的 HTML 底稿、仓库代码摘录进模型前都先脱敏（手机、账号、证件、内网地址、密钥、客户 / 机构名 → 语义标签，模型输出再还原），本地规则；凭据类文件（.env、*.pem、*secret*）不读 | 规则 |
+| 隐盾 | 原话、上传的 HTML 底稿、仓库代码摘录进模型前都先脱敏（手机、账号、证件、内网地址、密钥、客户 / 机构名 → 语义标签，模型输出再还原），本地规则；凭据类文件（.env、*.pem、*secret*）不读；**沙箱策略** `sandbox.yaml` 一页写清所有访问边界并标出代码执行位置；**模型调用审计**每次调用落一行 | 规则 |
 
 设计原则沿用研伴：**数字由程序算、模型只组织语言**；没有模型也能跑完整条链。
+
+### v0.4 新增（借鉴 OryxOS 的企业级 Agent 运行时设计，只取模式不搬代码）
+
+| 能力 | 做什么 | 在哪 |
+|---|---|---|
+| **追问记忆**（问过的不再问） | 同一提出方（部门·角色）上次答过的口径记住，下次同类需求直接沿用并标 🧠，业务改口径记忆随之更新；只记答复口径，不记原话与客户信息 | `xuzhi/memory.py`；问清清单、确认消息、需求单都带沿用标记；一本账页可看可清；企微 `/记忆` |
+| **模型调用审计** | 每次大模型调用记：用途、渠道、网关主机、模型、耗时、出站脱敏标签数、出站明文敏感项数（应为 0）、成败；不记正文 | `xuzhi/audit.py`；一本账页「模型调用审计」可导出 CSV；`GET /api/v1/audit/llm` |
+| **沙箱策略一页** | 散在各处的白名单收成 `sandbox.yaml`：模型协议、仓库协议与内网拒绝、凭据文件、问码工具白名单、接口监听与 Token、提醒开关…每条标执行位置；改文件即改行为 | `xuzhi/sandbox.py`；隐盾页展示；`GET /api/v1/sandbox`；MCP 资源 `xuzhi://sandbox` |
+| **REST API + MCP** | 任何入口都能接：工单系统、公司 AI 平台里的智能体、Cursor / Claude Code 都能调问清 / 估量 / 定架 / 写单；同样进一本账 | `api.py`、`mcp_server.py`、`xuzhi/service.py` |
+| 催办摘要（附加，默认不推送） | 从一本账算出待确认超期 / 已交付未对账 / 本周受理，只有数量、标题、天数；企微 `/摘要` 拉取，或命令行、接口；定时推送要三把锁同时打开 | `xuzhi/reminders.py` |
 
 ## 目录
 
@@ -46,13 +57,18 @@ xuzhi/privacy.py        隐盾                  xuzhi/ledger.py  SQLite 台账�
 xuzhi/knowledge.py      知识层加载            xuzhi/textutil.py  领域词典与文本工具
 xuzhi/pipeline/         intake 问清 · spec 写单 · estimate 估量 · tasks 双轨任务层 · architect 定架 · prototype 出样
 xuzhi/drafts.py         页面底稿：上传 HTML / URL / git 拉取与解析
+xuzhi/memory.py         追问记忆（问过的不再问）      xuzhi/audit.py  模型调用审计
+xuzhi/sandbox.py        沙箱策略加载（sandbox.yaml）  xuzhi/reminders.py  催办摘要（附加，默认不推送）
+xuzhi/service.py        服务层：跑流水线 + 记账 + 序列化（REST / MCP 共用）
 xuzhi/channels/wecom/   企微入口：长连接 · 消息分发 · 答问会话 · 企微 markdown 渲染
+api.py                  REST API（FastAPI，/api/v1/*）  mcp_server.py  MCP 服务（xuzhi_clarify / estimate / architect / spec …）
+sandbox.yaml            沙箱策略（所有访问边界一页）
 knowledge/futures_probes.json   期货追问知识库（36 条示例，可增删）
 knowledge/system_catalog.json   公司系统 / 组件目录（11 个虚构系统）
 data/history_requirements.json  历史需求库（30 条虚构，含估算与实际人天）
 data/samples/           四个样例：微信 / 纪要 / 邮件 / Word
 data/drafts/            示例页面底稿（净值日报 HTML）
-prompts/                模型润色提示词         tests/  pytest（10 项）
+prompts/                模型润色提示词         tests/  pytest（128 项）
 ```
 
 ## 企微入口（需求直接从企业微信进来）
@@ -81,7 +97,9 @@ prompts/                模型润色提示词         tests/  pytest（10 项）
   - 走 Anthropic 格式接口（`ANTHROPIC_BASE_URL` / `ANTHROPIC_API_KEY`），和需求分析用的 OpenAI 兼容口是两套；
     同一个中转站通常两套都能服务
 
-**命令**：`/help` 用法 ｜ `/模式` 看或切模式 ｜ `/whoami` 查自己的 userid（配白名单用）｜ `/reset` 换一个需求 ｜ `/ping` 存活检查
+**命令**：`/help` 用法 ｜ `/模式` 看或切模式 ｜ `/whoami` 查自己的 userid（配白名单用）｜ `/reset` 换一个需求 ｜ `/ping` 存活检查 ｜ `/摘要` 一本账催办摘要 ｜ `/记忆` 追问记忆统计（`/记忆 清 <提出方>`、`/记忆 清空`）
+
+企微进来的需求同样进一本账（事件「企微受理」）；聊天里按编号答复后口径进追问记忆，下次同一提出方不再问。
 
 **对着评分表看**：需求本来就产生在聊天里，把入口放到企微等于零学习成本地接进现有工作流（可复制推广性）；
 答问在同一个会话里闭环，现场能做真实环境交互演示（附加分）；进模型前先过隐盾、只放行白名单用户、
@@ -90,6 +108,25 @@ prompts/                模型润色提示词         tests/  pytest（10 项）
 **边界**（企微官方限制，已在代码里兜住）：同一机器人同一时间只允许一条长连接，新连接会踢掉旧的；
 最多 3 个并发交互；流式回复最长 6 分钟、单条 20480 字节 —— 所以聊天里只给当场要用的结论，
 完整需求单 / 可点原型 / 数据地图仍在 Web 端。群聊只支持文本与图文混排。
+
+## 接口（REST API / MCP）：任何入口都能接
+
+**REST**：`python api.py`（或双击 `启动接口.command`），文档在 http://127.0.0.1:8770/docs 。
+- `POST /api/v1/analyze` `{text, source?, answers?, req_id?, polish?, include_spec?, include_prototype?}` → 整条链 JSON（卡片、清单、确认消息、双轨估算、数据地图与决策、需求单）；答复重算时带 `answers` + 上次的 `req_id`，一本账在同一条上更新并写追问记忆
+- `POST /api/v1/clarify` 只要问清；`GET /api/v1/requirements[/{id}]`、`POST …/{id}/status`、`POST …/{id}/reconcile` 一本账；`GET /api/v1/dashboard` 看板（含记忆与审计统计）；`GET /api/v1/digest` 催办摘要；`GET /api/v1/audit/llm` 模型调用审计；`GET /api/v1/sandbox` 沙箱策略
+- 安全：默认只监听 127.0.0.1；对外必须设 `XUZHI_API_HOST` 且配 `XUZHI_API_TOKEN`（否则拒绝启动）；请求体不接受模型 Key，模型只用服务端 .env；`polish` 默认 false（规则引擎，毫秒级可复现）
+
+**MCP**：`python mcp_server.py`（stdio）或 `--transport streamable-http --port 8771`（只听本机）。工具：`xuzhi_clarify` 问清 · `xuzhi_estimate` 双轨估算 · `xuzhi_architect` 数据地图与决策 · `xuzhi_spec` 需求单 · `xuzhi_analyze` 整条链 · `xuzhi_ledger` 一本账 · `xuzhi_reconcile` 对账；资源 `xuzhi://sandbox`、`xuzhi://info`。
+Claude Code：`claude mcp add xuzhi -- python /path/to/需知/mcp_server.py`；Cursor / Claude Desktop 的 `mcpServers` 里填同样的命令。三个工具带同一个 `req_id` 时落在同一条账上。
+
+依赖：`pip install -r requirements-api.txt`（比 Web 端多 fastapi / uvicorn / mcp / httpx）。
+
+## 催办摘要（附加功能，默认不推送）
+
+一本账里"该动一动"的需求：待业务确认超 3 天、已交付超 5 天未对账、本周各部门受理数。**只有数量、需求标题、等待天数**，不含原话与客户信息。
+- 拉取：企微发 `/摘要`；Web 一本账页「催办摘要」；`python -m xuzhi.reminders --print`；`GET /api/v1/digest`
+- 推送（默认关）：要同时满足 `sandbox.yaml` `notify.enabled: true`、.env `XUZHI_DIGEST_WEBHOOK=企微群机器人 webhook`；再配 `XUZHI_DIGEST_TIME=09:00` 则企微入口进程每日定时推，或用系统 cron 跑 `python -m xuzhi.reminders --send`
+- 阈值天数在 `sandbox.yaml` notify 段改
 
 ## 怎么换成公司真实的（全部在本机完成，不经过任何外部服务）
 
@@ -110,7 +147,7 @@ prompts/                模型润色提示词         tests/  pytest（10 项）
 
 ## 数据与合规
 
-所有样例、历史需求、系统目录、原型数据均为虚构。原话与材料（HTML 底稿、仓库代码摘录）进模型前都经隐盾脱敏；不接生产数据库；Git 仓库只在你主动填链接时浅克隆，只放行 http(s)、拒绝本机 / 内网地址，Token 走环境变量不进命令行与 .git/config，凭据类文件不读；原型预览在独立源的沙箱 iframe 里渲染，页面脚本读不到需知本页；每次分析、答复、状态、对账写入 `data/ledger.sqlite3`，对账回写到 `data/history_learned.json`（均已 gitignore）。
+所有样例、历史需求、系统目录、原型数据均为虚构。**所有访问边界写在 `sandbox.yaml`**（隐盾页原样展示并标执行位置）。原话与材料（HTML 底稿、仓库代码摘录）进模型前都经隐盾脱敏，每次模型调用记审计（用途 / 网关主机 / 模型 / 耗时 / 出站脱敏标签数 / 明文敏感项数）；不接生产数据库；Git 仓库只在你主动填链接时浅克隆，只放行 http(s)、拒绝本机 / 内网地址，Token 走环境变量不进命令行与 .git/config，凭据类文件不读；原型预览在独立源的沙箱 iframe 里渲染，页面脚本读不到需知本页；每次分析、答复、状态、对账写入 `data/ledger.sqlite3`（追问记忆、模型调用审计同库；`XUZHI_LEDGER_DB` 可改位置），对账回写到 `data/history_learned.json`（均已 gitignore）。
 
 ## 二期
 

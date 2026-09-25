@@ -8,8 +8,9 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
-from xuzhi import config, knowledge
+from xuzhi import config, knowledge, sandbox
 from xuzhi.asr import correct_domain_speech
+from xuzhi.audit import Audit
 from xuzhi.drafts import (
     Draft,
     RepoBundle,
@@ -21,6 +22,7 @@ from xuzhi.drafts import (
 )
 from xuzhi.ledger import Ledger
 from xuzhi.llm import LLM
+from xuzhi.memory import Memory
 from xuzhi.pipeline import analyze
 from xuzhi.pipeline.prototype import apply_prototype_view, render as render_proto
 from xuzhi.speech import append_dictation, dictation_bar
@@ -92,6 +94,18 @@ def get_ledger() -> Ledger:
     return Ledger()
 
 
+@st.cache_resource
+def get_memory() -> Memory:
+    """追问记忆：与一本账同一个 SQLite。"""
+    return Memory()
+
+
+@st.cache_resource
+def get_audit() -> Audit:
+    """模型调用审计：与一本账同一个 SQLite。"""
+    return Audit()
+
+
 def build_llm(mode: str, model: str, api_base: str, api_key: str, backend: str = "openai", extra: dict | None = None) -> LLM:
     """按页面选择构造客户端；失败时退回 mock，避免整页崩掉。"""
     try:
@@ -102,6 +116,8 @@ def build_llm(mode: str, model: str, api_base: str, api_key: str, backend: str =
             api_key=api_key,
             backend=backend,
             extra=extra,
+            audit=get_audit(),
+            channel="Web",
         )
     except Exception as e:
         st.warning(f"模型初始化失败，已回退规则引擎：{e}")
@@ -480,6 +496,8 @@ def _render_draft_link_rows() -> None:
         st.caption("网页请左侧上传 HTML；Token 仅会话内使用。自建 Git 的 SSL 选项在下方「开工」表单里勾选。")
 
 ledger = get_ledger()
+memory = get_memory()
+audit = get_audit()
 samples = sorted(config.SAMPLES_DIR.glob("*.md"))
 stats = ledger.stats()
 dash0 = ledger.dashboard()
@@ -637,7 +655,7 @@ if go:
                 a = analyze(
                     text, "" if src == "自动识别" else src, llm, answers=None,
                     mobile=mobile, client_view=client, llm_polish=do_polish,
-                    drafts=drafts, repos=repos,
+                    drafts=drafts, repos=repos, memory=memory,
                 )
         except Exception as e:
             st.error(f"分析失败：{e}。可换模型或去掉材料后重试；若仍失败请把上面这行错误发给技术部。")
@@ -714,6 +732,7 @@ with tabs[0]:
                             mobile=mobile, client_view=client, llm_polish=True,
                             drafts=getattr(a, "drafts", None) or st.session_state.get("drafts") or [],
                             repos=getattr(a, "repos", None) or st.session_state.get("repos") or [],
+                            memory=memory,
                         )
                     st.session_state.analysis = a2
                     st.session_state.last_llm = {
@@ -746,14 +765,22 @@ with tabs[0]:
             ("数据来源", card.data_sources or ["待确认"]), ("渠道", card.channels or ["未提"]), ("非功能", card.nonfunctional or ["—"]))))
         if card.assumptions:
             st.markdown("**默认假设**：" + "；".join(card.assumptions))
-        st.markdown(f"#### 待确认清单（{len(a.questions)} 条，按影响排序；期货问题带 🌾）")
+        _n_recalled = sum(1 for q in a.questions if getattr(q, "recalled", ""))
+        st.markdown(f"#### 待确认清单（{len(a.questions)} 条，按影响排序；期货问题带 🌾"
+                    + (f"；🧠 沿用上次口径 {_n_recalled} 条，本次不再问" if _n_recalled else "") + "）")
+        if _n_recalled:
+            st.caption("追问记忆：同一提出方上次答过的口径直接沿用，答复框已预填；口径变了直接改再重算，记忆随之更新。")
         answers = st.session_state.get("answers", {})
         for q in a.questions:
             cls = {"高": "hi", "中": "md", "低": "lo"}.get(q.impact, "md")
             fut = '<span class="xz-chip fut">🌾 期货</span>' if q.tag == "期货" else ""
-            st.markdown(f'<div class="xz-q"><span class="xz-chip {cls}">影响{q.impact}</span>{fut}<span class="xz-chip">{q.category}</span> '
+            rec = (f'<span class="xz-chip" title="来源：{html.escape(q.recalled)}">🧠 沿用上次口径</span>'
+                   if getattr(q, "recalled", "") else "")
+            st.markdown(f'<div class="xz-q"><span class="xz-chip {cls}">影响{q.impact}</span>{fut}{rec}<span class="xz-chip">{q.category}</span> '
                         f'<b>{html.escape(q.question)}</b><div class="why">不问会怎样：{html.escape(q.why)}　｜　默认：{html.escape(q.default)}</div></div>', unsafe_allow_html=True)
-            answers[q.id] = st.text_input("业务答复", value=answers.get(q.id, ""), key=f"ans_{q.id}", label_visibility="collapsed", placeholder="业务答复（留空 = 按默认假设）")
+            _prefill = answers.get(q.id, q.answer if getattr(q, "recalled", "") else "")
+            answers[q.id] = st.text_input("业务答复", value=_prefill, key=f"ans_{q.id}", label_visibility="collapsed",
+                                          placeholder="业务答复（留空 = 按默认假设）")
         st.session_state.answers = answers
         if st.button("🔁 按业务答复重算（写单 / 估量 / 定架同步更新）", type="primary"):
             with st.spinner("重算中……"):
@@ -764,11 +791,15 @@ with tabs[0]:
                     llm_polish=(a.engine != "规则"),
                     drafts=getattr(a, "drafts", None) or st.session_state.get("drafts") or [],
                     repos=getattr(a, "repos", None) or st.session_state.get("repos") or [],
+                    memory=memory,
                 )
             st.session_state.analysis = a2
             _rid = st.session_state.get("req_id", 0)
             ledger.event(_rid, "业务答复重算", f"{sum(1 for v in answers.values() if v.strip())} 条")
             ledger.update_answers(_rid, sum(1 for q in a2.questions if q.answer.strip()), int(getattr(a2.estimate, "unanswered_high", 0) or 0))
+            _learned = memory.learn(a2.card, a2.questions, _rid)
+            if _learned:
+                ledger.event(_rid, "追问记忆", f"记住 {_learned} 条口径（{a2.card.requester or '未注明'}）")
             st.rerun()
     with right:
         st.markdown("**发给业务的确认消息**（一键复制到企业微信）")
@@ -940,9 +971,11 @@ with tabs[5]:
     if not dash["count"]:
         st.info("台账里还没有需求。")
     else:
-        k1, k2, k3, k4, k5, k6 = st.columns(6)
+        _mem = memory.stats()
+        k1, k2, k3, k4, k5, k6, k7 = st.columns(7)
         k1.metric("需求数", f"{dash['count']}", help=f"来自 {dash['depts']} 个部门")
         k2.metric("平均追问", f"{dash['avg_questions']} 条", help=f"业务答复率 {dash['answer_rate']:.0%}")
+        k7.metric("记忆省问", f"{_mem['hits']} 条", help=f"追问记忆：记住 {_mem['requesters']} 个提出方的 {_mem['entries']} 条口径；命中即不再问")
         k3.metric("平均澄清轮次", f"{dash['avg_rounds']}", help="开工一轮 + 每次按业务答复重算算一轮；人工通常三四轮")
         k4.metric("AI 协同省时", f"{dash['saved_days']} 人天", delta=f"-{dash['saving_pct']}%", delta_color="inverse",
                   help=f"传统估 {dash['trad_days']} → AI 协同估 {dash['ai_days']}")
@@ -965,6 +998,23 @@ with tabs[5]:
             st.markdown("**按月受理**")
             st.line_chart(pd.DataFrame({"需求数": dash["by_month"]}), height=180)
 
+    with st.expander(f"🧠 追问记忆（问过的不再问）· {memory.stats()['entries']} 条口径", expanded=False):
+        st.caption("业务答复过的题按「提出方（部门·角色）」与「部门」两级记住；下次同一提出方遇到同一道题直接沿用，清单里标 🧠。"
+                   "只记答复口径，不记原话与客户信息；与一本账同库，可导出、可清空。")
+        _mrows = [r for r in memory.rows() if r["scope"] == "requester"]
+        if _mrows:
+            st.dataframe(pd.DataFrame(_mrows)[["scope_key", "qid", "question", "answer", "req_type", "ts", "hits"]].rename(
+                columns={"scope_key": "提出方", "qid": "题号", "question": "问题", "answer": "沿用口径", "req_type": "需求类型", "ts": "记住时间", "hits": "沿用次数"}),
+                hide_index=True, width="stretch")
+            mc1, mc2 = st.columns([1, 3])
+            if mc1.button("清空全部记忆", key="mem_clear"):
+                memory.forget()
+                st.toast("已清空追问记忆")
+                st.rerun()
+            mc2.caption("要清某一个提出方：在企微发 /记忆 清 <提出方>，或直接删 data/ledger.sqlite3 里 answer_memory 表对应行。")
+        else:
+            st.info("还没有记忆：在「问清」里填业务答复并重算，口径就会被记住。")
+
     st.markdown("#### 台账明细")
     rows = ledger.recent(30)
     if rows:
@@ -974,6 +1024,35 @@ with tabs[5]:
                      hide_index=True, width="stretch")
         export = pd.DataFrame(ledger.export_rows())
         st.download_button("导出审计台账 .csv", export.to_csv(index=False).encode("utf-8-sig"), file_name="需知_需求一本账.csv", mime="text/csv")
+    with st.expander("⏰ 催办摘要（附加功能：待确认超期 / 已交付未对账 / 本周受理；默认不推送）", expanded=False):
+        from xuzhi import reminders
+
+        _dg = reminders.build_digest(ledger)
+        st.code(reminders.render_digest(_dg), language=None)
+        _pe, _why = reminders.push_enabled()
+        st.caption(("推送已开启（企微群机器人 webhook）。" if _pe else f"推送关闭：{_why}。")
+                   + " 拉取方式：企微里发 /摘要、命令行 `python -m xuzhi.reminders --print`、接口 GET /api/v1/digest。内容只有数量、标题、天数。")
+
+    st.markdown("#### 模型调用审计")
+    _au = audit.stats()
+    st.caption("每一次大模型调用都落一行：用途、渠道、网关主机、模型、耗时、出站提示词里的脱敏标签数、检出的明文敏感项数（应为 0）、成败。不记提示词与回复正文。")
+    if not _au["calls"]:
+        st.info("还没有模型调用记录（规则引擎不调模型）。选用模型并填 Key 开工或润色后，这里会出现记录。")
+    else:
+        a1, a2, a3, a4, a5 = st.columns(5)
+        a1.metric("调用次数", f"{_au['calls']}", help="成功 " + str(_au["ok"]) + " / 失败 " + str(_au["failed"]))
+        a2.metric("平均耗时", f"{_au['avg_ms'] / 1000:.1f} s")
+        a3.metric("出站脱敏标签", f"{_au['redacted_tags']} 个", help="提示词里 <手机_1> 这类隐盾标签的总数——证明进模型前过了隐盾")
+        a4.metric("出站明文敏感项", f"{_au['plain_hits']} 处", delta=None if not _au["plain_hits"] else "需排查", delta_color="inverse",
+                  help="出站提示词里仍能被隐盾规则命中的手机 / 账号 / 证件 / 内网地址 / 密钥；应为 0")
+        a5.metric("网关 / 模型", f"{len(_au['hosts'])} / {len(_au['models'])}", help="网关：" + "、".join(_au["hosts"]) + "；模型：" + "、".join(_au["models"]))
+        _arows = audit.recent(30)
+        st.dataframe(pd.DataFrame(_arows).rename(columns={"id": "编号", "ts": "时间", "purpose": "用途", "channel": "渠道", "backend": "后端", "host": "网关主机",
+                                                          "model": "模型", "duration_ms": "耗时(ms)", "prompt_chars": "提示词字数", "completion_chars": "回复字数",
+                                                          "redacted_tags": "脱敏标签", "plain_hits": "明文敏感", "ok": "成功", "error": "错误", "req_id": "需求编号"}),
+                     hide_index=True, width="stretch")
+        _aexp = pd.DataFrame(audit.export_rows())
+        st.download_button("导出模型调用审计 .csv", _aexp.to_csv(index=False).encode("utf-8-sig"), file_name="需知_模型调用审计.csv", mime="text/csv")
     st.markdown('<div class="xz-foot">一本账 = 审计留痕 + 飞轮数据：谁提、AI 说了什么、业务怎么答、估了多少、实际多少；对账回写后估算越来越准。看板全部由台账实时算出，无人工填报。</div>', unsafe_allow_html=True)
 
 # ---------- 隐盾 ----------
@@ -981,4 +1060,15 @@ with tabs[6]:
     st.markdown(f"**进模型前脱敏 {a.redacted} 处**（手机号、账号、证件号、内网地址、密钥、客户姓名 / 机构名 → 语义标签；本地规则，不联网）")
     with st.container(border=True):
         st.text(a.redacted_text)
-    st.markdown("**三道线**：① 需求原话先脱敏再进模型；② 不接生产数据库；代码仓库仅在你主动粘贴链接时浅读摘要，不扫内网；③ 每次分析、答复、决策留痕，可导出审计。")
+    st.markdown("**三道线**：① 需求原话先脱敏再进模型；② 不接生产数据库；代码仓库仅在你主动粘贴链接时浅读摘要，不扫内网；③ 每次分析、答复、决策、模型调用留痕，可导出审计。")
+
+    st.markdown("#### 沙箱策略（一页看完：数据去哪了、谁能用、能碰什么）")
+    st.caption("所有访问边界写在 `sandbox.yaml` 一个文件里，程序启动时加载；下表每条规则都标了在代码里的执行位置，评审可对照。改文件即改行为。")
+    if sandbox.note():
+        st.warning(sandbox.note())
+    _sum = sandbox.summary()
+    st.markdown("".join(f'<span class="xz-chip">{html.escape(k)} · {html.escape(v)}</span>' for k, v in _sum.items()), unsafe_allow_html=True)
+    _srows = sandbox.rows()
+    st.dataframe(pd.DataFrame(_srows, columns=["边界", "规则", "当前值", "执行位置（代码）"]), hide_index=True, width="stretch", height=min(60 + 36 * len(_srows), 900))
+    with st.expander("sandbox.yaml 原文"):
+        st.code(sandbox.raw_text(), language="yaml")

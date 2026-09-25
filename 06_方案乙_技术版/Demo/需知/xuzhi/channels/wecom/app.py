@@ -7,10 +7,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import signal
 import sys
 
 from ... import config as xuzhi_config
+from ... import reminders
 from .config import load_wecom_config
 from .connection import WeComLongConnection
 from .handler import WecomHandler
@@ -63,14 +65,48 @@ async def main_async(verbose: bool) -> int:
              xuzhi_config.PRODUCT_NAME, cfg.bot.name, cfg.auth.mode, len(cfg.auth.users), _llm_banner())
     log.info("提示：同一机器人只允许一条长连接；启动后在企微里 @机器人 发一段需求即可")
 
+    digest_task = _start_digest_scheduler(holder["handler"])
+
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
             loop.add_signal_handler(sig, lambda: asyncio.create_task(conn.stop()))
         except NotImplementedError:      # Windows
             pass
-    await conn.run_forever()
+    try:
+        await conn.run_forever()
+    finally:
+        if digest_task:
+            digest_task.cancel()
     return 0
+
+
+def _start_digest_scheduler(handler) -> "asyncio.Task | None":
+    """附加功能：每日定时推送催办摘要。默认关闭——要同时满足三件事才会跑：
+    .env 里 XUZHI_DIGEST_TIME=HH:MM、XUZHI_DIGEST_WEBHOOK=企微群机器人地址、sandbox.yaml notify.enabled=true。"""
+    hhmm = (os.getenv("XUZHI_DIGEST_TIME", "") or "").strip()
+    if not hhmm:
+        log.info("催办摘要定时推送：未配置 XUZHI_DIGEST_TIME，不启用（聊天里可随时发 /摘要 拉取）")
+        return None
+    ok, why = reminders.push_enabled()
+    if not ok:
+        log.info("催办摘要定时推送：已配时间但不推送 —— %s", why)
+        return None
+
+    async def loop_forever() -> None:
+        while True:
+            wait = reminders.seconds_until(hhmm)
+            log.info("催办摘要：下次 %s 推送（%d 分钟后）", hhmm, int(wait // 60))
+            await asyncio.sleep(wait)
+            try:
+                sent, msg = await asyncio.to_thread(reminders.send_digest, handler.ledger)
+                log.info("催办摘要：%s%s", "✅ " if sent else "⏸ ", msg)
+            except Exception:   # noqa: BLE001
+                log.exception("催办摘要推送失败")
+            await asyncio.sleep(61)   # 避免同一分钟重复触发
+
+    log.info("催办摘要定时推送：已启用，每日 %s（只发数量、标题、天数）", hhmm)
+    return asyncio.create_task(loop_forever())
 
 
 def main() -> None:

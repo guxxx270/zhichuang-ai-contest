@@ -23,7 +23,8 @@ HELP_TEXT = (
     "**② 问码**：问关于需知这个项目本身的问题，我去翻代码回答 →\n"
     "- 单条：`/问 隐盾的脱敏规则在哪实现的`\n"
     "- 连着问：`/模式 问码` 切过去，之后直接发问题；`/模式 需求` 切回来\n\n"
-    "**命令**：/help 帮助 · /模式 看或切模式 · /whoami 查 userid · /reset 换一个需求 · /ping 存活检查"
+    "**命令**：/help 帮助 · /模式 看或切模式 · /whoami 查 userid · /reset 换一个需求 · /ping 存活检查\n"
+    "/摘要 一本账催办摘要（待确认超期 / 待对账 / 本周受理）· /记忆 追问记忆统计与清理"
 )
 
 GUIDE_TEXT = (
@@ -113,6 +114,12 @@ def render_analysis(analysis: Any, *, answered: int = 0, max_questions: int = 4)
             out.append(f"（还有 {len(unanswered) - len(shown)} 个次要问题，Web 端可看全）")
     elif questions:
         out.append("**问清**：该问的都答了，假设已收敛 ✔")
+    recalled = [q for q in questions if (getattr(q, "answer", "") or "").strip() and getattr(q, "recalled", "")]
+    if recalled:
+        out.append(f"🧠 沿用上次口径 {len(recalled)} 条，本次不再问（有变化再告诉我）")
+        for q in recalled[:3]:
+            head = _clip(str(getattr(q, "question", "")).split("？")[0], 30)
+            out.append(f"   · {head}？→ {_clip(getattr(q, 'answer', ''), 30)}")
     if answered:
         out.append(f"_已收到 {answered} 条答复，以下结论已按答复重算_")
     out.append("")

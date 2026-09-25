@@ -1,0 +1,6 @@
+# REST API / MCP 接口专用依赖（Streamlit 端不需要，所以从 requirements.txt 里分出来）
+-r requirements.txt
+fastapi>=0.110        # REST：/api/v1/analyze 等
+uvicorn>=0.29         # 起 HTTP 服务
+mcp>=1.10             # MCP 服务：xuzhi_clarify / xuzhi_estimate / xuzhi_architect …
+httpx>=0.27           # 测试用 TestClient

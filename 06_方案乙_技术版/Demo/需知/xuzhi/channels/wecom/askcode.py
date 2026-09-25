@@ -132,15 +132,19 @@ class CodeAsker:
 
     def _options(self, resume: Optional[str]):
         sdk = self._sdk
+        from ... import sandbox   # 工具白名单 / 黑名单以 sandbox.yaml askcode 为准（缺省即上面的常量）
+
         kw: Dict[str, Any] = dict(
             cwd=str(self.repo),
             system_prompt=SYSTEM_PROMPT,
-            allowed_tools=["Read", "Grep", "Glob"],
-            disallowed_tools=list(DENY_TOOLS),
+            allowed_tools=list(sandbox.get("askcode.allowed_tools") or ["Read", "Grep", "Glob"]),
+            disallowed_tools=list(sandbox.get("askcode.denied_tools") or DENY_TOOLS),
             permission_mode="dontAsk",
-            setting_sources=[],
+            setting_sources=[] if not sandbox.get("askcode.load_user_settings", False) else None,
             max_turns=self.max_turns,
         )
+        if kw["setting_sources"] is None:
+            kw.pop("setting_sources")
         if self.model:
             kw["model"] = self.model
         if resume:

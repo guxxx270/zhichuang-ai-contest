@@ -1,0 +1,70 @@
+# 需知 · 沙箱策略（一页写清"数据去哪了、谁能用、能碰什么"）
+#
+# 这是需知所有访问边界的唯一声明文件：程序启动时加载（xuzhi/sandbox.py），
+# 「隐盾」页原样展示并标出每条规则在代码里的执行位置，评审时对着这一页看即可。
+# 改这里即改行为（列了执行位置的项），不需要翻代码。没装 PyYAML 时按内置默认值运行。
+#
+# 设计参考：OryxOS 的三类白名单（文件路径 / 命令 / 域名）+ 强制审计。
+
+version: 1
+
+llm:                                   # 大模型调用
+  redact_before_send: true             # 原话、HTML 底稿、仓库代码摘录进模型前一律过隐盾（本地规则，不联网）
+  restore_after_receive: true          # 模型输出再把语义标签还原
+  key_storage: session_only            # 页面填的 Key 只留浏览器会话；.env 仅本机调试兜底，不进仓库
+  allowed_api_schemes: [https, http]   # 网关地址只允许这两种协议
+  audit_every_call: true               # 每次调用记审计表：网关主机、模型、耗时、脱敏标签数、明文敏感项数、成败
+  block_if_plain_sensitive: false      # true = 出站提示词里检出明文敏感项（手机 / 账号 / 证件 …）就拒发；Demo 先只记录
+
+repo_fetch:                            # 出样 / 定架读取代码仓库
+  allowed_schemes: [http, https]       # 不支持 file:// ssh:// git@
+  deny_private_networks: true          # 本机、内网、链路本地地址一律拒绝（不当内网探针）
+  shallow_clone: true                  # 只浅克隆，只抽前后端源码摘要
+  token_via_env_only: true             # Token 走环境变量传给 git，不进命令行、不进 .git/config、不进错误信息
+
+files:                                 # 本机文件读取
+  deny_read_globs:                     # 凭据类文件不读、不进模型、不进代码包（与 drafts.is_secret_path 的正则叠加）
+    - ".env"
+    - ".env.*"
+    - "*.pem"
+    - "*.key"
+    - "*.p12"
+    - "*.pfx"
+    - "*.jks"
+    - "id_rsa*"
+    - "*secret*"
+    - "*credential*"
+    - "*password*"
+    - "*token*"
+
+prototype_preview:                     # 出样预览
+  sandbox_iframe: true                 # 原型在独立源的沙箱 iframe 里渲染，页面脚本读不到需知本页
+
+wecom:                                 # 企微入口
+  auth_mode: whitelist                 # 只放行 .env 白名单里的 userid（可选再限群）
+  reply_plain_sensitive: false         # 回复里不回显明文敏感信息（原话已脱敏，回复只给结论）
+  stream_max_bytes: 20000              # 企微单条上限 20480 字节，留余量
+
+askcode:                               # 企微「问码」：Agent 翻需知自己的代码回答
+  allowed_tools: [Read, Grep, Glob]    # 只读三件套
+  denied_tools: [Bash, Write, Edit, MultiEdit, NotebookEdit, WebFetch, WebSearch, Task, Agent, TodoWrite, KillShell, BashOutput, AskUserQuestion]
+  cwd_locked: true                     # 工作目录锁在需知 Demo 目录
+  load_user_settings: false            # 不加载本机 ~/.claude 任何配置
+  max_turns: 20
+  wall_clock_seconds: 240
+
+api:                                   # REST / MCP 接口
+  bind: 127.0.0.1                      # 默认只监听本机；要对外必须显式改 XUZHI_API_HOST
+  token_required_if_exposed: true      # 监听非本机地址时必须配 XUZHI_API_TOKEN，否则拒绝启动
+  accept_keys_in_request: false        # 请求体不接受模型 Key；模型凭据只在服务端 .env
+
+data:                                  # 数据
+  production_db: none                  # 不接任何生产数据库
+  demo_data: fictional                 # 样例、历史需求、系统目录、原型数据全部虚构
+  ledger: local_sqlite                 # 一本账 / 追问记忆 / 调用审计都在本机 data/ledger.sqlite3（已 gitignore）
+
+notify:                                # 附加功能：催办摘要（一本账里超期项的提醒）
+  enabled: false                       # 默认关闭。开启后也只推"数量 + 需求标题 + 等待天数"，不推原话、不推客户信息
+  content: counts_and_titles_only
+  stale_confirm_days: 3                # 待业务确认超过几天算超期
+  stale_reconcile_days: 5              # 已交付未对账超过几天算超期

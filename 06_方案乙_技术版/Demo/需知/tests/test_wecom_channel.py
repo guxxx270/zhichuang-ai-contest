@@ -253,7 +253,7 @@ class Rig:
             await holder["h"].handle(m)
 
         self.conn = WeComLongConnection(cfg.bot, on_message)
-        holder["h"] = WecomHandler(cfg, self.conn, analyze_fn=self.rec)
+        holder["h"] = WecomHandler(cfg, self.conn, analyze_fn=self.rec, ledger=False, memory=False)   # 假 analysis 不记账
         self.handler = holder["h"]
         self.task = asyncio.create_task(self.conn.run_forever())
         await asyncio.wait_for(self.mock.subscribed.wait(), 5)

@@ -575,13 +575,17 @@ def _is_private_host(host: str) -> bool:
 
 
 def check_clone_url(clone_url: str) -> str:
-    """仓库地址白名单：只放行 http(s)，拒绝 file:// ssh:// git@ 与内网地址。返回不通过的原因，空串为通过。"""
+    """仓库地址白名单：只放行 http(s)，拒绝 file:// ssh:// git@ 与内网地址。返回不通过的原因，空串为通过。
+    允许的协议与"是否拒内网"来自 sandbox.yaml（repo_fetch）。"""
+    from . import sandbox
+
     parsed = urlparse(clone_url)
-    if parsed.scheme not in ("http", "https"):
-        return "仓库地址只支持 http(s)://（不支持 file://、ssh、git@）"
+    allowed = [str(s).lower() for s in (sandbox.get("repo_fetch.allowed_schemes") or ["http", "https"])]
+    if (parsed.scheme or "").lower() not in allowed:
+        return f"仓库地址只支持 {' / '.join(s + '://' for s in allowed)}（不支持 file://、ssh、git@）"
     if parsed.username or parsed.password:
         return "仓库地址里不要带用户名 / 密码，Token 请填在右侧输入框"
-    if _is_private_host(parsed.hostname or ""):
+    if sandbox.get("repo_fetch.deny_private_networks", True) and _is_private_host(parsed.hostname or ""):
         return "仓库地址指向本机 / 内网地址，需知不拉取内网资源"
     return ""
 
@@ -1170,8 +1174,16 @@ _SECRET_FILE_RE = re.compile(
 
 
 def is_secret_path(path: str) -> bool:
-    """密钥 / 凭据类文件不进模型，也不进代码包。"""
-    return bool(_SECRET_FILE_RE.search((path or "").replace("\\", "/")))
+    """密钥 / 凭据类文件不进模型，也不进代码包。内置正则 + sandbox.yaml files.deny_read_globs（按文件名 glob）叠加。"""
+    norm = (path or "").replace("\\", "/")
+    if _SECRET_FILE_RE.search(norm):
+        return True
+    from fnmatch import fnmatch
+
+    from . import sandbox
+
+    name = norm.rsplit("/", 1)[-1].lower()
+    return any(fnmatch(name, str(g).lower()) for g in (sandbox.get("files.deny_read_globs") or []))
 
 
 def redact_material(text: str, mapping: dict[str, str] | None = None) -> str:

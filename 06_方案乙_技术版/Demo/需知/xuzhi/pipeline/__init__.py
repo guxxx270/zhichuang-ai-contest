@@ -43,6 +43,7 @@ class Analysis:
     drafts: list[Draft] = field(default_factory=list)
     repos: list[RepoBundle] = field(default_factory=list)
     prototype_source_html: str = ""
+    recalled: int = 0          # 追问记忆沿用了几条（问过的不再问）
 
 
 class _Mock:
@@ -60,8 +61,11 @@ def analyze(
     llm_polish: bool = True,
     drafts: list[Draft] | None = None,
     repos: list[RepoBundle] | None = None,
+    memory=None,
 ) -> Analysis:
-    """drafts：HTML 底稿；repos：git/前后端代码包。有 API 时模型会读代码与 HTML。"""
+    """drafts：HTML 底稿；repos：git/前后端代码包。有 API 时模型会读代码与 HTML。
+    memory：xuzhi.memory.Memory；给了就"问过的不再问"——同一提出方上次答过的题直接沿用并标 recalled。
+    业务这次的答复（answers）优先于记忆。"""
     t0 = time.time()
     llm = (llm or LLM()) if llm_polish else _Mock()
     drafts = list(drafts or [])
@@ -78,6 +82,12 @@ def analyze(
     for q in questions:
         if answers and q.id in answers:
             q.answer = answers[q.id]
+    recalled = 0
+    if memory is not None:
+        try:
+            recalled = int(memory.recall(card, questions) or 0)
+        except Exception:   # 记忆只是加分项，坏了不影响出稿
+            recalled = 0
     arch = build_architecture(card, red.text, drafts=drafts, repos=repos)
     spec = build_spec(card, questions, arch.coverage_line, llm)
     est = estimate(card, red.text, questions)
@@ -90,6 +100,9 @@ def analyze(
     )
     a.seconds = round(time.time() - t0, 2)
     a.engine = "规则 + 模型" if (card.engine != "规则" or spec.engine != "规则") else "规则"
+    a.recalled = recalled
+    if recalled:
+        a.notes.append(f"追问记忆：沿用上次口径 {recalled} 条，未再问")
     if drafts or repos:
         bits = []
         if drafts:

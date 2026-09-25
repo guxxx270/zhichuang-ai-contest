@@ -49,6 +49,7 @@ class Question:
     why: str
     default: str
     answer: str = ""    # 业务答复（空 = 未答，按默认假设）
+    recalled: str = ""  # 非空 = 答复来自追问记忆（沿用上次口径），值为来源与日期
 
     @property
     def resolved(self) -> str:
@@ -347,6 +348,7 @@ def confirm_message(card: Card, questions: list[Question], text: str = "") -> st
         usable.append(q)
     highs = [q for q in usable if q.impact == "高" and not q.answer.strip()]
     mids = [q for q in usable if q.impact != "高" and not q.answer.strip()]
+    recalled = [q for q in usable if q.answer.strip() and getattr(q, "recalled", "")]
     lines = [f"{_salutation(card)}，关于「{card.title}」，开工前想和你确认几件事，确认清楚了我们就能给准确的排期：", ""]
     if highs:
         for i, q in enumerate(highs, 1):
@@ -359,6 +361,12 @@ def confirm_message(card: Card, questions: list[Question], text: str = "") -> st
         for q in mids:
             head = q.question.split("？")[0]
             lines.append(f"· {head}？→ 默认：{q.default}")
+    if recalled:
+        lines.append("")
+        lines.append("这几条沿用你们上次的口径，这次有变化再告诉我：")
+        for q in recalled:
+            head = q.question.split("？")[0]
+            lines.append(f"· {head}？→ 沿用：{q.answer.strip()}")
     goal = card.goal.strip().rstrip("。")
     if not futures and _FUTURES_Q_HINT.search(goal):
         goal = _neutral_goal(card)
@@ -403,6 +411,7 @@ def refine_with_llm(
         payload["材料摘要"] = summarize(list(drafts or []), list(repos or []))
     user = json.dumps(payload, ensure_ascii=False)
     try:
+        llm.current_purpose = "问清润色"   # 审计用途；假客户端也能接住
         data = llm.chat_json(system, user)
     except Exception:
         return card, questions

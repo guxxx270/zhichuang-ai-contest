@@ -38,10 +38,14 @@ class WecomHandler:
         cfg: WecomConfig,
         conn: WeComLongConnection,
         analyze_fn: Optional[Callable[..., Any]] = None,
+        ledger: Any = None,
+        memory: Any = None,
     ) -> None:
         self.cfg = cfg
         self.conn = conn
         self._analyze_fn = analyze_fn
+        self._ledger = ledger          # 一本账：企微进来的需求同样记账（None = 懒加载默认库）
+        self._memory = memory          # 追问记忆：问过的不再问
         self.dedup = TTLSet(cfg.limits.dedup_ttl_seconds)
         self.sessions = SessionStore(cfg.limits.session_ttl_minutes)
         self.sem = asyncio.Semaphore(cfg.limits.max_concurrent)
@@ -60,6 +64,28 @@ class WecomHandler:
 
     def mode_of(self, session) -> str:
         return session.mode or self.cfg.default_mode
+
+    @property
+    def ledger(self):
+        if self._ledger is None:
+            try:
+                from ...ledger import Ledger
+                self._ledger = Ledger()
+            except Exception:   # noqa: BLE001  记账失败不影响回复
+                log.exception("一本账初始化失败，企微需求本次不记账")
+                self._ledger = False
+        return self._ledger or None
+
+    @property
+    def memory(self):
+        if self._memory is None:
+            try:
+                from ...memory import Memory
+                self._memory = Memory()
+            except Exception:   # noqa: BLE001
+                log.exception("追问记忆初始化失败，本次不沿用")
+                self._memory = False
+        return self._memory or None
 
     @property
     def analyze(self) -> Callable[..., Any]:
@@ -190,6 +216,7 @@ class WecomHandler:
                 session.analysis = analysis
                 session.turns += 1
                 session.remember_questions(list(getattr(analysis, "questions", None) or []))
+                self._bookkeep(session, analysis, answered)
                 await sr.finish(render_analysis(analysis, answered=answered))
                 self.handled += 1
         finally:
@@ -201,7 +228,27 @@ class WecomHandler:
             session.raw_text,
             source_hint="企业微信",
             answers=dict(session.answers) or None,
+            memory=self.memory,
         )
+
+    def _bookkeep(self, session, analysis: Any, answered: int) -> None:
+        """一本账 + 追问记忆：首轮记一条；答复重算则更新答复数并把口径记进记忆。任何失败只记日志。"""
+        ledger, memory = self.ledger, self.memory
+        try:
+            if ledger is not None and not session.req_id:
+                session.req_id = int(ledger.log_analysis(analysis))
+                ledger.event(session.req_id, "企微受理", f"{session.key}")
+            elif ledger is not None and answered:
+                qs = list(getattr(analysis, "questions", None) or [])
+                ledger.event(session.req_id, "业务答复重算", f"{answered} 条（企微）")
+                ledger.update_answers(session.req_id, sum(1 for q in qs if (q.answer or "").strip()),
+                                      int(getattr(analysis.estimate, "unanswered_high", 0) or 0))
+            if memory is not None and answered:
+                n = memory.learn(analysis.card, list(getattr(analysis, "questions", None) or []), session.req_id)
+                if n and ledger is not None:
+                    ledger.event(session.req_id, "追问记忆", f"记住 {n} 条口径（{analysis.card.requester or '未注明'}）")
+        except Exception:   # noqa: BLE001
+            log.exception("记账 / 记忆失败（不影响回复）")
 
     async def _tick(self, sr: StreamReply) -> None:
         i = 0
@@ -226,6 +273,10 @@ class WecomHandler:
         elif cmd in ("/reset", "/重来", "/换需求"):
             self.sessions.reset(m.session_key)
             await self._reply_once(m, "已清空上一条需求，把新的需求发过来吧。")
+        elif cmd in ("/摘要", "/digest", "/催办"):
+            await self._reply_once(m, self._digest_text())
+        elif cmd in ("/记忆", "/memory"):
+            await self._memory_cmd(m, text)
         else:
             await self._reply_once(m, f"没有 {cmd} 这个命令。\n\n{HELP_TEXT}")
 
@@ -245,6 +296,38 @@ class WecomHandler:
             await self._reply_once(m, "已切回**需求分析**模式：之后发一堆话我当需求拆。\n临时问代码可以用 `/问 …`。")
         else:
             await self._reply_once(m, f"不认识模式「{arg}」。可选：`问码` / `需求`。")
+
+    def _digest_text(self) -> str:
+        """催办摘要（附加功能）：拉取式，只有数量、标题、天数。"""
+        from ...reminders import build_digest, render_digest
+
+        ledger = self.ledger
+        if ledger is None:
+            return "一本账不可用，暂时出不了摘要。"
+        try:
+            return render_digest(build_digest(ledger))
+        except Exception as e:   # noqa: BLE001
+            log.exception("催办摘要失败")
+            return f"摘要生成失败：{type(e).__name__}: {str(e)[:120]}"
+
+    async def _memory_cmd(self, m: Inbound, text: str) -> None:
+        """/记忆 看统计；/记忆 清 <提出方> 清某个提出方；/记忆 清空 全清。"""
+        memory = self.memory
+        if memory is None:
+            await self._reply_once(m, "追问记忆不可用。")
+            return
+        parts = text.split(maxsplit=2)
+        arg = parts[1] if len(parts) > 1 else ""
+        if arg in ("清空", "clear"):
+            n = memory.forget()
+            await self._reply_once(m, f"已清空全部追问记忆（{n} 条）。")
+        elif arg in ("清", "forget") and len(parts) > 2:
+            n = memory.forget(scope_key=parts[2].strip())
+            await self._reply_once(m, f"已清掉「{parts[2].strip()}」的追问记忆 {n} 条。")
+        else:
+            st = memory.stats()
+            await self._reply_once(m, f"🧠 追问记忆：记住 {st['requesters']} 个提出方的 {st['entries']} 条口径，累计沿用 {st['hits']} 次。\n"
+                                      "`/记忆 清 <提出方>` 清某个提出方；`/记忆 清空` 全清。")
 
     def _authorized(self, m: Inbound) -> tuple[bool, str]:
         auth = self.cfg.auth

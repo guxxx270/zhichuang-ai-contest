@@ -127,7 +127,7 @@ def build_spec(card: Card, questions: list[Question], reuse_line: str = "", llm:
     b += ["", "## 4. 数据与口径"]
     b += [f"- 数据来源：{'、'.join(card.data_sources) or '待确认'}"]
     for q in _q_by_cat(questions, ("口径", "时点与日历", "数据来源", "风控口径", "品种范围", "展示格式")):
-        mark = "✅" if q.answer.strip() else "◻︎默认"
+        mark = ("🔁沿用" if getattr(q, "recalled", "") else "✅") if q.answer.strip() else "◻︎默认"
         b.append(f"- {mark} {q.question.split('？')[0]}？→ {q.resolved}")
     b += ["", "## 5. 不做什么（本期范围外）"]
     scope_q = [q for q in questions if q.category == "范围"]
@@ -138,7 +138,9 @@ def build_spec(card: Card, questions: list[Question], reuse_line: str = "", llm:
     if reuse_line:
         b += ["", "## 8. 技术部初判", f"- {reuse_line}"]
     b += ["", "## 9. 仍待业务确认（高影响）"] + ([f"- {q.question}" for q in pending_high] or ["- 无"])
-    b += ["", f"> 需知 自动生成 · 引擎：{card.engine} · 已答复 {len(answered)}/{len(questions)} 项，其余按默认假设"]
+    recalled_n = sum(1 for q in answered if getattr(q, "recalled", ""))
+    b += ["", f"> 需知 自动生成 · 引擎：{card.engine} · 已答复 {len(answered)}/{len(questions)} 项"
+          + (f"（其中 {recalled_n} 项沿用该提出方上次口径）" if recalled_n else "") + "，其余按默认假设"]
 
     # ---- 技术版 ----
     t = [f"# {card.title} · 技术需求", "", "## A. 用户故事与验收标准"]
@@ -166,6 +168,7 @@ def build_spec(card: Card, questions: list[Question], reuse_line: str = "", llm:
 def _polish(spec: Spec, card: Card, llm: LLM) -> Spec:
     system = load_prompt("spec_polish") or "你是期货公司技术部的需求分析师，把需求单润色得简洁、专业、可签字。保持 Markdown 结构与所有条目，只改措辞。只输出 Markdown。"
     try:
+        llm.current_purpose = "写单润色"
         out = llm.chat(system, spec.business_md, temperature=0.2)
         if out and _polish_ok(spec.business_md, out):
             spec.business_md = out

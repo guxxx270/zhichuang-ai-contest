@@ -1554,6 +1554,7 @@ def adapt_draft_with_llm(card: Card, drafts: list[Draft], llm, repos: list | Non
         else:
             payload["说明"] = "用户未提供 HTML 或 Git，请仅根据需求卡片自行设计一版合理原型页。"
     try:
+        llm.current_purpose = "出样改稿"
         raw = llm.chat(system, user=json.dumps(payload, ensure_ascii=False), temperature=0.1)
     except Exception:
         return None, draft
