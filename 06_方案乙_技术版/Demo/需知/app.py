@@ -831,10 +831,20 @@ with draft_box:
     with d2:
         _render_draft_link_rows()
 
+def _sample_body(choice: str) -> str:
+    return next((p.read_text(encoding="utf-8") for p in samples if p.stem == choice), "")
+
+
+pick_l, _pick_r = st.columns([2, 3])
+with pick_l:
+    choice = st.selectbox("选一个样例（或在右边粘贴）", ["（粘贴自己的）"] + [p.stem for p in samples], key="sample")
+if st.session_state.get("sample_shown") != choice:
+    st.session_state["sample_shown"] = choice
+    st.session_state["speech_rev"] = int(st.session_state.get("speech_rev", 0) or 0) + 1
+
 with st.form("xuzhi_go"):
     c1, c2 = st.columns([2, 3])
     with c1:
-        choice = st.selectbox("选一个样例（或在右边粘贴）", ["（粘贴自己的）"] + [p.stem for p in samples], key="sample")
         src = st.selectbox("来源（可不选）", ["自动识别", "企业微信", "会议纪要", "邮件", "需求单", "口述"], key="src")
         mobile = st.toggle("原型按手机版出", value=False, key="mobile")
         client = st.toggle("原型出客户版（脱敏）", value=False, key="client")
@@ -844,9 +854,7 @@ with st.form("xuzhi_go"):
             help="仅在确认自建 GitLab 使用可信的私有证书时勾选；默认校验证书。本机 / 内网地址仍不支持。",
         )
     with c2:
-        default_text = next((p.read_text(encoding="utf-8") for p in samples if p.stem == choice), "")
-        if choice == "（粘贴自己的）":
-            default_text = st.session_state.get("raw_composed", "") or default_text
+        default_text = st.session_state.get("raw_composed", "") if choice == "（粘贴自己的）" else _sample_body(choice)
         text = st.text_area(
             "原话",
             value=default_text,
@@ -854,17 +862,15 @@ with st.form("xuzhi_go"):
             placeholder="例如：净值日报能不能加一列……也可点上方「开始口述」",
             key=f"raw_text_{st.session_state.get('speech_rev', 0)}",
         )
-        st.caption("点开工会调用上方模型；未填 Key 则走规则。选了样例会用该样例原文；口述或手改请选「粘贴自己的」。")
+        st.caption("选了样例，原文会显示在这里，可以直接改。点开工会按框里现在的文字分析。")
         go = st.form_submit_button("📋 需知，开工", type="primary")
 
 llm = None
 if go:
     if choice == "（粘贴自己的）":
         st.session_state.raw_composed = text
-    if choice != "（粘贴自己的）":
-        loaded = next((p.read_text(encoding="utf-8") for p in samples if p.stem == choice), "")
-        if loaded:
-            text = loaded
+    elif not text.strip():
+        text = _sample_body(choice)
     if not text.strip():
         st.warning("请粘贴原话，或选一个样例后再点开工。")
     else:
