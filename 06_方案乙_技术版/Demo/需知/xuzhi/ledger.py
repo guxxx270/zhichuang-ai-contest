@@ -138,7 +138,7 @@ class Ledger:
 
     def recent(self, n: int = 20) -> list[dict]:
         cur = self.conn.execute(
-            "SELECT id,ts,title,dept,source,req_type,requester,engine,status,n_questions,n_answered,n_high_open,mid_days,ai_days,actual_days,confidence,redacted "
+            "SELECT id,ts,title,dept,source,req_type,requester,engine,status,n_questions,n_answered,n_high_open,mid_days,ai_days,actual_days,close_note,ai_share,confidence,redacted "
             "FROM requirements ORDER BY id DESC LIMIT ?", (n,))
         cols = [c[0] for c in cur.description]
         return [dict(zip(cols, r)) for r in cur.fetchall()]

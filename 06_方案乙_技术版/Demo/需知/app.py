@@ -20,7 +20,7 @@ from xuzhi.drafts import (
     materials_report,
     visual_drafts,
 )
-from xuzhi.ledger import Ledger
+from xuzhi.ledger import STATUSES, Ledger
 from xuzhi.llm import LLM
 from xuzhi.memory import Memory
 from xuzhi.pipeline import analyze
@@ -104,6 +104,265 @@ def get_memory() -> Memory:
 def get_audit() -> Audit:
     """模型调用审计：与一本账同一个 SQLite。"""
     return Audit()
+
+
+def _has_actual_days(value) -> bool:
+    if value is None or value == "":
+        return False
+    try:
+        return float(value) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _refresh_ledger_grid() -> None:
+    """表格里的状态下拉按库里的新值重画。"""
+    st.session_state["ledger_grid_rev"] = st.session_state.get("ledger_grid_rev", 0) + 1
+
+
+def render_ledger(ledger: Ledger, memory: Memory, audit: Audit, *, req_id: int = 0, mid: float | None = None) -> None:
+    """一本账：按编号补任意历史需求的实际人天。刚开工的那条默认选中。"""
+    catalog = list(reversed(ledger.export_rows()))
+    st.markdown("#### 对账")
+    st.caption("从台账里选一条需求，回写交付后的实际人天。状态在下面的表格里改。刚开工的那条会默认选中；不必先点开工。")
+    if not catalog:
+        st.info("台账里还没有需求。开工之后会出现在这里，可以直接补实际人天。")
+    else:
+        labels = {
+            int(r["id"]): f"#{int(r['id'])} {r.get('title') or '未命名'} · {r.get('status') or '受理'}"
+            for r in catalog
+        }
+        ids = list(labels)
+        bound = int(req_id or 0)
+        if bound in labels and st.session_state.get("ledger_bound_req") != bound:
+            st.session_state["ledger_pick"] = bound
+            st.session_state["ledger_bound_req"] = bound
+        if st.session_state.get("ledger_pick") not in labels:
+            st.session_state["ledger_pick"] = ids[0]
+        picked = int(st.selectbox("要录的需求", ids, format_func=lambda i: labels[i], key="ledger_pick"))
+        row_now = ledger.get(picked)
+        if not row_now:
+            st.warning("这条台账已经不在库里，请改选另一条。")
+        else:
+            shown_mid = mid if picked == bound and mid is not None else row_now.get("mid_days")
+            try:
+                share = float(row_now.get("ai_share") if row_now.get("ai_share") is not None else 0.5)
+            except (TypeError, ValueError):
+                share = 0.5
+            share = min(1.0, max(0.0, round(share, 1)))
+            fb1, fb2, _fbpad = st.columns([1, 1, 4])
+            if fb1.button("👍 有用", key=f"fb_up_{picked}"):
+                ledger.feedback(picked, "整体", 1)
+                st.toast("已记录")
+            if fb2.button("👎 没用", key=f"fb_down_{picked}"):
+                ledger.feedback(picked, "整体", -1)
+                st.toast("已记录")
+            c2, c3 = st.columns([2.2, 1.2])
+            with c2:
+                st.markdown("**对账：交付后回写实际人天**（写进历史需求库，估量飞轮）")
+                r1, r2, r3 = st.columns([1, 1, 1])
+                actual_days = r1.number_input(
+                    "实际人天", min_value=0.0, step=0.5,
+                    value=float(row_now.get("actual_days") or shown_mid or 0.0),
+                    key=f"rec_actual_{picked}",
+                )
+                ai_used = r2.toggle("用了 AI 协同", value=bool(row_now.get("ai_assisted")), key=f"rec_ai_{picked}")
+                ai_share = r3.slider(
+                    "AI 参与度", 0.0, 1.0, share, 0.1,
+                    key=f"rec_share_{picked}",
+                    disabled=not ai_used,
+                )
+                rec_note = st.text_input(
+                    "备注（可空）", value=row_now.get("close_note") or "",
+                    key=f"rec_note_{picked}", placeholder="例：范围比估时多了客户版",
+                )
+                if st.button("✅ 对账并回写历史需求库", key=f"rec_submit_{picked}"):
+                    res = ledger.reconcile(picked, actual_days, ai_used, ai_share if ai_used else 0.0, rec_note)
+                    _refresh_ledger_grid()
+                    st.success(f"#{picked} 已对账：估 {res['estimate']} 人天，实际 {res['actual']} 人天，偏差 {res['deviation']:+.0%}；已写入历史需求库（{res['history_id']}），下次估量即用。")
+                    st.rerun()
+            with c3:
+                st.markdown("**本条流水**")
+                events = ledger.events_of(picked)[-8:]
+                if events:
+                    for ev in events:
+                        st.caption(f"{ev['ts'][5:16]}　{ev['action']}　{ev['detail']}")
+                else:
+                    st.caption("还没有流水。")
+
+    st.markdown("#### 需求经营看板")
+    dash = ledger.dashboard()
+    if not dash["count"]:
+        st.info("台账里还没有需求。")
+    else:
+        _mem = memory.stats()
+        k1, k2, k3, k4, k5, k6, k7 = st.columns(7)
+        k1.metric("需求数", f"{dash['count']}", help=f"来自 {dash['depts']} 个部门")
+        k2.metric("平均追问", f"{dash['avg_questions']} 条", help=f"业务答复率 {dash['answer_rate']:.0%}")
+        k7.metric("记忆省问", f"{_mem['hits']} 条", help=f"追问记忆：记住 {_mem['requesters']} 个提出方的 {_mem['entries']} 条口径；命中即不再问")
+        k3.metric("平均澄清轮次", f"{dash['avg_rounds']}", help="开工一轮 + 每次按业务答复重算算一轮；人工通常三四轮")
+        k4.metric("AI 协同省时", f"{dash['saved_days']} 人天", delta=f"-{dash['saving_pct']}%", delta_color="inverse",
+                  help=f"传统估 {dash['trad_days']} → AI 协同估 {dash['ai_days']}")
+        k5.metric("估算偏差", "—" if dash["mape_trad"] is None else f"{dash['mape_trad']}%",
+                  help=("已对账 " + str(dash["closed"]) + " 条；平均绝对偏差（估 vs 实际）" + (f"，AI 轨 {dash['mape_ai']}%" if dash["mape_ai"] is not None else ""))
+                  if dash["closed"] else "还没有对账记录：交付后在上方回写实际人天")
+        k6.metric("出稿用时", ("<1 s" if dash["avg_seconds"] < 1 else f"{dash['avg_seconds']} s"), help=f"规则引擎毫秒级，模型润色另计；👍 {dash['thumbs_up']} / 👎 {dash['thumbs_down']}")
+        g1, g2, g3 = st.columns(3)
+        with g1:
+            st.markdown("**各部门需求量**")
+            st.bar_chart(pd.DataFrame({"需求数": dash["by_dept"]}), height=220)
+        with g2:
+            st.markdown("**按类型**")
+            st.bar_chart(pd.DataFrame({"需求数": dash["by_type"]}), height=220)
+        with g3:
+            st.markdown("**状态漏斗**")
+            _ord = "①②③④⑤"
+            st.bar_chart(pd.DataFrame({"条数": {f"{_ord[i]} {k}": v for i, (k, v) in enumerate(dash["by_status"].items())}}), height=220)
+        if len(dash["by_month"]) >= 2:
+            st.markdown("**按月受理**")
+            st.line_chart(pd.DataFrame({"需求数": dash["by_month"]}), height=180)
+
+    with st.expander(f"🧠 追问记忆（问过的不再问）· {memory.stats()['entries']} 条口径", expanded=False):
+        st.caption("业务答复过的题按「提出方（部门·角色）」与「部门」两级记住；下次同一提出方遇到同一道题直接沿用，清单里标 🧠。"
+                   "只记答复口径，不记原话与客户信息；与一本账同库，可导出、可清空。")
+        _mrows = [r for r in memory.rows() if r["scope"] == "requester"]
+        if _mrows:
+            st.dataframe(pd.DataFrame(_mrows)[["scope_key", "qid", "question", "answer", "req_type", "ts", "hits"]].rename(
+                columns={"scope_key": "提出方", "qid": "题号", "question": "问题", "answer": "沿用口径", "req_type": "需求类型", "ts": "记住时间", "hits": "沿用次数"}),
+                hide_index=True, width="stretch")
+            mc1, mc2 = st.columns([1, 3])
+            if mc1.button("清空全部记忆", key="mem_clear"):
+                memory.forget()
+                st.toast("已清空追问记忆")
+                st.rerun()
+            mc2.caption("要清某一个提出方：在企微发 /记忆 清 <提出方>，或直接删 data/ledger.sqlite3 里 answer_memory 表对应行。")
+        else:
+            st.info("还没有记忆：在「问清」里填业务答复并重算，口径就会被记住。")
+
+    st.markdown("#### 台账明细")
+    st.caption("放不下时可以左右滑动。状态只在这里改：下拉选好，改多行后点「保存状态」。对账写上实际人天后，这一列会变成「已对账」。备注、AI 参与度是当时填的；没存过参与度的行是空的。改成「已对账」时，这一行须已有实际人天，否则请用上方对账。")
+    _skipped = st.session_state.pop("ledger_status_skipped", None)
+    if _skipped:
+        st.warning("这些编号改成「已对账」但没有实际人天，未保存：" + "、".join(f"#{i}" for i in _skipped) + "。请用上方对账表单填写。")
+    rows = ledger.recent(500)
+    if rows:
+        grid_rev = st.session_state.get("ledger_grid_rev", 0)
+        # 编号 时间 需求 部门 来源 类型 提出方 引擎 状态 问题数 已答复 高影响未答 传统 AI协同 AI参与度 实际 备注 置信度 脱敏处
+        col_spec = [
+            ("编号", 0.55, "id"), ("时间", 1.55, "ts"), ("需求", 2.2, "title"), ("部门", 0.8, "dept"),
+            ("来源", 0.85, "source"), ("类型", 0.65, "req_type"), ("提出方", 0.9, "requester"), ("引擎", 0.95, "engine"),
+            ("状态", 1.35, None),
+            ("问题数", 0.7, "n_questions"), ("已答复", 0.7, "n_answered"), ("高影响未答", 0.9, "n_high_open"),
+            ("传统(人天)", 0.85, "mid_days"), ("AI 协同(人天)", 1.05, "ai_days"), ("AI 参与度", 0.85, "ai_share"),
+            ("实际(人天)", 0.85, "actual_days"),
+            ("备注", 1.8, "close_note"),
+            ("置信度", 0.65, "confidence"), ("脱敏处", 0.65, "redacted"),
+        ]
+        widths = [w for _, w, _ in col_spec]
+
+        def _txt(value) -> str:
+            return "" if value is None or value == "" else str(value)
+
+        def _cell(row: dict, field: str | None) -> str:
+            if field == "title":
+                return _txt(row.get("title")) or "未命名"
+            if field == "ai_share":
+                value = row.get("ai_share")
+                if value is None or value == "":
+                    return ""
+                try:
+                    return f"{float(value):.1f}"
+                except (TypeError, ValueError):
+                    return _txt(value)
+            if field is None:
+                return ""
+            return _txt(row.get(field))
+
+        with st.form("ledger_status_batch"):
+            save_top = st.form_submit_button("保存状态", type="primary", key="ledger_save_top")
+            head = st.columns(widths, vertical_alignment="center", gap="xsmall")
+            for col, (name, _, _) in zip(head, col_spec):
+                col.markdown(f"**{name}**")
+            chosen: dict[int, str] = {}
+            for r in rows:
+                rid = int(r["id"])
+                cur = r.get("status") or "受理"
+                if cur not in STATUSES:
+                    cur = "受理"
+                line = st.columns(widths, vertical_alignment="center", gap="xsmall")
+                for col, (_, _, field) in zip(line, col_spec):
+                    if field is None:
+                        chosen[rid] = col.selectbox(
+                            f"#{rid} 状态",
+                            STATUSES,
+                            index=STATUSES.index(cur),
+                            label_visibility="collapsed",
+                            key=f"ledger_grid_status_{rid}_{grid_rev}",
+                        )
+                    else:
+                        col.write(_cell(r, field))
+            save_bottom = st.form_submit_button("保存状态", key="ledger_save_bottom")
+            if save_top or save_bottom:
+                saved, skipped = [], []
+                for r in rows:
+                    rid = int(r["id"])
+                    cur = r.get("status") or "受理"
+                    new = chosen.get(rid) or cur
+                    if new == cur or new not in STATUSES:
+                        continue
+                    if new == "已对账":
+                        if not _has_actual_days(r.get("actual_days")):
+                            skipped.append(rid)
+                            continue
+                        row = ledger.get(rid) or {}
+                        ledger.reconcile(rid, float(r["actual_days"]), bool(row.get("ai_assisted")), float(row.get("ai_share") or 0), row.get("close_note") or "")
+                    else:
+                        ledger.set_status(rid, new)
+                    saved.append(rid)
+                if skipped:
+                    st.session_state["ledger_status_skipped"] = skipped
+                if saved:
+                    _refresh_ledger_grid()
+                    st.toast(f"已保存 {len(saved)} 条状态")
+                    st.rerun()
+                elif skipped:
+                    st.rerun()
+                else:
+                    st.info("状态没有变化。")
+        export = pd.DataFrame(ledger.export_rows())
+        st.download_button("导出审计台账 .csv", export.to_csv(index=False).encode("utf-8-sig"), file_name="需知_需求一本账.csv", mime="text/csv")
+    else:
+        st.caption("还没有分析记录。开工后会记在这里。")
+    with st.expander("⏰ 催办摘要（附加功能：待确认超期 / 已交付未对账 / 本周受理；默认不推送）", expanded=False):
+        from xuzhi import reminders
+
+        _dg = reminders.build_digest(ledger)
+        st.code(reminders.render_digest(_dg), language=None)
+        _pe, _why = reminders.push_enabled()
+        st.caption(("推送已开启（企微群机器人 webhook）。" if _pe else f"推送关闭：{_why}。")
+                   + " 拉取方式：企微里发 /摘要、命令行 `python -m xuzhi.reminders --print`、接口 GET /api/v1/digest。内容只有数量、标题、天数。")
+
+    st.markdown("#### 模型调用审计")
+    _au = audit.stats()
+    st.caption("每一次大模型调用都落一行：用途、渠道、网关主机、模型、耗时、出站提示词里的脱敏标签数、检出的明文敏感项数（应为 0）、成败。不记提示词与回复正文。")
+    if not _au["calls"]:
+        st.info("还没有模型调用记录（规则引擎不调模型）。选用模型并填 Key 开工或润色后，这里会出现记录。")
+    else:
+        a1, a2, a3, a4, a5 = st.columns(5)
+        a1.metric("调用次数", f"{_au['calls']}", help="成功 " + str(_au["ok"]) + " / 失败 " + str(_au["failed"]))
+        a2.metric("平均耗时", f"{_au['avg_ms'] / 1000:.1f} s")
+        a3.metric("出站脱敏标签", f"{_au['redacted_tags']} 个", help="提示词里 <手机_1> 这类隐盾标签的总数——证明进模型前过了隐盾")
+        a4.metric("出站明文敏感项", f"{_au['plain_hits']} 处", delta=None if not _au["plain_hits"] else "需排查", delta_color="inverse",
+                  help="出站提示词里仍能被隐盾规则命中的手机 / 账号 / 证件 / 内网地址 / 密钥；应为 0")
+        a5.metric("网关 / 模型", f"{len(_au['hosts'])} / {len(_au['models'])}", help="网关：" + "、".join(_au["hosts"]) + "；模型：" + "、".join(_au["models"]))
+        _arows = audit.recent(30)
+        st.dataframe(pd.DataFrame(_arows).rename(columns={"id": "编号", "ts": "时间", "purpose": "用途", "channel": "渠道", "backend": "后端", "host": "网关主机",
+                                                          "model": "模型", "duration_ms": "耗时(ms)", "prompt_chars": "提示词字数", "completion_chars": "回复字数",
+                                                          "redacted_tags": "脱敏标签", "plain_hits": "明文敏感", "ok": "成功", "error": "错误", "req_id": "需求编号"}),
+                     hide_index=True, width="stretch")
+        _aexp = pd.DataFrame(audit.export_rows())
+        st.download_button("导出模型调用审计 .csv", _aexp.to_csv(index=False).encode("utf-8-sig"), file_name="需知_模型调用审计.csv", mime="text/csv")
+    st.markdown('<div class="xz-foot">一本账 = 审计留痕 + 飞轮数据：谁提、AI 说了什么、业务怎么答、估了多少、实际多少；对账回写后估算越来越准。看板全部由台账实时算出，无人工填报。</div>', unsafe_allow_html=True)
 
 
 def build_llm(mode: str, model: str, api_base: str, api_key: str, backend: str = "openai", extra: dict | None = None) -> LLM:
@@ -686,6 +945,8 @@ llm = llm or build_llm(
 a = st.session_state.get("analysis")
 if not a:
     st.info("选一个样例或粘贴一段话，选用模型并填 Key 后点「需知，开工」。未填 Key 时自动走规则引擎。所有样例与数据均为虚构。")
+    st.markdown("### 📒 一本账")
+    render_ledger(ledger, memory, audit)
     st.stop()
 
 card, est, arch = a.card, a.estimate, a.architecture
@@ -925,135 +1186,7 @@ with tabs[4]:
 
 # ---------- 一本账 ----------
 with tabs[5]:
-    from xuzhi.ledger import STATUSES
-
-    rid = st.session_state.get("req_id", 0)
-    row_now = ledger.get(rid) if rid else None
-    st.markdown("#### 本条需求：状态与对账")
-    st.caption("需求从受理到交付全程在一本账上；交付后把实际人天回写，估量的类比库就多一条真实样本，下次估得更准。")
-    c1, c2, c3 = st.columns([1.2, 2.2, 1.2])
-    with c1:
-        cur_status = (row_now or {}).get("status") or "受理"
-        new_status = st.selectbox("状态", STATUSES, index=STATUSES.index(cur_status) if cur_status in STATUSES else 0, key="ledger_status")
-        if new_status != cur_status and new_status != "已对账" and st.button("更新状态", key="ledger_set_status"):
-            ledger.set_status(rid, new_status)
-            st.toast(f"已更新为「{new_status}」")
-            st.rerun()
-        f1, f2 = st.columns(2)
-        if f1.button("👍 有用", key="fb_up"):
-            ledger.feedback(rid, "整体", 1)
-            st.toast("已记录")
-        if f2.button("👎 没用", key="fb_down"):
-            ledger.feedback(rid, "整体", -1)
-            st.toast("已记录")
-    with c2:
-        with st.form("xuzhi_reconcile"):
-            st.markdown("**对账：交付后回写实际人天**（写进历史需求库，估量飞轮）")
-            r1, r2, r3 = st.columns([1, 1, 1])
-            actual_days = r1.number_input("实际人天", min_value=0.0, step=0.5, value=float((row_now or {}).get("actual_days") or est.mid), key="rec_actual")
-            ai_used = r2.toggle("用了 AI 协同", value=bool((row_now or {}).get("ai_assisted")), key="rec_ai")
-            ai_share = r3.slider("AI 参与度", 0.0, 1.0, float((row_now or {}).get("ai_share") or 0.5), 0.1, key="rec_share")
-            rec_note = st.text_input("备注（可空）", value=(row_now or {}).get("close_note") or "", key="rec_note", placeholder="例：范围比估时多了客户版")
-            if st.form_submit_button("✅ 对账并回写历史需求库"):
-                if not rid:
-                    st.warning("先开工一条需求再对账。")
-                else:
-                    res = ledger.reconcile(rid, actual_days, ai_used, ai_share if ai_used else 0.0, rec_note)
-                    st.success(f"已对账：估 {res['estimate']} 人天，实际 {res['actual']} 人天，偏差 {res['deviation']:+.0%}；已写入历史需求库（{res['history_id']}），下次估量即用。")
-                    st.rerun()
-    with c3:
-        st.markdown("**本条流水**")
-        for ev in (ledger.events_of(rid) if rid else [])[-8:]:
-            st.caption(f"{ev['ts'][5:16]}　{ev['action']}　{ev['detail']}")
-
-    st.markdown("#### 需求经营看板")
-    dash = ledger.dashboard()
-    if not dash["count"]:
-        st.info("台账里还没有需求。")
-    else:
-        _mem = memory.stats()
-        k1, k2, k3, k4, k5, k6, k7 = st.columns(7)
-        k1.metric("需求数", f"{dash['count']}", help=f"来自 {dash['depts']} 个部门")
-        k2.metric("平均追问", f"{dash['avg_questions']} 条", help=f"业务答复率 {dash['answer_rate']:.0%}")
-        k7.metric("记忆省问", f"{_mem['hits']} 条", help=f"追问记忆：记住 {_mem['requesters']} 个提出方的 {_mem['entries']} 条口径；命中即不再问")
-        k3.metric("平均澄清轮次", f"{dash['avg_rounds']}", help="开工一轮 + 每次按业务答复重算算一轮；人工通常三四轮")
-        k4.metric("AI 协同省时", f"{dash['saved_days']} 人天", delta=f"-{dash['saving_pct']}%", delta_color="inverse",
-                  help=f"传统估 {dash['trad_days']} → AI 协同估 {dash['ai_days']}")
-        k5.metric("估算偏差", "—" if dash["mape_trad"] is None else f"{dash['mape_trad']}%",
-                  help=("已对账 " + str(dash["closed"]) + " 条；平均绝对偏差（估 vs 实际）" + (f"，AI 轨 {dash['mape_ai']}%" if dash["mape_ai"] is not None else ""))
-                  if dash["closed"] else "还没有对账记录：交付后在上方回写实际人天")
-        k6.metric("出稿用时", ("<1 s" if dash["avg_seconds"] < 1 else f"{dash['avg_seconds']} s"), help=f"规则引擎毫秒级，模型润色另计；👍 {dash['thumbs_up']} / 👎 {dash['thumbs_down']}")
-        g1, g2, g3 = st.columns(3)
-        with g1:
-            st.markdown("**各部门需求量**")
-            st.bar_chart(pd.DataFrame({"需求数": dash["by_dept"]}), height=220)
-        with g2:
-            st.markdown("**按类型**")
-            st.bar_chart(pd.DataFrame({"需求数": dash["by_type"]}), height=220)
-        with g3:
-            st.markdown("**状态漏斗**")
-            _ord = "①②③④⑤"
-            st.bar_chart(pd.DataFrame({"条数": {f"{_ord[i]} {k}": v for i, (k, v) in enumerate(dash["by_status"].items())}}), height=220)
-        if len(dash["by_month"]) >= 2:
-            st.markdown("**按月受理**")
-            st.line_chart(pd.DataFrame({"需求数": dash["by_month"]}), height=180)
-
-    with st.expander(f"🧠 追问记忆（问过的不再问）· {memory.stats()['entries']} 条口径", expanded=False):
-        st.caption("业务答复过的题按「提出方（部门·角色）」与「部门」两级记住；下次同一提出方遇到同一道题直接沿用，清单里标 🧠。"
-                   "只记答复口径，不记原话与客户信息；与一本账同库，可导出、可清空。")
-        _mrows = [r for r in memory.rows() if r["scope"] == "requester"]
-        if _mrows:
-            st.dataframe(pd.DataFrame(_mrows)[["scope_key", "qid", "question", "answer", "req_type", "ts", "hits"]].rename(
-                columns={"scope_key": "提出方", "qid": "题号", "question": "问题", "answer": "沿用口径", "req_type": "需求类型", "ts": "记住时间", "hits": "沿用次数"}),
-                hide_index=True, width="stretch")
-            mc1, mc2 = st.columns([1, 3])
-            if mc1.button("清空全部记忆", key="mem_clear"):
-                memory.forget()
-                st.toast("已清空追问记忆")
-                st.rerun()
-            mc2.caption("要清某一个提出方：在企微发 /记忆 清 <提出方>，或直接删 data/ledger.sqlite3 里 answer_memory 表对应行。")
-        else:
-            st.info("还没有记忆：在「问清」里填业务答复并重算，口径就会被记住。")
-
-    st.markdown("#### 台账明细")
-    rows = ledger.recent(30)
-    if rows:
-        st.dataframe(pd.DataFrame(rows).rename(columns={"id": "编号", "ts": "时间", "title": "需求", "dept": "部门", "source": "来源", "req_type": "类型", "requester": "提出方", "engine": "引擎",
-                                                        "status": "状态", "n_questions": "问题数", "n_answered": "已答复", "n_high_open": "高影响未答", "mid_days": "传统(人天)",
-                                                        "ai_days": "AI 协同(人天)", "actual_days": "实际(人天)", "confidence": "置信度", "redacted": "脱敏处"}),
-                     hide_index=True, width="stretch")
-        export = pd.DataFrame(ledger.export_rows())
-        st.download_button("导出审计台账 .csv", export.to_csv(index=False).encode("utf-8-sig"), file_name="需知_需求一本账.csv", mime="text/csv")
-    with st.expander("⏰ 催办摘要（附加功能：待确认超期 / 已交付未对账 / 本周受理；默认不推送）", expanded=False):
-        from xuzhi import reminders
-
-        _dg = reminders.build_digest(ledger)
-        st.code(reminders.render_digest(_dg), language=None)
-        _pe, _why = reminders.push_enabled()
-        st.caption(("推送已开启（企微群机器人 webhook）。" if _pe else f"推送关闭：{_why}。")
-                   + " 拉取方式：企微里发 /摘要、命令行 `python -m xuzhi.reminders --print`、接口 GET /api/v1/digest。内容只有数量、标题、天数。")
-
-    st.markdown("#### 模型调用审计")
-    _au = audit.stats()
-    st.caption("每一次大模型调用都落一行：用途、渠道、网关主机、模型、耗时、出站提示词里的脱敏标签数、检出的明文敏感项数（应为 0）、成败。不记提示词与回复正文。")
-    if not _au["calls"]:
-        st.info("还没有模型调用记录（规则引擎不调模型）。选用模型并填 Key 开工或润色后，这里会出现记录。")
-    else:
-        a1, a2, a3, a4, a5 = st.columns(5)
-        a1.metric("调用次数", f"{_au['calls']}", help="成功 " + str(_au["ok"]) + " / 失败 " + str(_au["failed"]))
-        a2.metric("平均耗时", f"{_au['avg_ms'] / 1000:.1f} s")
-        a3.metric("出站脱敏标签", f"{_au['redacted_tags']} 个", help="提示词里 <手机_1> 这类隐盾标签的总数——证明进模型前过了隐盾")
-        a4.metric("出站明文敏感项", f"{_au['plain_hits']} 处", delta=None if not _au["plain_hits"] else "需排查", delta_color="inverse",
-                  help="出站提示词里仍能被隐盾规则命中的手机 / 账号 / 证件 / 内网地址 / 密钥；应为 0")
-        a5.metric("网关 / 模型", f"{len(_au['hosts'])} / {len(_au['models'])}", help="网关：" + "、".join(_au["hosts"]) + "；模型：" + "、".join(_au["models"]))
-        _arows = audit.recent(30)
-        st.dataframe(pd.DataFrame(_arows).rename(columns={"id": "编号", "ts": "时间", "purpose": "用途", "channel": "渠道", "backend": "后端", "host": "网关主机",
-                                                          "model": "模型", "duration_ms": "耗时(ms)", "prompt_chars": "提示词字数", "completion_chars": "回复字数",
-                                                          "redacted_tags": "脱敏标签", "plain_hits": "明文敏感", "ok": "成功", "error": "错误", "req_id": "需求编号"}),
-                     hide_index=True, width="stretch")
-        _aexp = pd.DataFrame(audit.export_rows())
-        st.download_button("导出模型调用审计 .csv", _aexp.to_csv(index=False).encode("utf-8-sig"), file_name="需知_模型调用审计.csv", mime="text/csv")
-    st.markdown('<div class="xz-foot">一本账 = 审计留痕 + 飞轮数据：谁提、AI 说了什么、业务怎么答、估了多少、实际多少；对账回写后估算越来越准。看板全部由台账实时算出，无人工填报。</div>', unsafe_allow_html=True)
+    render_ledger(ledger, memory, audit, req_id=st.session_state.get("req_id", 0), mid=est.mid)
 
 # ---------- 隐盾 ----------
 with tabs[6]:
