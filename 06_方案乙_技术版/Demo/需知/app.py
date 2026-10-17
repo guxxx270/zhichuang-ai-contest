@@ -4,6 +4,7 @@ from __future__ import annotations
 import html
 import re
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
@@ -51,7 +52,7 @@ def _sandbox_preview_html(html_src: str) -> str:
     return page + guard
 
 
-def _iframe(html_src: str, height: int) -> None:
+def _iframe(html_src: str, height: int, bg: str = "#fff") -> None:
     """预览 HTML：外层仍用 components.html（勿用 st.iframe——它把参数当 URL），
     但内容再包一层 sandbox="allow-scripts" 的 iframe（不给 allow-same-origin）：
     仓库 / 模型产出的 HTML 里的脚本跑在独立源上，读不到需知页面、Key 输入框和 cookie。"""
@@ -59,33 +60,86 @@ def _iframe(html_src: str, height: int) -> None:
     wrapper = (
         '<iframe sandbox="allow-scripts" '
         f'srcdoc="{html.escape(inner, quote=True)}" '
-        f'style="width:100%;height:{height}px;border:0;background:#fff" title="xuzhi_preview"></iframe>'
+        f'style="width:100%;height:{height}px;border:1px solid #22304F;border-radius:12px;background:{bg}" title="xuzhi_preview"></iframe>'
     )
     components.html(wrapper, height=height + 8, scrolling=False)
 
 st.set_page_config(page_title=f"{config.PRODUCT_NAME} · 需求分析智能体", page_icon="📋", layout="wide")
-st.markdown(f"""
+# 暗色科技风：主题色在 .streamlit/config.toml；这里只管自绘的卡片、徽标与背景。七项技能各一色，投屏时一眼分得清。
+SKILL_COLORS = {"问清": "#22D3EE", "写单": "#60A5FA", "估量": "#A78BFA", "定架": "#2DD4BF", "出样": "#F472B6", "对账": "#FBBF24", "隐盾": "#34D399"}
+st.markdown("""
 <style>
-:root {{ --xz-navy:{B['navy']}; --xz-accent:{B['accent']}; --xz-paper:{B['paper']}; --xz-ink:{B['ink']}; --xz-mist:{B['mist']}; }}
-.stApp {{ background: var(--xz-paper); color: var(--xz-ink); }}
-.xz-hero {{ background:linear-gradient(135deg, var(--xz-navy) 0%, #1d4aa3 60%, #2a5fc4 100%); color:#fff; border-radius:18px;
-           padding:22px 28px; margin-bottom:14px; box-shadow:0 8px 24px rgba(20,54,122,.18); }}
-.xz-hero h1 {{ margin:0; font-size:30px; letter-spacing:2px; }}
-.xz-hero .slogan {{ font-size:15px; opacity:.92; margin-top:4px; }}
-.xz-hero .tag {{ display:inline-block; background:rgba(255,255,255,.14); border:1px solid rgba(255,255,255,.35); border-radius:999px;
-                 padding:2px 10px; font-size:12px; margin-right:6px; margin-top:8px; }}
-.xz-kpi {{ background:#fff; border:1px solid var(--xz-mist); border-left:5px solid var(--xz-accent); border-radius:12px; padding:12px 16px; }}
-.xz-kpi .n {{ font-size:24px; font-weight:700; color:var(--xz-navy); }}
-.xz-kpi .l {{ font-size:12px; color:#6b7280; }}
-.xz-chip {{ display:inline-block; background:#eef3fb; color:var(--xz-navy); border-radius:999px; padding:1px 9px; font-size:12px; margin:2px 4px 2px 0; }}
-.xz-chip.hi {{ background:#fee2e2; color:#b91c1c; }} .xz-chip.md {{ background:#fef3c7; color:#92400e; }} .xz-chip.lo {{ background:#dcfce7; color:#166534; }}
-.xz-chip.fut {{ background:#ecfeff; color:#0e7490; border:1px solid #a5f3fc; }}
-.xz-q {{ background:#fff; border:1px solid var(--xz-mist); border-left:4px solid var(--xz-accent); border-radius:10px; padding:10px 14px; margin-bottom:8px; }}
-.xz-q .why {{ color:#6b7280; font-size:12px; }}
-.xz-card {{ background:#fff; border:1px solid var(--xz-mist); border-radius:12px; padding:14px 16px; margin-bottom:10px; }}
-.xz-foot {{ color:#6b7280; font-size:12px; margin-top:6px; }}
-div[data-testid="stTabs"] button {{ font-size:15px; }}
-iframe[title="xuzhi_dictation"] {{ border: none !important; }}
+:root { --xz-bg:#070B16; --xz-panel:rgba(17,26,46,.72); --xz-line:#22304F; --xz-text:#E6ECF8; --xz-mute:#8A97B4;
+        --xz-cyan:#22D3EE; --xz-blue:#4361EE; --xz-violet:#A78BFA; --xz-pink:#F472B6; --xz-amber:#FBBF24; --xz-green:#34D399; --xz-red:#F87171; }
+.stApp { background:
+    radial-gradient(1100px 520px at 8% -8%, rgba(34,211,238,.13), transparent 62%),
+    radial-gradient(900px 520px at 96% -4%, rgba(167,139,250,.15), transparent 60%),
+    linear-gradient(rgba(96,165,250,.045) 1px, transparent 1px) 0 0 / 34px 34px,
+    linear-gradient(90deg, rgba(96,165,250,.045) 1px, transparent 1px) 0 0 / 34px 34px,
+    var(--xz-bg); }
+header[data-testid="stHeader"] { background: transparent; }
+.block-container { padding-top: 2.2rem; }
+/* 顶部品牌区：玻璃卡片 + 青紫渐变描边 */
+.xz-hero { position:relative; border-radius:20px; padding:22px 28px 18px; margin-bottom:16px; color:var(--xz-text);
+  background: linear-gradient(135deg, rgba(20,31,56,.92), rgba(12,19,36,.92)) padding-box,
+              linear-gradient(120deg, #22D3EE, #4361EE 45%, #A78BFA 80%, #F472B6) border-box;
+  border:1px solid transparent; box-shadow:0 0 0 1px rgba(34,211,238,.05), 0 18px 48px rgba(3,7,18,.55), 0 0 60px rgba(67,97,238,.12); }
+.xz-hero-top { display:flex; justify-content:space-between; align-items:flex-start; gap:16px; flex-wrap:wrap; }
+.xz-brand { display:flex; align-items:center; gap:14px; }
+.xz-logo { width:46px; height:46px; border-radius:13px; display:flex; align-items:center; justify-content:center; font-size:22px; font-weight:800;
+  color:#fff; background:linear-gradient(135deg,#22D3EE,#4361EE 55%,#A78BFA); box-shadow:0 0 22px rgba(34,211,238,.35); }
+.xz-name { font-size:30px; font-weight:800; letter-spacing:3px; line-height:1.1;
+  background:linear-gradient(90deg,#E6ECF8,#9BE7F7 55%,#C4B5FD); -webkit-background-clip:text; background-clip:text; color:transparent; }
+.xz-en { font-size:12px; color:var(--xz-mute); letter-spacing:1.5px; margin-top:3px; }
+.xz-hero .slogan { font-size:15px; color:#C7D2E8; margin:12px 0 2px; }
+.xz-status { display:inline-flex; align-items:center; gap:8px; padding:6px 12px; border-radius:999px; font-size:12.5px;
+  background:rgba(15,23,42,.7); border:1px solid var(--xz-line); color:#C7D2E8; white-space:nowrap; }
+.xz-status .dot { width:8px; height:8px; border-radius:50%; background:var(--xz-cyan); box-shadow:0 0 10px var(--xz-cyan); animation:xzpulse 1.8s infinite; }
+.xz-status.model .dot { background:var(--xz-green); box-shadow:0 0 10px var(--xz-green); }
+@keyframes xzpulse { 0%,100% { opacity:1; } 50% { opacity:.35; } }
+.xz-skills { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
+.xz-skill { --c:#22D3EE; display:inline-flex; align-items:center; gap:6px; padding:4px 11px; border-radius:999px; font-size:12.5px;
+  color:#DCE4F5; background:color-mix(in srgb, var(--c) 12%, transparent); border:1px solid color-mix(in srgb, var(--c) 45%, transparent); }
+.xz-skill b { color:var(--c); font-weight:700; }
+/* 指标卡：每张一种强调色 */
+.xz-kpi { --c:#22D3EE; position:relative; overflow:hidden; background:var(--xz-panel); border:1px solid var(--xz-line); border-radius:14px; padding:13px 16px;
+  backdrop-filter: blur(6px); }
+.xz-kpi::before { content:""; position:absolute; left:0; top:0; right:0; height:2px; background:linear-gradient(90deg, var(--c), transparent); }
+.xz-kpi::after { content:""; position:absolute; right:-30px; top:-30px; width:90px; height:90px; border-radius:50%;
+  background:radial-gradient(circle, color-mix(in srgb, var(--c) 28%, transparent), transparent 70%); }
+.xz-kpi .n { font-size:24px; font-weight:750; color:var(--c); font-variant-numeric:tabular-nums; letter-spacing:.5px; }
+.xz-kpi .l { font-size:12px; color:var(--xz-mute); margin-top:2px; }
+/* 小节标题 */
+.xz-sec { display:flex; align-items:baseline; gap:10px; margin:6px 0 8px; }
+.xz-sec .no { font-size:12px; font-weight:700; color:#0B1222; background:linear-gradient(135deg,#22D3EE,#A78BFA); border-radius:6px; padding:1px 7px; }
+.xz-sec .t { font-size:17px; font-weight:700; color:var(--xz-text); }
+.xz-sec .s { font-size:13px; color:var(--xz-mute); }
+/* 徽标与追问卡 */
+.xz-chip { display:inline-block; background:rgba(96,165,250,.12); color:#BFD4FF; border:1px solid rgba(96,165,250,.28); border-radius:999px;
+  padding:1px 9px; font-size:12px; margin:2px 4px 2px 0; }
+.xz-chip.hi { background:rgba(248,113,113,.14); color:#FCA5A5; border-color:rgba(248,113,113,.4); }
+.xz-chip.md { background:rgba(251,191,36,.13); color:#FCD34D; border-color:rgba(251,191,36,.38); }
+.xz-chip.lo { background:rgba(52,211,153,.13); color:#6EE7B7; border-color:rgba(52,211,153,.38); }
+.xz-chip.fut { background:rgba(34,211,238,.12); color:#67E8F9; border-color:rgba(34,211,238,.42); }
+.xz-chip.mem { background:rgba(167,139,250,.14); color:#C4B5FD; border-color:rgba(167,139,250,.42); }
+.xz-q { background:var(--xz-panel); border:1px solid var(--xz-line); border-left:3px solid var(--xz-amber); border-radius:12px; padding:10px 14px; margin-bottom:6px; }
+.xz-q.hi { border-left-color:var(--xz-red); } .xz-q.md { border-left-color:var(--xz-amber); } .xz-q.lo { border-left-color:var(--xz-green); }
+.xz-q b { color:var(--xz-text); }
+.xz-q .why { color:var(--xz-mute); font-size:12px; margin-top:3px; }
+.xz-card { background:var(--xz-panel); border:1px solid var(--xz-line); border-radius:12px; padding:14px 16px; margin-bottom:10px; }
+.xz-foot { color:var(--xz-mute); font-size:12px; margin-top:6px; }
+/* 主按钮：蓝→青渐变 + 发光 */
+[data-testid="stBaseButton-primary"], [data-testid="stBaseButton-primaryFormSubmit"] {
+  background:linear-gradient(120deg,#4361EE,#2563EB 45%,#0891B2) !important; border:0 !important;
+  box-shadow:0 6px 22px rgba(67,97,238,.35); font-weight:650; letter-spacing:.5px; }
+[data-testid="stBaseButton-primary"]:hover, [data-testid="stBaseButton-primaryFormSubmit"]:hover { box-shadow:0 8px 28px rgba(34,211,238,.45); }
+/* 结果页签 */
+div[data-testid="stTabs"] [role="tab"] p { font-size:15.5px; font-weight:600; }
+div[data-testid="stTabs"] [role="tab"][aria-selected="true"] p { color:#9BE7F7; }
+[data-testid="stForm"], [data-testid="stExpander"] details { background:rgba(13,20,38,.55); }
+[data-testid="stMetric"] { background:var(--xz-panel); border:1px solid var(--xz-line); border-radius:12px; padding:10px 14px; }
+[data-testid="stMetricValue"] { color:#9BE7F7; }
+iframe[title="xuzhi_dictation"] { border: none !important; }
 </style>""", unsafe_allow_html=True)
 
 
@@ -118,6 +172,26 @@ def _has_actual_days(value) -> bool:
 def _refresh_ledger_grid() -> None:
     """表格里的状态下拉按库里的新值重画。"""
     st.session_state["ledger_grid_rev"] = st.session_state.get("ledger_grid_rev", 0) + 1
+
+
+CHART_COLORS = ["#22D3EE", "#A78BFA", "#34D399", "#FBBF24", "#F472B6", "#FB923C", "#60A5FA", "#2DD4BF"]
+
+
+def _color_bars(data: dict, value_name: str, height: int = 220, colors: list[str] | None = None) -> None:
+    """一类一色的柱状图：暗底上比同色柱子好认；类别名就在横轴上，不再出图例。"""
+    df = pd.DataFrame({"类别": list(data.keys()), value_name: list(data.values())})
+    chart = (
+        alt.Chart(df)
+        .mark_bar(cornerRadiusTopLeft=5, cornerRadiusTopRight=5)
+        .encode(
+            x=alt.X("类别:N", sort=None, title=None, axis=alt.Axis(labelAngle=-30)),
+            y=alt.Y(f"{value_name}:Q", title=None),
+            color=alt.Color("类别:N", sort=None, legend=None, scale=alt.Scale(range=colors or CHART_COLORS)),
+            tooltip=["类别", f"{value_name}:Q"],
+        )
+        .properties(height=height)
+    )
+    st.altair_chart(chart, width="stretch")
 
 
 def render_ledger(ledger: Ledger, memory: Memory, audit: Audit, *, req_id: int = 0, mid: float | None = None) -> None:
@@ -211,17 +285,29 @@ def render_ledger(ledger: Ledger, memory: Memory, audit: Audit, *, req_id: int =
         g1, g2, g3 = st.columns(3)
         with g1:
             st.markdown("**各部门需求量**")
-            st.bar_chart(pd.DataFrame({"需求数": dash["by_dept"]}), height=220)
+            _color_bars(dash["by_dept"], "需求数")
         with g2:
             st.markdown("**按类型**")
-            st.bar_chart(pd.DataFrame({"需求数": dash["by_type"]}), height=220)
+            _color_bars(dash["by_type"], "需求数", colors=CHART_COLORS[3:] + CHART_COLORS[:3])
         with g3:
             st.markdown("**状态漏斗**")
             _ord = "①②③④⑤"
-            st.bar_chart(pd.DataFrame({"条数": {f"{_ord[i]} {k}": v for i, (k, v) in enumerate(dash["by_status"].items())}}), height=220)
+            _color_bars({f"{_ord[i]} {k}": v for i, (k, v) in enumerate(dash["by_status"].items())}, "条数",
+                        colors=["#22D3EE", "#60A5FA", "#A78BFA", "#FBBF24", "#34D399"])   # 受理 → 已对账，由冷到暖再到完成
         if len(dash["by_month"]) >= 2:
             st.markdown("**按月受理**")
-            st.line_chart(pd.DataFrame({"需求数": dash["by_month"]}), height=180)
+            _m = pd.DataFrame({"月份": list(dash["by_month"].keys()), "需求数": list(dash["by_month"].values())})
+            _fade = alt.Gradient(gradient="linear", x1=1, x2=1, y1=0, y2=1,   # 上浓下淡，不是一整块实色
+                                 stops=[alt.GradientStop(color="rgba(34,211,238,0.38)", offset=0),
+                                        alt.GradientStop(color="rgba(34,211,238,0.02)", offset=1)])
+            st.altair_chart(
+                alt.Chart(_m).mark_area(line={"color": "#22D3EE", "strokeWidth": 2}, color=_fade,
+                                        point={"color": "#22D3EE", "filled": True, "size": 60})
+                .encode(x=alt.X("月份:N", title=None, axis=alt.Axis(labelAngle=0)), y=alt.Y("需求数:Q", title=None),
+                        tooltip=["月份", "需求数"])
+                .properties(height=180),
+                width="stretch",
+            )
 
     with st.expander(f"🧠 追问记忆（问过的不再问）· {memory.stats()['entries']} 条口径", expanded=False):
         st.caption("业务答复过的题按「提出方（部门·角色）」与「部门」两级记住；下次同一提出方遇到同一道题直接沿用，清单里标 🧠。"
@@ -768,30 +854,21 @@ preset_label = ""
 mode_sel, provider_id, api_base_sel, model_sel = "api", "", "", ""
 backend_sel, extra, api_key_sel = "openai", {}, ""
 
-_picked = st.session_state.get("model_preset") or ""
-if _picked:
-    _status = f"🟠 开工将调用模型 · {_picked}（未填 Key 则走规则）"
-else:
-    _status = "🟠 请选用模型并填 Key；未填 Key 时走规则引擎"
-st.markdown(f"""
-<div class="xz-hero">
-  <h1>📋 {config.PRODUCT_NAME} <span style="font-size:14px;opacity:.8;letter-spacing:0">{config.PRODUCT_EN} · 需求分析智能体</span></h1>
-  <div class="slogan">{config.PRODUCT_SLOGAN}</div>
-  {''.join(f'<span class="tag">{n} · {d}</span>' for n, d in config.SKILLS)}<span class="tag">隐盾 · 进模型前脱敏</span>
-  <span class="tag">{html.escape(_status)}</span>
-</div>""", unsafe_allow_html=True)
+hero_slot = st.container()   # 品牌区等「模型与材料」渲染完再填：状态灯要看这一轮是否真填了 Key
 k = st.columns(4)
-for col, n, l in ((k[0], f"{stats['count']} 份", "已分析需求"), (k[1], f"{len(knowledge.probes())} 条", "期货追问知识库"),
-                  (k[2], f"{len(knowledge.history())} 条 / {len(knowledge.systems())} 个 / {knowledge.data_domains()} 域", "历史需求库 / 系统目录 / 数据域"),
-                  (k[3], f"{dash0['saved_days']} 人天" + (f" · 偏差 {dash0['mape']}%" if dash0.get("mape") is not None else ""), "AI 协同累计省时（估）· 已对账估算偏差")):
-    col.markdown(f'<div class="xz-kpi"><div class="n">{n}</div><div class="l">{l}</div></div>', unsafe_allow_html=True)
+for col, n, l, c in ((k[0], f"{stats['count']} 份", "已分析需求", "#22D3EE"), (k[1], f"{len(knowledge.probes())} 条", "期货追问知识库", "#A78BFA"),
+                     (k[2], f"{len(knowledge.history())} / {len(knowledge.systems())} / {knowledge.data_domains()}", "历史需求 · 系统目录 · 数据域", "#34D399"),
+                     (k[3], f"{dash0['saved_days']} 人天" + (f" · 偏差 {dash0['mape']}%" if dash0.get("mape") is not None else ""), "AI 协同累计省时（估）· 已对账估算偏差", "#FBBF24")):
+    col.markdown(f'<div class="xz-kpi" style="--c:{c}"><div class="n">{n}</div><div class="l">{l}</div></div>', unsafe_allow_html=True)
 st.write("")
 
-st.markdown("**① 收需求** — 微信、纪要、邮件、Word，原话扔进来就行，也可口述；不选模型也能开工（规则引擎秒出初稿）")
+st.markdown('<div class="xz-sec"><span class="no">01</span><span class="t">收需求</span>'
+            '<span class="s">微信、纪要、邮件、Word，原话扔进来就行，也可口述；不选模型也能开工，规则引擎秒出初稿</span></div>',
+            unsafe_allow_html=True)
 # 摆放：样例 / 口述 / 原话 / 开工在上，一屏看全；选模型、填 Key、底稿与仓库收进下方折叠栏（投屏时 Key 输入框也不露出）。
 # 代码顺序仍是先模型与材料、后输入区：开工处理要用到前者的取值。
 intake_area = st.container()
-settings_area = st.expander("⚙️ 模型与材料（可选）— 选用模型、填 API Key；上传页面底稿 / 填 Git 仓库", expanded=False)
+settings_area = st.expander("模型与材料（可选）— 选用模型、填 API Key；上传页面底稿 / 填 Git 仓库", icon=":material/tune:", expanded=False)
 
 with settings_area:
     model_box = st.container(border=True)
@@ -827,6 +904,23 @@ with settings_area:
                 help="仅在确认自建 GitLab 使用可信的私有证书时勾选；默认校验证书。本机 / 内网地址仍不支持。",
             )
 
+_has_key = mode_sel == "api" and bool((api_key_sel or "").strip())
+with hero_slot:
+    _skills = "".join(f'<span class="xz-skill" style="--c:{SKILL_COLORS[n]}"><b>{n}</b>{html.escape(d)}</span>'
+                      for n, d in [*config.SKILLS, ("隐盾", "进模型前脱敏")])
+    _status = (f'<span class="xz-status model"><span class="dot"></span>开工调用模型 · {html.escape(preset_label)}</span>' if _has_key
+               else '<span class="xz-status"><span class="dot"></span>规则引擎 · 离线秒出（未填 Key）</span>')
+    st.markdown(f"""
+<div class="xz-hero">
+  <div class="xz-hero-top">
+    <div class="xz-brand"><div class="xz-logo">需</div>
+      <div><div class="xz-name">{config.PRODUCT_NAME}</div><div class="xz-en">{config.PRODUCT_EN} · 需求分析智能体</div></div></div>
+    {_status}
+  </div>
+  <div class="slogan">{config.PRODUCT_SLOGAN}</div>
+  <div class="xz-skills">{_skills}</div>
+</div>""", unsafe_allow_html=True)
+
 def _sample_body(choice: str) -> str:
     return next((p.read_text(encoding="utf-8") for p in samples if p.stem == choice), "")
 
@@ -834,8 +928,7 @@ def _sample_body(choice: str) -> str:
 with intake_area:
     pick_l, pick_r = st.columns([2, 3])
     with pick_r:
-        st.caption("口述请用 Edge / Chrome，允许麦克风；说完点「结束口述」，接在原话框现有文字后面。"
-                   "⚠️ 浏览器口述会把语音送到浏览器厂商（Google / Microsoft），**含客户姓名、账号的内容请勿口述**；隐盾只脱敏文字，管不到语音。")
+        st.caption(":material/mic: 口述用 Chrome / Edge，说完点「结束口述」接到原话后面。语音经浏览器厂商识别，**含客户姓名、账号的内容勿口述**（隐盾只管文字）。")
         heard = dictation_bar()
         if isinstance(heard, dict):
             ts = heard.get("ts")
@@ -866,8 +959,7 @@ with intake_area:
                 placeholder="例如：净值日报能不能加一列……也可点上方「开始口述」",
                 key=f"raw_text_{st.session_state.get('speech_rev', 0)}",
             )
-            st.caption("选了样例，原文会显示在这里，可以直接改。点开工会按框里现在的文字分析。")
-            go = st.form_submit_button("📋 需知，开工", type="primary")
+            go = st.form_submit_button("需知，开工", type="primary", icon=":material/bolt:")
 
 llm = None
 if go:
@@ -955,9 +1047,10 @@ llm = llm or build_llm(
 
 a = st.session_state.get("analysis")
 if not a:
-    st.info("选一个样例或粘贴一段话，选用模型并填 Key 后点「需知，开工」。未填 Key 时自动走规则引擎。所有样例与数据均为虚构。")
-    st.markdown("### 📒 一本账")
-    render_ledger(ledger, memory, audit)
+    st.caption("选一个样例或粘贴一段话，点「需知，开工」。所有样例与数据均为虚构。")
+    # 首页不铺整本台账（对账表单 + 看板 + 明细 + 审计太长）；要看再打开，开工后也在「一本账」页
+    if st.toggle(f"查看一本账 · {stats['count']} 条需求的看板与台账", key="home_ledger"):
+        render_ledger(ledger, memory, audit)
     st.stop()
 
 card, est, arch = a.card, a.estimate, a.architecture
@@ -970,7 +1063,8 @@ if _mat and (st.session_state.get("drafts") or st.session_state.get("repos")):  
         for line in _mat:
             st.markdown(line)
 
-tabs = st.tabs(["🗣️ 问清", "📄 写单", "📏 估量", "🏗️ 定架", "🖼️ 出样", "📒 一本账", "🛡️ 隐盾"])
+tabs = st.tabs([":material/forum: 问清", ":material/description: 写单", ":material/speed: 估量", ":material/account_tree: 定架",
+                ":material/web: 出样", ":material/menu_book: 一本账", ":material/shield: 隐盾"])
 if st.session_state.pop("scroll_to_results", False):   # 刚开工：把结果滚到眼前，投屏时不用手动往下找
     components.html(
         "<script>setTimeout(function(){var t=window.parent.document.querySelector('[data-testid=\"stTabs\"]');"
@@ -993,9 +1087,9 @@ with tabs[0]:
             polish_box = st.container(border=True)
             with polish_box:
                 if _last.get("mode") == "api":   # 开工时调了模型但没用上（超时 / 网关不通 / 返回不可用）
-                    st.markdown("**模型润色** — 这次开工调模型没成功，已用规则引擎出稿。可在上方「⚙️ 模型与材料」换个模型后点润色。")
+                    st.markdown("**模型润色** — 这次开工调模型没成功，已用规则引擎出稿。可在上方「模型与材料」换个模型后点润色。")
                 else:
-                    st.markdown("**规则引擎初稿**（毫秒级、不调模型）。想让措辞更顺、多补几条追问，可在上方「⚙️ 模型与材料」选模型、填 Key，再点润色。")
+                    st.markdown("**规则引擎初稿**（毫秒级、不调模型）。想让措辞更顺、多补几条追问，可在上方「模型与材料」选模型、填 Key，再点润色。")
             with st.form("xuzhi_polish"):
                 polish_clicked = st.form_submit_button(
                     "✨ 模型润色：补追问、润色标题 / 功能点 / 需求单"
@@ -1004,7 +1098,7 @@ with tabs[0]:
                 polish_key = (api_key_sel or st.session_state.api_keys.get(provider_id, "")).strip()
                 polish_llm = build_llm(mode_sel, model_sel, api_base_sel, polish_key, backend=backend_sel, extra=extra)
                 if polish_llm.mode != "api":
-                    st.warning("请先在上方「⚙️ 模型与材料」里选用模型并填写 API Key，再点润色。")
+                    st.warning("请先在上方「模型与材料」里选用模型并填写 API Key，再点润色。")
                 else:
                     with st.spinner(f"{polish_llm.model or '模型'} 正在读……"):
                         a2 = analyze(
@@ -1055,9 +1149,9 @@ with tabs[0]:
         for q in a.questions:
             cls = {"高": "hi", "中": "md", "低": "lo"}.get(q.impact, "md")
             fut = '<span class="xz-chip fut">🌾 期货</span>' if q.tag == "期货" else ""
-            rec = (f'<span class="xz-chip" title="来源：{html.escape(q.recalled)}">🧠 沿用上次口径</span>'
+            rec = (f'<span class="xz-chip mem" title="来源：{html.escape(q.recalled)}">🧠 沿用上次口径</span>'
                    if getattr(q, "recalled", "") else "")
-            st.markdown(f'<div class="xz-q"><span class="xz-chip {cls}">影响{q.impact}</span>{fut}{rec}<span class="xz-chip">{q.category}</span> '
+            st.markdown(f'<div class="xz-q {cls}"><span class="xz-chip {cls}">影响{q.impact}</span>{fut}{rec}<span class="xz-chip">{q.category}</span> '
                         f'<b>{html.escape(q.question)}</b><div class="why">不问会怎样：{html.escape(q.why)}　｜　默认：{html.escape(q.default)}</div></div>', unsafe_allow_html=True)
             _prefill = answers.get(q.id, q.answer if getattr(q, "recalled", "") else "")
             answers[q.id] = st.text_input("业务答复", value=_prefill, key=f"ans_{q.id}", label_visibility="collapsed",
@@ -1159,7 +1253,7 @@ with tabs[3]:
         st.dataframe(pd.DataFrame([{"层": s[0], "建议": s[1]} for s in arch.stack]), hide_index=True, width="stretch")
     with r:
         st.markdown("**分层架构（自动画）**")
-        _iframe(a.layers_html, height=330)
+        _iframe(a.layers_html, height=330, bg="transparent")   # 架构图本身是暗色；原型页保持白底，像真实页面
     st.markdown(f"#### 需要 IT 拍板的决策（{len(arch.decisions)} 项）")
     for d in arch.decisions:
         with st.expander(f"{d.id} {d.topic} — 建议：{d.recommended}", expanded=(d.id in ("D0", "D1"))):

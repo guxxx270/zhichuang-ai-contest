@@ -1824,9 +1824,25 @@ def render_source(
     return _generated_page(card, client_view=False, demand_text=demand_text)
 
 
+_LAYER_COLORS = {"入口": "#22D3EE", "应用": "#A78BFA", "服务": "#60A5FA", "数据": "#34D399"}
+_LAYERS_CSS = """<style>
+body { margin:0; padding:6px 2px; background:transparent; color:#E6ECF8; font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif; }
+.layers { display:grid; grid-template-columns:96px 1fr; gap:10px; }
+.layer-name { --c:#22D3EE; border-radius:10px; padding:10px; font-size:13px; font-weight:700; display:flex; align-items:center; justify-content:center;
+  color:var(--c); background:color-mix(in srgb, var(--c) 14%, #0E1528); border:1px solid color-mix(in srgb, var(--c) 55%, transparent); }
+.layer-boxes { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+.box { --c:#22D3EE; background:rgba(17,26,46,.85); border:1px solid color-mix(in srgb, var(--c) 35%, #22304F); border-radius:10px;
+  padding:8px 12px; font-size:13px; color:#DCE4F5; }
+.box.app { border-color:var(--c); box-shadow:0 0 16px color-mix(in srgb, var(--c) 45%, transparent); color:#fff; font-weight:600; }
+</style>"""
+
+
 def layers_html(layers: dict[str, list[str]]) -> str:
+    """定架的分层架构图（暗色，配合需知界面）；「应用」层第一格是本次需求，发光标出。"""
     rows = []
     for name in ("入口", "应用", "服务", "数据"):
-        boxes = "".join(f'<div class="box{" app" if name == "应用" and i == 0 else ""}">{html.escape(b)}</div>' for i, b in enumerate(layers.get(name, [])))
-        rows.append(f'<div class="layer-name">{name}</div><div class="layer-boxes">{boxes}</div>')
-    return f"<!doctype html><html><head><meta charset='utf-8'>{CSS}</head><body style='background:#fff'><div class='layers'>{''.join(rows)}</div></body></html>"
+        c = _LAYER_COLORS[name]
+        boxes = "".join(f'<div class="box{" app" if name == "应用" and i == 0 else ""}" style="--c:{c}">{html.escape(b)}</div>'
+                        for i, b in enumerate(layers.get(name, [])))
+        rows.append(f'<div class="layer-name" style="--c:{c}">{name}</div><div class="layer-boxes">{boxes}</div>')
+    return f"<!doctype html><html><head><meta charset='utf-8'>{_LAYERS_CSS}</head><body><div class='layers'>{''.join(rows)}</div></body></html>"

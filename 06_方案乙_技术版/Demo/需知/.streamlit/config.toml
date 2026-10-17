@@ -1,9 +1,38 @@
+# 需知 · 暗色科技风主题（投屏演示用）
+# 字体只用系统 / 内置字体：会场网络可能打不开 Google Fonts，外链字体会拖慢首屏。
+
 [theme]
-primaryColor = "#14367A"
-backgroundColor = "#F6F4EF"
-secondaryBackgroundColor = "#FFFFFF"
-textColor = "#1F2937"
-font = "sans serif"
+base = "dark"
+primaryColor = "#4361EE"               # 电光蓝：按钮、选中态（白字对比度 5.0）
+backgroundColor = "#070B16"            # 近黑深蓝底
+secondaryBackgroundColor = "#111A2E"   # 输入框、卡片、代码块
+codeBackgroundColor = "#0C1324"
+textColor = "#E6ECF8"
+linkColor = "#22D3EE"
+borderColor = "#22304F"
+showWidgetBorder = true
+baseRadius = "10px"
+buttonRadius = "10px"
+font = "sans-serif"
+codeFont = "monospace"
+baseFontSize = 15
+headingFontWeights = [700, 650, 600, 600, 600, 600]
+
+# 语义色（徽标、彩色文字、指标涨跌）
+blueColor = "#60A5FA"
+greenColor = "#34D399"
+redColor = "#F87171"
+orangeColor = "#FB923C"
+yellowColor = "#FBBF24"
+violetColor = "#A78BFA"
+grayColor = "#8A97B4"
+
+# 图表配色：青 / 紫 / 绿 / 琥珀 / 粉 / 橙 / 蓝 / 蓝绿，暗底上彼此分得清
+chartCategoricalColors = ["#22D3EE", "#A78BFA", "#34D399", "#FBBF24", "#F472B6", "#FB923C", "#60A5FA", "#2DD4BF"]
+chartSequentialColors = ["#0B1B3A", "#0E2A55", "#123A70", "#164B8B", "#1B5FA6", "#2274BF", "#2A8BD4", "#38A3E3", "#5BBCEE", "#8AD4F6"]
+
+dataframeBorderColor = "#22304F"
+dataframeHeaderBackgroundColor = "#141F38"
 
 [browser]
 gatherUsageStats = false
