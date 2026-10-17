@@ -9,6 +9,8 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
+from app_jira import SRC_OPTIONS, jira_text_from_analysis, load_history, render_jira_mode
+
 from xuzhi import config, knowledge, sandbox
 from xuzhi.asr import correct_domain_speech
 from xuzhi.audit import Audit
@@ -141,6 +143,9 @@ div[data-testid="stTabs"] [role="tab"][aria-selected="true"] p { color:#9BE7F7; 
 [data-testid="stMetricValue"] { color:#9BE7F7; }
 iframe[title="xuzhi_dictation"] { border: none !important; }
 [data-testid="stHeaderActionElements"] { display: none; }   /* 标题旁的锚点链接图标，演示用不上 */
+/* 「用法」切换（零散需求 / Jira 评估）做大一点，像主导航 */
+.st-key-app_mode button { font-size:15px; padding:8px 20px; min-height:42px; }
+.st-key-app_mode [aria-checked="true"], .st-key-app_mode button[kind*="Active"] { box-shadow:0 0 18px rgba(34,211,238,.25); }
 </style>""", unsafe_allow_html=True)
 
 
@@ -819,7 +824,37 @@ preset_label = ""
 mode_sel, provider_id, api_base_sel, model_sel = "api", "", "", ""
 backend_sel, extra, api_key_sel = "openai", {}, ""
 
-hero_slot = st.container()   # 品牌区等「模型与材料」渲染完再填：状态灯要看这一轮是否真填了 Key
+hero_slot = st.container()   # 品牌区等「模型与参考材料」渲染完再填：状态灯要看这一轮是否真填了 Key
+
+
+def _render_hero(status_html: str) -> None:
+    skills = "".join(f'<span class="xz-skill" style="--c:{SKILL_COLORS[n]}"><b>{n}</b>{html.escape(d)}</span>'
+                     for n, d in [*config.SKILLS, ("隐盾", "进模型前脱敏")])
+    with hero_slot:
+        st.markdown(f"""
+<div class="xz-hero">
+  <div class="xz-hero-top">
+    <div class="xz-brand"><div class="xz-logo">需</div>
+      <div><div class="xz-name">{config.PRODUCT_NAME}</div><div class="xz-en">{config.PRODUCT_EN} · 需求分析智能体</div></div></div>
+    {status_html}
+  </div>
+  <div class="slogan">{config.PRODUCT_SLOGAN}</div>
+  <div class="xz-skills">{skills}</div>
+</div>""", unsafe_allow_html=True)
+
+
+# 两种用法：零散的话 → 完整需求（问清 / 写单 / 估量 / 定架 / 出样）；已写好的 Jira 工单 → 复杂度、工时、AI 编码工时
+MODES = {"free": ":material/edit_note: 零散需求 → 完整需求", "jira": ":material/fact_check: Jira 需求评估"}
+app_mode = st.segmented_control("用法", list(MODES), format_func=MODES.get, default="free", required=True,
+                                key="app_mode", label_visibility="collapsed")
+if app_mode == "jira":
+    st.markdown('<div class="xz-sec"><span class="no">01</span><span class="t">Jira 需求评估</span>'
+                '<span class="s">粘贴一条工单，或上传 Jira 导出的 CSV / Excel；不调模型，按技术复杂度给出工时与 AI 编码工时</span></div>',
+                unsafe_allow_html=True)
+    render_jira_mode()
+    _render_hero('<span class="xz-status"><span class="dot"></span>规则引擎 · 离线秒出</span>')
+    st.stop()
+
 k = st.columns(4)
 for col, n, l, c in ((k[0], f"{stats['count']} 份", "已分析需求", "#22D3EE"), (k[1], f"{len(knowledge.probes())} 条", "期货追问知识库", "#A78BFA"),
                      (k[2], f"{len(knowledge.history())} / {len(knowledge.systems())} / {knowledge.data_domains()}", "历史需求 · 系统目录 · 数据域", "#34D399"),
@@ -867,21 +902,21 @@ with settings_area:
     use_sample_draft = mat_mode == "示例底稿"
 
 _has_key = mode_sel == "api" and bool((api_key_sel or "").strip())
-with hero_slot:
-    _skills = "".join(f'<span class="xz-skill" style="--c:{SKILL_COLORS[n]}"><b>{n}</b>{html.escape(d)}</span>'
-                      for n, d in [*config.SKILLS, ("隐盾", "进模型前脱敏")])
-    _status = (f'<span class="xz-status model"><span class="dot"></span>开工调用模型 · {html.escape(preset_label)}</span>' if _has_key
-               else '<span class="xz-status"><span class="dot"></span>规则引擎 · 离线秒出（未填 Key）</span>')
-    st.markdown(f"""
-<div class="xz-hero">
-  <div class="xz-hero-top">
-    <div class="xz-brand"><div class="xz-logo">需</div>
-      <div><div class="xz-name">{config.PRODUCT_NAME}</div><div class="xz-en">{config.PRODUCT_EN} · 需求分析智能体</div></div></div>
-    {_status}
-  </div>
-  <div class="slogan">{config.PRODUCT_SLOGAN}</div>
-  <div class="xz-skills">{_skills}</div>
-</div>""", unsafe_allow_html=True)
+_render_hero(f'<span class="xz-status model"><span class="dot"></span>开工调用模型 · {html.escape(preset_label)}</span>' if _has_key
+             else '<span class="xz-status"><span class="dot"></span>规则引擎 · 离线秒出（未填 Key）</span>')
+
+def _to_jira(analysis) -> None:
+    from xuzhi.jira import parse_issue_text
+    from xuzhi.pipeline.assess import assess, calibrate
+
+    text = jira_text_from_analysis(analysis)
+    st.session_state.app_mode = "jira"
+    st.session_state.jira_src = SRC_OPTIONS[0]
+    st.session_state.jira_sample = st.session_state.jira_sample_shown = "（粘贴自己的）"
+    st.session_state.jira_text = text
+    st.session_state.jira_rev = st.session_state.get("jira_rev", 0) + 1
+    st.session_state.jira_single = assess(parse_issue_text(text), calibrate(load_history()[0]))
+
 
 def _sample_body(choice: str) -> str:
     return next((p.read_text(encoding="utf-8") for p in samples if p.stem == choice), "")
@@ -1149,7 +1184,11 @@ with tabs[1]:
     md = a.spec.business_md if v.startswith("业务") else a.spec.tech_md
     with st.container(border=True):
         st.markdown(md)
-    st.download_button("下载本版 .md", md, file_name=f"需求单_{'业务版' if v.startswith('业务') else '技术版'}_{card.title}.md")
+    b1, b2, _bpad = st.columns([1, 1.3, 3])
+    b1.download_button("下载本版 .md", md, file_name=f"需求单_{'业务版' if v.startswith('业务') else '技术版'}_{card.title}.md",
+                       icon=":material/download:")
+    b2.button("转成 Jira 工单去评估", icon=":material/fact_check:", on_click=_to_jira, args=(a,), key="to_jira",
+              help="把需求卡与需求单排成一条 Jira 故事，切到「Jira 需求评估」直接出复杂度与工时")
     st.markdown(f'<div class="xz-foot">技术版每条用户故事都回链原话；已答复 {sum(1 for q in a.questions if q.answer.strip())} / {len(a.questions)} 项，其余按默认假设标注。</div>', unsafe_allow_html=True)
 
 # ---------- 估量 ----------

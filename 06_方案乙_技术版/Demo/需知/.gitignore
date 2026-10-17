@@ -8,3 +8,4 @@ data/logs/
 data/history_learned.json
 .env.bak*
 data/backup/
+data/jira/历史/
