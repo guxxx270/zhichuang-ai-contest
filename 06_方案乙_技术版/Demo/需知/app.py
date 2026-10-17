@@ -753,7 +753,7 @@ def _render_draft_link_rows() -> None:
             st.session_state.draft_link_next_id = nid + 1
             st.rerun()
     with b2:
-        st.caption("网页请左侧上传 HTML；Token 仅会话内使用。自建 Git 的 SSL 选项在下方「开工」表单里勾选。")
+        st.caption("网页请左侧上传 HTML；Token 仅会话内使用。")
 
 ledger = get_ledger()
 memory = get_memory()
@@ -787,84 +787,87 @@ for col, n, l in ((k[0], f"{stats['count']} 份", "已分析需求"), (k[1], f"{
     col.markdown(f'<div class="xz-kpi"><div class="n">{n}</div><div class="l">{l}</div></div>', unsafe_allow_html=True)
 st.write("")
 
-st.markdown("**① 收需求** — 微信、纪要、邮件、Word，原话扔进来就行，也可口述；开工调用下方模型，未填 Key 时自动走规则")
-model_box = st.container(border=True)
-with model_box:
-    st.markdown("**选用模型**")
-    preset_label, mode_sel, provider_id, api_base_sel, model_sel = _render_model_preset()
-    st.caption("开工调用所选模型。未填 API Key 时自动用规则引擎出初稿，可稍后在「问清」补 Key 再润色。")
-    api_key_sel, api_base_sel, model_sel, backend_sel, extra = _render_model_secrets(
-        mode_sel, provider_id, api_base_sel, model_sel
-    )
+st.markdown("**① 收需求** — 微信、纪要、邮件、Word，原话扔进来就行，也可口述；不选模型也能开工（规则引擎秒出初稿）")
+# 摆放：样例 / 口述 / 原话 / 开工在上，一屏看全；选模型、填 Key、底稿与仓库收进下方折叠栏（投屏时 Key 输入框也不露出）。
+# 代码顺序仍是先模型与材料、后输入区：开工处理要用到前者的取值。
+intake_area = st.container()
+settings_area = st.expander("⚙️ 模型与材料（可选）— 选用模型、填 API Key；上传页面底稿 / 填 Git 仓库", expanded=False)
 
-voice_l, voice_r = st.columns([2, 3])
-with voice_l:
-    st.caption("口述请用 Edge / Chrome，允许麦克风。说完点「结束口述」，接到原话框里现在剩下的文字后面。")
-    st.caption("⚠️ 浏览器口述会把语音送到浏览器厂商的语音服务（Google / Microsoft），**含客户姓名、账号的内容请勿口述**；隐盾只脱敏文字，管不到语音。正式环境应接公司语音服务或关闭口述。")
-with voice_r:
-    heard = dictation_bar()
-    if isinstance(heard, dict):
-        ts = heard.get("ts")
-        chunk = (heard.get("text") or "").strip()
-        if ts and chunk and ts != st.session_state.get("speech_last_ts"):
-            st.session_state.speech_last_ts = ts
-            box = (heard.get("box") or "") if heard.get("has_box") else None
-            _commit_dictation(chunk, box)
-            st.rerun()
-
-draft_box = st.container(border=True)
-with draft_box:
-    st.markdown(
-        "**页面底稿 / 代码仓库（可选）** — 不传也能开工。"
-        "左侧 **上传 HTML** 做页面底稿；右侧只填 **Git 仓库**（Token 可选）。"
-        "不要贴浏览器网页地址（多为空壳）。"
-        "HTML 建议：页面加载完 F12 → Copy outerHTML → 存成 .html 再上传。"
-    )
-    d1, d2 = st.columns([1, 1])
-    with d1:
-        draft_uploads = st.file_uploader(
-            "上传 HTML 底稿（可多选）",
-            type=["html", "htm"],
-            accept_multiple_files=True,
-            key="draft_uploads",
+with settings_area:
+    model_box = st.container(border=True)
+    with model_box:
+        st.markdown("**选用模型**")
+        preset_label, mode_sel, provider_id, api_base_sel, model_sel = _render_model_preset()
+        st.caption("开工调用所选模型。未填 API Key 时自动用规则引擎出初稿，可稍后在「问清」补 Key 再润色。")
+        api_key_sel, api_base_sel, model_sel, backend_sel, extra = _render_model_secrets(
+            mode_sel, provider_id, api_base_sel, model_sel
         )
-        use_sample_draft = st.toggle("没有底稿时用示例「净值日报」底稿演示", value=False, key="use_sample_draft")
-    with d2:
-        _render_draft_link_rows()
+    draft_box = st.container(border=True)
+    with draft_box:
+        st.markdown(
+            "**页面底稿 / 代码仓库（可选）** — 不传也能开工。"
+            "左侧 **上传 HTML** 做页面底稿；右侧只填 **Git 仓库**（Token 可选）。"
+            "不要贴浏览器网页地址（多为空壳）。"
+            "HTML 建议：页面加载完 F12 → Copy outerHTML → 存成 .html 再上传。"
+        )
+        d1, d2 = st.columns([1, 1])
+        with d1:
+            draft_uploads = st.file_uploader(
+                "上传 HTML 底稿（可多选）",
+                type=["html", "htm"],
+                accept_multiple_files=True,
+                key="draft_uploads",
+            )
+            use_sample_draft = st.toggle("没有底稿时用示例「净值日报」底稿演示", value=False, key="use_sample_draft")
+        with d2:
+            _render_draft_link_rows()
+            git_ssl_no_verify = st.toggle(
+                "自建 Git 跳过 SSL 校验",
+                key="git_ssl_no_verify",
+                help="仅在确认自建 GitLab 使用可信的私有证书时勾选；默认校验证书。本机 / 内网地址仍不支持。",
+            )
 
 def _sample_body(choice: str) -> str:
     return next((p.read_text(encoding="utf-8") for p in samples if p.stem == choice), "")
 
 
-pick_l, _pick_r = st.columns([2, 3])
-with pick_l:
-    choice = st.selectbox("选一个样例（或在右边粘贴）", ["（粘贴自己的）"] + [p.stem for p in samples], key="sample")
-if st.session_state.get("sample_shown") != choice:
-    st.session_state["sample_shown"] = choice
-    st.session_state["speech_rev"] = int(st.session_state.get("speech_rev", 0) or 0) + 1
+with intake_area:
+    pick_l, pick_r = st.columns([2, 3])
+    with pick_r:
+        st.caption("口述请用 Edge / Chrome，允许麦克风；说完点「结束口述」，接在原话框现有文字后面。"
+                   "⚠️ 浏览器口述会把语音送到浏览器厂商（Google / Microsoft），**含客户姓名、账号的内容请勿口述**；隐盾只脱敏文字，管不到语音。")
+        heard = dictation_bar()
+        if isinstance(heard, dict):
+            ts = heard.get("ts")
+            chunk = (heard.get("text") or "").strip()
+            if ts and chunk and ts != st.session_state.get("speech_last_ts"):
+                st.session_state.speech_last_ts = ts
+                box = (heard.get("box") or "") if heard.get("has_box") else None
+                _commit_dictation(chunk, box)
+                st.rerun()
+    with pick_l:
+        choice = st.selectbox("选一个样例（或在下面粘贴）", ["（粘贴自己的）"] + [p.stem for p in samples], key="sample")
+    if st.session_state.get("sample_shown") != choice:
+        st.session_state["sample_shown"] = choice
+        st.session_state["speech_rev"] = int(st.session_state.get("speech_rev", 0) or 0) + 1
 
-with st.form("xuzhi_go"):
-    c1, c2 = st.columns([2, 3])
-    with c1:
-        src = st.selectbox("来源（可不选）", ["自动识别", "企业微信", "会议纪要", "邮件", "需求单", "口述"], key="src")
-        mobile = st.toggle("原型按手机版出", value=False, key="mobile")
-        client = st.toggle("原型出客户版（脱敏）", value=False, key="client")
-        git_ssl_no_verify = st.toggle(
-            "自建 Git 跳过 SSL 校验",
-            key="git_ssl_no_verify",
-            help="仅在确认自建 GitLab 使用可信的私有证书时勾选；默认校验证书。本机 / 内网地址仍不支持。",
-        )
-    with c2:
-        default_text = st.session_state.get("raw_composed", "") if choice == "（粘贴自己的）" else _sample_body(choice)
-        text = st.text_area(
-            "原话",
-            value=default_text,
-            height=190,
-            placeholder="例如：净值日报能不能加一列……也可点上方「开始口述」",
-            key=f"raw_text_{st.session_state.get('speech_rev', 0)}",
-        )
-        st.caption("选了样例，原文会显示在这里，可以直接改。点开工会按框里现在的文字分析。")
-        go = st.form_submit_button("📋 需知，开工", type="primary")
+    with st.form("xuzhi_go"):
+        c1, c2 = st.columns([2, 3])
+        with c1:
+            src = st.selectbox("来源（可不选）", ["自动识别", "企业微信", "会议纪要", "邮件", "需求单", "口述"], key="src")
+            mobile = st.toggle("原型按手机版出", value=False, key="mobile")
+            client = st.toggle("原型出客户版（脱敏）", value=False, key="client")
+        with c2:
+            default_text = st.session_state.get("raw_composed", "") if choice == "（粘贴自己的）" else _sample_body(choice)
+            text = st.text_area(
+                "原话",
+                value=default_text,
+                height=190,
+                placeholder="例如：净值日报能不能加一列……也可点上方「开始口述」",
+                key=f"raw_text_{st.session_state.get('speech_rev', 0)}",
+            )
+            st.caption("选了样例，原文会显示在这里，可以直接改。点开工会按框里现在的文字分析。")
+            go = st.form_submit_button("📋 需知，开工", type="primary")
 
 llm = None
 if go:
@@ -937,6 +940,7 @@ if go:
         }
         if do_polish:
             st.session_state.just_polished = a.engine != "规则"
+        st.session_state.scroll_to_results = True
         st.rerun()
 
 _last = st.session_state.get("last_llm") or {}
@@ -961,12 +965,18 @@ _mat = st.session_state.get("materials_report") or materials_report(
     getattr(a, "drafts", None) or st.session_state.get("drafts"),
     getattr(a, "repos", None) or st.session_state.get("repos"),
 )
-if _mat:
+if _mat and (st.session_state.get("drafts") or st.session_state.get("repos")):   # 没传底稿 / 仓库就不占一行
     with st.expander("📦 本次已读材料（Git / HTML）", expanded=bool(st.session_state.get("repos") or getattr(a, "repos", None))):
         for line in _mat:
             st.markdown(line)
 
 tabs = st.tabs(["🗣️ 问清", "📄 写单", "📏 估量", "🏗️ 定架", "🖼️ 出样", "📒 一本账", "🛡️ 隐盾"])
+if st.session_state.pop("scroll_to_results", False):   # 刚开工：把结果滚到眼前，投屏时不用手动往下找
+    components.html(
+        "<script>setTimeout(function(){var t=window.parent.document.querySelector('[data-testid=\"stTabs\"]');"
+        "if(t)t.scrollIntoView({behavior:'smooth',block:'start'});},300);</script>",
+        height=0,
+    )
 
 # ---------- 问清 ----------
 with tabs[0]:
@@ -982,7 +992,10 @@ with tabs[0]:
             polish_clicked = False
             polish_box = st.container(border=True)
             with polish_box:
-                st.markdown("**模型润色** — 开工未调到模型（多半是没填 Key 或调用失败）。请在上方补齐 PAT/模型后点润色。")
+                if _last.get("mode") == "api":   # 开工时调了模型但没用上（超时 / 网关不通 / 返回不可用）
+                    st.markdown("**模型润色** — 这次开工调模型没成功，已用规则引擎出稿。可在上方「⚙️ 模型与材料」换个模型后点润色。")
+                else:
+                    st.markdown("**规则引擎初稿**（毫秒级、不调模型）。想让措辞更顺、多补几条追问，可在上方「⚙️ 模型与材料」选模型、填 Key，再点润色。")
             with st.form("xuzhi_polish"):
                 polish_clicked = st.form_submit_button(
                     "✨ 模型润色：补追问、润色标题 / 功能点 / 需求单"
@@ -991,7 +1004,7 @@ with tabs[0]:
                 polish_key = (api_key_sel or st.session_state.api_keys.get(provider_id, "")).strip()
                 polish_llm = build_llm(mode_sel, model_sel, api_base_sel, polish_key, backend=backend_sel, extra=extra)
                 if polish_llm.mode != "api":
-                    st.warning("请先在上方选用模型并填写 API Key，再点润色。")
+                    st.warning("请先在上方「⚙️ 模型与材料」里选用模型并填写 API Key，再点润色。")
                 else:
                     with st.spinner(f"{polish_llm.model or '模型'} 正在读……"):
                         a2 = analyze(

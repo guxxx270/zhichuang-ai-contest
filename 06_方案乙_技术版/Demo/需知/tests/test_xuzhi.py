@@ -172,3 +172,22 @@ def test_demo_samples_prototype_quality():
     drafted = analyze(s1, llm=LLM(mode="mock"), drafts=[parse_draft(dp.name, dp.read_text(encoding="utf-8"))]).prototype_html
     assert "xz-demand-patch-tabs" not in drafted and "确认</button>" not in drafted
     assert re.search(r">单位净值</th>\s*<th[^>]*>较上一交易日变动</th>", drafted) and ">集中度</th>" in drafted
+
+
+def test_memory_demo_sample_recalls_answers():
+    """演示脚本：样例 ① 答了结算时点与比较基准 → 样例 ⑤（同一提出方的净值周报）这两条直接沿用、不再问。"""
+    from xuzhi import config
+    from xuzhi.llm import LLM
+    from xuzhi.memory import Memory
+
+    mem = Memory(config.LEDGER_DB.with_name("memory_demo.sqlite3"))
+    mem.forget()
+    llm = LLM(mode="mock")
+    s1 = next(config.SAMPLES_DIR.glob("01_*.md")).read_text(encoding="utf-8")
+    ids1 = [q.id for q in analyze(s1, llm=llm, memory=mem).questions]
+    assert ids1[:2] == ["T01", "T05"]                     # 先问期货口径：结算时点、比较基准
+    a = analyze(s1, llm=llm, answers={"T01": "结算后为准，夜盘算下一交易日", "T05": "上一交易日结算价，不复权"}, memory=mem)
+    assert mem.learn(a.card, a.questions, 1) == 2
+    s5 = next(config.SAMPLES_DIR.glob("05_*.md")).read_text(encoding="utf-8")
+    b = analyze(s5, llm=llm, memory=mem)
+    assert {q.id for q in b.questions if q.recalled} == {"T01", "T05"} and "C_POS" not in {q.id for q in b.questions}

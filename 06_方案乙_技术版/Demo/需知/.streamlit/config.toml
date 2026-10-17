@@ -7,3 +7,6 @@ font = "sans serif"
 
 [browser]
 gatherUsageStats = false
+
+[client]
+toolbarMode = "minimal"   # 不露 Deploy 按钮与开发者菜单（投屏演示用）

@@ -272,6 +272,10 @@ def _column_display_questions(
             "列位置和交互不定，界面与导出列序会返工。",
             ("插在表尾；暂不单独做排序/筛选，沿用表原有能力。" if not header_hint else f"插在「{headers[-1]}」右侧；暂不单独做排序/筛选。"),
         ),
+    ]
+    if re.search(r"(?:放在|放到|挨着|紧跟)[^，,。；;、\s]{2,10}?的?(?:旁边|后面|右边|之后)", text or ""):
+        qs = [q for q in qs if q.id != "C_POS"]   # 原话已说了放哪，不再问
+    qs += [
         Question(
             "C_SIGN",
             "展示格式",
@@ -317,8 +321,8 @@ def build_questions(
         seen_cat[p.category] = seen_cat.get(p.category, 0) + 1
         qs.append(Question(p.id, p.category, p.tag, p.impact, p.question, p.why, p.default))
         seen_ids.add(p.id)
-    # 加列场景优先保留展示格式题，再截断
-    return qs[:limit]
+    # 加列场景优先保留展示格式题，再截断；截断后按影响排序，同档期货题在前（稳定排序，同档内保持原顺序）
+    return sorted(qs[:limit], key=lambda q: (knowledge.IMPACT_ORDER.get(q.impact, 9), q.tag != "期货"))
 
 
 def _salutation(card: Card) -> str:
