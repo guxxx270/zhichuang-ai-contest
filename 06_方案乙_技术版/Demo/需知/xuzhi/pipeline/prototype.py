@@ -6,6 +6,7 @@ from __future__ import annotations
 import html
 import random
 import re
+from datetime import date
 
 from .. import config
 from ..drafts import Draft, pick_draft, related_drafts, draft_relevance, is_visual_html, visual_drafts
@@ -81,7 +82,10 @@ def _pct(rng: random.Random, lo=-3.0, hi=3.0) -> str:
 
 def _report_or_page(card: Card, rng: random.Random, client_view: bool, demand_text: str = "") -> str:
     from .. import textutil as _tu
+    from .intake import looks_futures_domain
 
+    if (card.indicators or card.symbols) and looks_futures_domain(demand_text, card.title, " ".join(card.indicators)):
+        return _futures_report(card, rng, client_view, demand_text)
     inds: list[str] = []
     for snip in _demand_snippets(card, demand_text):
         for col in _tu.find_added_columns(snip):
@@ -115,6 +119,55 @@ def _report_or_page(card: Card, rng: random.Random, client_view: bool, demand_te
     return bar + f'<div class="xz-kpis">{kpis}</div>' + _table(headers, rows)
 
 
+def _futures_report(card: Card, rng: random.Random, client_view: bool, demand_text: str = "") -> str:
+    """期货口径的报表 / 页面：行 = 产品或品种，列 = 原话里的指标 + 点名新增的列（按「放在X旁边」定位、表头标新增）。"""
+    from .. import textutil as _tu
+
+    by_product = "资管产品" in card.scope_objects or not card.symbols
+    key = "产品" if by_product else "品种"
+    keys = list(_PRODUCTS if by_product else card.symbols)[:6]
+    wanted = _wanted_columns(card, demand_text)
+    order: list[tuple[str, int | None]] = [(key, 0)]
+    for h in card.indicators or (["单位净值", "回撤"] if by_product else ["涨跌幅", "持仓量"]):
+        if not _tu.has_label([x for x, _ in order] + [c for c, _a in wanted], h):   # 点名新增的列另排，不算原有列
+            order.append((h, len(order)))
+    for c, a in wanted:
+        if not _tu.has_label([x for x, _ in order], c):
+            _insert_after_anchor(order, c, a)
+    if client_view:
+        order = [(h, s) for h, s in order if h not in _HIDE_CLIENT]
+    order = order[:9]
+    fresh = {h for h, s in order if s is None}
+    bench, bench_move = _pick_benchmark(card), _pct(rng, -1.2, 1.2)
+    rows = [[k] + [_fake_cell(h, rng, bench, bench_move) for h, _s in order[1:]] for k in keys]
+    th = "".join(
+        f'<th style="background:#fff1e0;color:#9a3412">{html.escape(h)} <span class="tag md">新增</span></th>' if h in fresh
+        else f"<th>{html.escape(h)}</th>" for h, _s in order)
+    trs = "".join("<tr>" + "".join(f"<td>{c}</td>" for c in r) + "</tr>" for r in rows)
+    table = f'<table class="xz"><thead><tr>{th}</tr></thead><tbody>{trs}</tbody></table>'
+    kpis = "".join(f'<div class="xz-kpi"><div class="n">{v}</div><div class="l">{l}</div></div>' for v, l in (
+        (f"{len(keys)} 只" if by_product else f"{len(keys)} 个", f"{key}范围（示例）"), ("T+1 16:45", "数据时点（结算后）"),
+        (f"{rng.randint(1, 3)}", "今日异常项"), ("客户版 · 已脱敏" if client_view else "内部版", "版本")))
+    bar = (f'<div class="xz-bar"><input type="date" value="{date.today().isoformat()}"><select><option>全部{key}</option>'
+           + "".join(f"<option>{html.escape(k)}</option>" for k in keys) + "</select>"
+           + '<button class="xz-btn">查询</button><button class="xz-btn ghost">导出 Excel</button>'
+           + '<button class="xz-btn ghost">订阅每日推送</button></div>')
+    notes = []
+    if fresh:
+        notes.append("橙色表头为本次需求新增的列")
+    if any("对标" in h for h, _s in order):
+        notes.append(f"对标指数为示例（{html.escape(bench)}），同一查询日全表同一涨跌，具体指数以业务确认为准")
+    if client_view:
+        notes.append("客户版已隐去集中度、杠杆、保证金占用等内部字段")
+    foot = f'<div class="foot">{"；".join(notes)}。</div>' if notes else ""
+    alert = ""
+    if card.req_type == "提醒" or re.search(r"提醒|异常|预警", " ".join([card.title, *card.features])):
+        first = next((h for h, _s in order[1:]), "数值")
+        alert = (f'<div class="alert"><span class="tag hi">异常</span><div><b>{html.escape(keys[min(1, len(keys) - 1)])}</b> '
+                 f'{html.escape(first)}较近 60 日均值偏离 2.3σ，已推送企业微信（示例 09:32）</div></div>')
+    return bar + f'<div class="xz-kpis">{kpis}</div>' + alert + table + foot
+
+
 def _card_blob(card: Card, demand_text: str = "") -> str:
     return " ".join(
         [demand_text or "", card.title or "", card.goal or "", card.req_type or ""]
@@ -145,7 +198,8 @@ def _named_tabs(blob: str) -> list[str]:
         n = re.sub(r"(?i)tab页?|页面$", "", m.group(1)).strip(" ：:，,")
         if n and n not in tabs:
             tabs.append(n)
-    for m in re.finditer(r"[「\"“]([^」\"”]{2,16})[」\"”]\s*(?:tab|Tab)?页?", blob or ""):
+    # 引号里的词只有紧跟 tab / 标签页 才算 Tab；"加一列「较上一交易日变动」"是列名，不是 Tab
+    for m in re.finditer(r"[「\"“]([^」\"”]{2,16})[」\"”]\s*(?:tab页?|标签页?|页签)", blob or "", flags=re.I):
         n = m.group(1).strip()
         if n and n not in tabs and "因子" not in n:
             tabs.append(n)
@@ -168,6 +222,8 @@ def _named_ids(blob: str) -> list[str]:
     out: list[str] = []
     for x in found:
         if x in skip:
+            continue
+        if re.fullmatch(r"[A-Z][a-z]+", x):   # Jerry、Word、Excel 这类人名 / 产品名不是标识符
             continue
         if x not in out:
             out.append(x)
@@ -400,8 +456,8 @@ def _impact(card: Card, rng: random.Random) -> str:
         f'<span class="step{" on" if i < 3 else ""}">{s}</span>{"<span class=arrow>→</span>" if i < 4 else ""}'
         for i, s in enumerate(["抓取来源", "解析结构化", "人工复核", "影响测算", "推送通知"])
     )
-    tags = card.symbols[:4] if card.symbols else ["对象A", "对象B"]
-    tag_html = "".join(f'<span class="tag">{html.escape(s)}</span>' for s in tags)
+    tags = card.symbols[:4] if card.symbols else ["螺纹钢", "铁矿石"]
+    tag_html = "".join(f'<span class="tag">{html.escape(s)}</span>' for s in tags) + ("" if card.symbols else "（示例，按公告解析）")
     notice = (
         f'<div class="card"><b>解析结果</b>（待复核）<br>范围：{tag_html} '
         f'调整：参数示例 8% → 12%　生效：待业务确认</div>'
@@ -413,7 +469,7 @@ def _impact(card: Card, rng: random.Random) -> str:
         headers = ["对象", "规模", "调整前", "调整后", "差额", "风险度", "建议"]
         hi_tag = "需处理"
     rows = []
-    names = list(card.symbols or [])[:4] or (_PRODUCTS[:4] + ["对象 <客户_1>", "对象 <客户_2>"])
+    names = list(card.symbols or [])[:4] or (_PRODUCTS[:4] + ["客户 A（已脱敏）", "客户 B（已脱敏）"])
     for name in names:
         pos = rng.randint(50, 800)
         before = pos * rng.uniform(3, 5) * 10000
@@ -668,6 +724,50 @@ def _demand_snippets(card: Card, demand_text: str = "") -> list[str]:
     return bits
 
 
+_ANCHOR_RE = re.compile(r"(?:放在|放到|挨着|紧跟)([^，,。；;、\s]{2,10}?)的?(?:旁边|后面|右边|之后)")
+_PUT_IN_RE = re.compile(r"放进去|放进来|放上去|加进去|也放|也加|加上|带上")
+_KNOWN_VALUE_RE = re.compile(r"净值|回撤|集中度|杠杆|基差|价差|涨跌|变动|对标|盈亏|超额")
+
+
+def _wanted_columns(card: Card, demand_text: str = "") -> list[tuple[str, str]]:
+    """原话点名要加的列 → [(列名, 锚点列)]。
+    除「加一列X」外，「风险指标也放进去，回撤、集中度那几个」这种句子里的指标词也算；
+    锚点取同一句里的「放在X旁边 / 后面」，没有则为空（加在表尾）。"""
+    from .. import textutil as _tu
+
+    names: list[str] = []
+    out: list[tuple[str, str]] = []
+    for snip in _demand_snippets(card, demand_text):
+        for part in re.split(r"[。；;\n]", snip):
+            am = _ANCHOR_RE.search(part)
+            anchor = am.group(1) if am else ""
+            cols = _tu.find_added_columns(part)
+            if _PUT_IN_RE.search(part):
+                cols += [i for i in _tu.find_indicators(part) if i != anchor]
+            for c in cols:
+                if _tu.merge_label(names, c):
+                    out.append((c, anchor))
+    return out[:8]
+
+
+def _new_cell_value(name: str, cells: list[str], rng: random.Random, bench: str, bench_move: str) -> str:
+    """新列的示意值：认得的业务指标按业务形态造（净值四位小数、回撤百分比…），其余照同行邻格的形态造。"""
+    if _KNOWN_VALUE_RE.search(name):
+        return _fake_cell(name, rng, bench, bench_move)
+    return _fake_like_neighbors(cells, rng)
+
+
+def _insert_after_anchor(order: list[tuple[str, int | None]], name: str, anchor: str) -> None:
+    """order：(表头, 原列下标；None = 新列)。有锚点就插在锚点列（及其后已插的新列）之后，否则放表尾。"""
+    pos = len(order)
+    j = _match_header_index([h for h, _ in order], anchor) if anchor else None
+    if j is not None:
+        pos = j + 1
+        while pos < len(order) and order[pos][1] is None:
+            pos += 1
+    order.insert(pos, (name, None))
+
+
 def _mutate_draft_table(
     html_src: str,
     card: Card,
@@ -679,11 +779,10 @@ def _mutate_draft_table(
     from .. import textutil as _tu
 
     snippets = _demand_snippets(card, demand_text)
-    # 只认原话里「加一列/新增一列…」点名的列；不以标题词、指标词典往表里塞列
-    to_add: list[str] = []
-    for snip in snippets:
-        for col in _tu.find_added_columns(snip):
-            _tu.merge_label(to_add, col)
+    # 只认原话点名的列（「加一列X」，或「…也放进去」那句里的指标词）；不以标题词、指标词典往表里塞列
+    wanted = _wanted_columns(card, demand_text)
+    to_add: list[str] = [c for c, _a in wanted]
+    anchors = {c: a for c, a in wanted if a}
     to_del: list[str] = []
     to_rename: list[tuple[str, str]] = []
     for snip in snippets:
@@ -757,6 +856,11 @@ def _mutate_draft_table(
     if not changes and not add_names and not drop and not to_rename:
         return html_src, []
 
+    order: list[tuple[str, int | None]] = [(h, i) for i, h in enumerate(working)]
+    for name in add_names:
+        _insert_after_anchor(order, name, anchors.get(name, ""))
+    bench = _pick_benchmark(card)
+    bench_move = _pct(rng, -1.2, 1.2)   # 对标指数：同一查询日全表同一涨跌
     row_i = {"n": 0}
 
     def patch_row(row: re.Match[str]) -> str:
@@ -791,11 +895,23 @@ def _mutate_draft_table(
                             )
                         break
 
-        for name in add_names:
-            if is_header:
-                cells.append(f"<th>{html.escape(name)}</th>" if use_th else f"<td><b>{html.escape(name)}</b></td>")
-            else:
-                cells.append(f"<td>{_fake_like_neighbors(cells, rng)}</td>")
+        if add_names and len(cells) == len(working):   # 按锚点插到指定位置；新表头标浅橙色，一眼看出改了哪
+            placed: list[str] = []
+            for name, src in order:
+                if src is not None:
+                    placed.append(cells[src])
+                elif is_header:
+                    placed.append(f'<th style="background:#fff1e0;color:#9a3412">{html.escape(name)}</th>' if use_th
+                                  else f"<td><b>{html.escape(name)}</b></td>")
+                else:
+                    placed.append(f"<td>{_new_cell_value(name, cells, rng, bench, bench_move)}</td>")
+            cells = placed
+        else:
+            for name in add_names:
+                if is_header:
+                    cells.append(f"<th>{html.escape(name)}</th>" if use_th else f"<td><b>{html.escape(name)}</b></td>")
+                else:
+                    cells.append(f"<td>{_new_cell_value(name, cells, rng, bench, bench_move)}</td>")
 
         return "<tr>" + "".join(cells) + "</tr>"
 
@@ -835,7 +951,7 @@ def _hide_client_columns(html_src: str) -> str:
         return html_src
     table = m.group(0)
     headers = [_strip_cell(x) for x in re.findall(r"<th[^>]*>(.*?)</th>", table, flags=re.I | re.S)]
-    drop = {i for i, h in enumerate(headers) if h in _HIDE_CLIENT}
+    drop = {i for i, h in enumerate(headers) if re.sub(r"\s*新增$", "", h) in _HIDE_CLIENT}
     if not drop:
         return html_src
 
@@ -1060,9 +1176,8 @@ def _patch_draft_for_demand(
         col_names.add(col)
     for f in feats:
         target = _extract_add_target(f) or ""
-        if not target and re.search(r"增加|新增|添加|加上|加一个", f or ""):
-            target = re.sub(r"^(请|麻烦|帮忙)?", "", f or "")[:18]
-        if not target:
+        # 抽不出明确对象就不造区块："新发的两只也加上"整句当模块名，只会多出一张空的确认卡
+        if not target or re.match(r"[\d一二两三四五六七八九十几]+\s*(只|个|条|家|款|项|行|位)", target):
             continue
         if target in col_names or any(c and (c in target or target in c) for c in col_names):
             continue
@@ -1371,6 +1486,7 @@ def apply_prototype_view(html_src: str, mobile: bool = False, client_view: bool 
     page = html_src or ""
     if client_view:
         page = _hide_client_columns(page)
+        page = page.replace('<div class="n">内部版</div>', '<div class="n">客户版 · 已脱敏</div>')
     return _finish_view(page, mobile=mobile)
 
 

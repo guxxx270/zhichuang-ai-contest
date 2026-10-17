@@ -203,8 +203,9 @@ def render_ledger(ledger: Ledger, memory: Memory, audit: Audit, *, req_id: int =
         k3.metric("平均澄清轮次", f"{dash['avg_rounds']}", help="开工一轮 + 每次按业务答复重算算一轮；人工通常三四轮")
         k4.metric("AI 协同省时", f"{dash['saved_days']} 人天", delta=f"-{dash['saving_pct']}%", delta_color="inverse",
                   help=f"传统估 {dash['trad_days']} → AI 协同估 {dash['ai_days']}")
-        k5.metric("估算偏差", "—" if dash["mape_trad"] is None else f"{dash['mape_trad']}%",
-                  help=("已对账 " + str(dash["closed"]) + " 条；平均绝对偏差（估 vs 实际）" + (f"，AI 轨 {dash['mape_ai']}%" if dash["mape_ai"] is not None else ""))
+        k5.metric("估算偏差", "—" if dash["mape"] is None else f"{dash['mape']}%",
+                  help=("已对账 " + str(dash["closed"]) + " 条；平均绝对偏差（估 vs 实际；用了 AI 协同的比 AI 轨估算）"
+                        + "".join(f"，{n} {v}%" for n, v in (("传统轨", dash["mape_trad"]), ("AI 轨", dash["mape_ai"])) if v is not None))
                   if dash["closed"] else "还没有对账记录：交付后在上方回写实际人天")
         k6.metric("出稿用时", ("<1 s" if dash["avg_seconds"] < 1 else f"{dash['avg_seconds']} s"), help=f"规则引擎毫秒级，模型润色另计；👍 {dash['thumbs_up']} / 👎 {dash['thumbs_down']}")
         g1, g2, g3 = st.columns(3)
@@ -782,7 +783,7 @@ st.markdown(f"""
 k = st.columns(4)
 for col, n, l in ((k[0], f"{stats['count']} 份", "已分析需求"), (k[1], f"{len(knowledge.probes())} 条", "期货追问知识库"),
                   (k[2], f"{len(knowledge.history())} 条 / {len(knowledge.systems())} 个 / {knowledge.data_domains()} 域", "历史需求库 / 系统目录 / 数据域"),
-                  (k[3], f"{dash0['saved_days']} 人天" + (f" · 偏差 {dash0['mape_trad']}%" if dash0.get("mape_trad") is not None else ""), "AI 协同累计省时（估）· 已对账估算偏差")):
+                  (k[3], f"{dash0['saved_days']} 人天" + (f" · 偏差 {dash0['mape']}%" if dash0.get("mape") is not None else ""), "AI 协同累计省时（估）· 已对账估算偏差")):
     col.markdown(f'<div class="xz-kpi"><div class="n">{n}</div><div class="l">{l}</div></div>', unsafe_allow_html=True)
 st.write("")
 

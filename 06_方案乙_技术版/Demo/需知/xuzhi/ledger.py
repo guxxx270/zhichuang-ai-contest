@@ -167,7 +167,7 @@ class Ledger:
         if not n:
             out.update({"avg_questions": 0.0, "answer_rate": 0.0, "avg_rounds": 0.0, "avg_seconds": 0.0, "high_open_rate": 0.0,
                         "trad_days": 0.0, "ai_days": 0.0, "saved_days": 0.0, "saving_pct": 0.0,
-                        "closed": 0, "mape_trad": None, "mape_ai": None, "bias_trad": None, "thumbs_up": 0, "thumbs_down": 0, "depts": 0})
+                        "closed": 0, "mape": None, "mape_trad": None, "mape_ai": None, "bias_trad": None, "thumbs_up": 0, "thumbs_down": 0, "depts": 0})
             return out
         for dept, k in c.execute("SELECT COALESCE(NULLIF(dept,''),'未注明'), COUNT(*) FROM requirements GROUP BY 1 ORDER BY 2 DESC"):
             out["by_dept"][dept] = k
@@ -194,14 +194,17 @@ class Ledger:
         closed = c.execute("SELECT mid_days, ai_days, actual_days, ai_assisted FROM requirements WHERE actual_days IS NOT NULL AND actual_days>0").fetchall()
         out["closed"] = len(closed)
         if closed:
-            errs_t = [abs(m - a) / a for m, _, a, _ in closed if m]
+            # 用了 AI 协同的比 AI 轨估算，没用的比传统轨：拿 AI 做完的实际人天去比传统估算，偏差会被夸大
+            errs_t = [abs(m - a) / a for m, _, a, used in closed if m and not used]
             errs_a = [abs(ai - a) / a for _, ai, a, used in closed if used and ai]
-            bias = [(m - a) / a for m, _, a, _ in closed if m]
+            bias = [(m - a) / a for m, _, a, used in closed if m and not used]
+            both = errs_t + errs_a
+            out["mape"] = round(100 * sum(both) / len(both)) if both else None
             out["mape_trad"] = round(100 * sum(errs_t) / len(errs_t)) if errs_t else None
             out["mape_ai"] = round(100 * sum(errs_a) / len(errs_a)) if errs_a else None
             out["bias_trad"] = round(100 * sum(bias) / len(bias)) if bias else None
         else:
-            out["mape_trad"] = out["mape_ai"] = out["bias_trad"] = None
+            out["mape"] = out["mape_trad"] = out["mape_ai"] = out["bias_trad"] = None
         up, down = c.execute("SELECT SUM(CASE WHEN score>0 THEN 1 ELSE 0 END), SUM(CASE WHEN score<0 THEN 1 ELSE 0 END) FROM feedback").fetchone()
         out["thumbs_up"], out["thumbs_down"] = int(up or 0), int(down or 0)
         return out

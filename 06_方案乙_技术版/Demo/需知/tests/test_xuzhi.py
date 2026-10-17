@@ -84,8 +84,11 @@ def test_added_column_in_prototype():
     a = analyze("净值日报能不能加一列对标指数，就放在单位净值旁边，盘后给投研看。", llm=LLM(mode="mock"))
     html = a.prototype_html
     assert "对标指数" in a.card.indicators
-    assert html.count("<th>对标指数</th>") == 1
-    assert "<th>净值</th>" not in html
+    import re
+    assert len(re.findall(r"<th[^>]*>对标指数", html)) == 1
+    assert ">净值</th>" not in html and ">净值 <span" not in html
+    # 「放在单位净值旁边」：新列紧跟单位净值，表头标新增
+    assert re.search(r">单位净值</th>\s*<th[^>]*>对标指数 <span class=\"tag md\">新增</span>", html)
 
 
 def test_indicator_case_variants_deduped():
@@ -144,3 +147,28 @@ def test_polish_guard():
     assert _polish_ok(orig, orig.replace("text", "润色后的文字"))
     assert not _polish_ok(orig, "# T\n\n## 1. a\n")                     # 丢章节
     assert not _polish_ok(orig, orig.replace("◻︎默认 ", ""))               # 丢标记
+
+
+def test_demo_samples_prototype_quality():
+    """演示样例的出样不能退化：样例 ① 出真表格且新列紧跟单位净值；引号里的列名不当 Tab；人名不当标识；
+    用示例底稿时不凭一句话造空卡片；客户版隐去集中度。"""
+    import re
+
+    from xuzhi import config
+    from xuzhi.drafts import parse_draft
+    from xuzhi.llm import LLM
+    from xuzhi.pipeline.prototype import apply_prototype_view
+
+    s1 = next(config.SAMPLES_DIR.glob("01_*.md")).read_text(encoding="utf-8")
+    page = analyze(s1, llm=LLM(mode="mock")).prototype_html
+    assert "稳健一号" in page and "data-xz-tab" not in page and 'class="tab' not in page
+    heads = [re.sub(r"<[^>]+>|新增", "", h).strip() for h in re.findall(r"<th[^>]*>(.*?)</th>", page)]
+    assert heads[:3] == ["产品", "单位净值", "较上一交易日变动"] and "集中度" in heads
+    client = apply_prototype_view(page, client_view=True)
+    assert ">集中度" not in client and "客户版 · 已脱敏" in client
+    s2 = next(config.SAMPLES_DIR.glob("02_*.md")).read_text(encoding="utf-8")
+    assert "Jerry" not in analyze(s2, llm=LLM(mode="mock")).prototype_html
+    dp = next((config.ROOT / "data" / "drafts").glob("*.html"))
+    drafted = analyze(s1, llm=LLM(mode="mock"), drafts=[parse_draft(dp.name, dp.read_text(encoding="utf-8"))]).prototype_html
+    assert "xz-demand-patch-tabs" not in drafted and "确认</button>" not in drafted
+    assert re.search(r">单位净值</th>\s*<th[^>]*>较上一交易日变动</th>", drafted) and ">集中度</th>" in drafted

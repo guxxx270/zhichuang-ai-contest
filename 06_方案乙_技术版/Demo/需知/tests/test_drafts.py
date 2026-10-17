@@ -356,10 +356,10 @@ def test_upload_draft_adds_column_into_original_table():
     text = "在已有表里新增一列金额"
     card = extract_card(text)
     html = render_source(card, drafts=[draft], demand_text=text)
-    assert "<th>金额</th>" in html
-    # 表头行应同时含原列与新列
-    assert re.search(r"<tr>\s*<th>姓名</th>\s*<th>部门</th>\s*<th>金额</th>", html, re.I | re.S)
-    assert "xz-demand-section" not in html or html.index("<th>金额</th>") < html.find("xz-demand-section")
+    assert re.search(r"<th[^>]*>金额</th>", html)
+    # 表头行应同时含原列与新列（新列表头带高亮样式）
+    assert re.search(r"<tr>\s*<th>姓名</th>\s*<th>部门</th>\s*<th[^>]*>金额</th>", html, re.I | re.S)
+    assert "xz-demand-section" not in html or html.index(">金额</th>") < html.find("xz-demand-section")
 
 
 def test_upload_draft_adds_column_when_header_is_td():
@@ -396,10 +396,10 @@ def test_add_one_column_does_not_invent_extra_columns():
     )
     text = "员工花名册加一列职级"
     html = render_source(extract_card(text), drafts=[draft], demand_text=text)
-    assert html.count("<th>职级</th>") == 1
-    assert "<th>员工</th>" not in html
-    assert "<th>花名册</th>" not in html
-    assert html.count("<th>") == 3
+    assert len(re.findall(r"<th[^>]*>职级</th>", html)) == 1
+    assert ">员工</th>" not in html
+    assert ">花名册</th>" not in html
+    assert len(re.findall(r"<th\b", html)) == 3
 
 
 def test_upload_draft_deletes_and_renames_columns_in_table():
