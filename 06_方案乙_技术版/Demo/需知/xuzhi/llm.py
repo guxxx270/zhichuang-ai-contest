@@ -17,6 +17,21 @@ from urllib.request import Request, urlopen
 
 from . import config, sandbox
 
+GATEWAY_COOLDOWN = 120   # 网关超时 / 连不上之后，这么多秒内的调用直接走规则引擎
+
+
+def _gateway_down(e: BaseException | None) -> bool:
+    """超时、连不上（含 openai 的 APITimeoutError / APIConnectionError）；HTTP 4xx/5xx 不算。"""
+    if e is None or isinstance(e, HTTPError):
+        return False
+    if isinstance(e, (TimeoutError, ConnectionError, URLError)):
+        return True
+    try:
+        from openai import APIConnectionError   # APITimeoutError 是它的子类
+    except ImportError:
+        return False
+    return isinstance(e, APIConnectionError)
+
 
 def list_openai_models(api_base: str, api_key: str) -> tuple[list[tuple[str, str]], str]:
     """实时拉取 OpenAI 兼容网关 GET /models（硅基流动等），不用本地写死列表。"""
@@ -81,9 +96,14 @@ class LLM:
         self.channel = channel        # Web / 企微 / API / MCP
         self.req_id = 0
         self.current_purpose = ""     # 调用方在 chat 前设置（问清润色 / 写单润色 / 出样改稿）
+        self._down_until = 0.0        # 网关超时 / 连不上后的冷却截止时刻
+        if mode is None:              # 没指定就看 .env / 环境变量：LLM_MODE=mock 强制只走规则引擎
+            mode = "auto"
+            if config.LLM_MODE == "mock":
+                mode, self.note = "mock", "LLM_MODE=mock，强制只走规则引擎"
         if mode in ("api", "mock"):
             self.mode = mode
-        elif mode == "auto" or mode is None:
+        elif mode == "auto":
             if self.backend == "qoder-cloud":
                 self.mode = "api" if (self.api_key and self.api_base) else "mock"
             else:
@@ -107,20 +127,27 @@ class LLM:
             return
         if self.mode == "api":
             try:
-                from openai import OpenAI  # 延迟导入，mock 模式不需要
-                self._client = OpenAI(base_url=self.api_base, api_key=self.api_key, timeout=120, max_retries=1)
+                from openai import OpenAI, Timeout  # 延迟导入，mock 模式不需要
+                # 不自动重试：超时再重试只会让页面多卡一轮；失败的这一步直接用规则结果
+                self._client = OpenAI(base_url=self.api_base, api_key=self.api_key,
+                                      timeout=Timeout(config.LLM_TIMEOUT, connect=10.0), max_retries=0)
             except ImportError:
                 self.mode, self.note = "mock", "未安装 openai，已退回 mock（pip install openai 后恢复）"
 
     def chat(self, system: str, user: str, temperature: float = 0.1, json_mode: bool = False, purpose: str = "") -> str:
         if self.mode == "mock":
             return ""
+        if time.time() < self._down_until:   # 网关刚超时 / 连不上：本次其余步骤不再一步步等超时
+            raise RuntimeError(self.note)
         purpose = purpose or self.current_purpose
         t0 = time.time()
         try:
             text = self._chat_raw(system, user, temperature, json_mode, purpose)
         except Exception as e:
             self._audit(purpose, system, user, "", t0, ok=False, error=f"{type(e).__name__}: {e}")
+            if _gateway_down(e) or _gateway_down(e.__cause__):
+                self._down_until = time.time() + GATEWAY_COOLDOWN
+                self.note = f"模型网关超时或连不上，{GATEWAY_COOLDOWN} 秒内其余步骤直接走规则引擎"
             raise
         self._audit(purpose, system, user, text, t0, ok=True)
         return text
@@ -166,8 +193,8 @@ class LLM:
             kwargs["response_format"] = {"type": "json_object"}
         try:
             resp = self._client.chat.completions.create(**kwargs)
-        except Exception as e:  # 网关不支持 json_object 时退回普通模式
-            if json_mode:
+        except Exception as e:  # 网关不支持 json_object 时退回普通模式；超时 / 连不上就别再白等一轮
+            if json_mode and not _gateway_down(e):
                 kwargs.pop("response_format", None)
                 resp = self._client.chat.completions.create(**kwargs)
             else:

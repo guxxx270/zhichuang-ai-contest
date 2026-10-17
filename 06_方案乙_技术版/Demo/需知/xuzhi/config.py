@@ -19,6 +19,10 @@ LLM_API_BASE = os.getenv("LLM_API_BASE", "").strip()
 LLM_API_KEY = os.getenv("LLM_API_KEY", "").strip()
 LLM_MODEL = os.getenv("LLM_MODEL", "").strip()
 LLM_MODE = os.getenv("LLM_MODE", "").strip().lower()   # auto / api / mock
+try:
+    LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "").strip() or 90)   # 单次模型调用上限（秒）；连接 10 秒连不上即放弃
+except ValueError:
+    LLM_TIMEOUT = 90.0
 
 # 页面预设：(显示名, mode, provider_id, api_base, model_id)
 # model_id 为空：填 Key 后实时 GET /models；为 "__custom__" 时手填模型名。

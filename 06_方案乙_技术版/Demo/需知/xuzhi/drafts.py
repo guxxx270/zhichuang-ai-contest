@@ -556,27 +556,63 @@ def _is_private_host(host: str) -> bool:
     if not h or h in ("localhost", "localhost.localdomain") or h.endswith(".local") or h.endswith(".localhost"):
         return True
     candidates: list[str] = []
+    resolved = False
     try:
         ipaddress.ip_address(h)
         candidates.append(h)
     except ValueError:
         try:
             candidates = sorted({ai[4][0] for ai in socket.getaddrinfo(h, None)})
+            resolved = True
         except (socket.gaierror, OSError):
             return False   # 解析不了就交给 git 报错，不在此处误判
+    fake_net = ipaddress.ip_network(_FAKE_IP_NET)
     for ip in candidates:
         try:
             addr = ipaddress.ip_address(ip.split("%")[0])
         except ValueError:
             return True
+        if resolved and addr in fake_net and _fake_ip_trusted(h):
+            continue
         if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved or addr.is_multicast or addr.is_unspecified:
             return True
     return False
 
 
+# 本机代理（Clash / Surge / sing-box 等）的 fake-ip 模式把所有域名都解析到这个网段，真实去向由代理决定、本机看不到。
+_FAKE_IP_NET = "198.18.0.0/15"
+
+
+def _fake_ip_trusted(host: str) -> bool:
+    """fake-ip 下只放行 sandbox.yaml repo_fetch.fake_ip_trusted_hosts 里的公网代码托管域名（含子域）。"""
+    from . import sandbox
+
+    trusted = [str(t).strip().lower().lstrip(".") for t in (sandbox.get("repo_fetch.fake_ip_trusted_hosts") or [])]
+    return any(t and (host == t or host.endswith("." + t)) for t in trusted)
+
+
+def _resolves_to_fake_ip(host: str) -> bool:
+    """域名解析出来的地址全落在 fake-ip 网段：本机开着代理的 fake-ip 模式。直接写 IP 的不算。"""
+    import ipaddress
+    import socket
+
+    h = (host or "").strip().lower().strip("[]")
+    try:
+        ipaddress.ip_address(h)
+        return False
+    except ValueError:
+        pass
+    try:
+        ips = {ai[4][0] for ai in socket.getaddrinfo(h, None)}
+        net = ipaddress.ip_network(_FAKE_IP_NET)
+        return bool(ips) and all(ipaddress.ip_address(ip.split("%")[0]) in net for ip in ips)
+    except (socket.gaierror, OSError, ValueError):
+        return False
+
+
 def check_clone_url(clone_url: str) -> str:
     """仓库地址白名单：只放行 http(s)，拒绝 file:// ssh:// git@ 与内网地址。返回不通过的原因，空串为通过。
-    允许的协议与"是否拒内网"来自 sandbox.yaml（repo_fetch）。"""
+    允许的协议、"是否拒内网"与 fake-ip 下放行的域名来自 sandbox.yaml（repo_fetch）。"""
     from . import sandbox
 
     parsed = urlparse(clone_url)
@@ -585,7 +621,11 @@ def check_clone_url(clone_url: str) -> str:
         return f"仓库地址只支持 {' / '.join(s + '://' for s in allowed)}（不支持 file://、ssh、git@）"
     if parsed.username or parsed.password:
         return "仓库地址里不要带用户名 / 密码，Token 请填在右侧输入框"
-    if sandbox.get("repo_fetch.deny_private_networks", True) and _is_private_host(parsed.hostname or ""):
+    host = parsed.hostname or ""
+    if sandbox.get("repo_fetch.deny_private_networks", True) and _is_private_host(host):
+        if _resolves_to_fake_ip(host):
+            return ("本机代理开着 fake-ip 模式，看不到这个域名的真实去向，需知不拉取；公网代码托管请加进 sandbox.yaml "
+                    "repo_fetch.fake_ip_trusted_hosts，或在代理里把它设为直连")
         return "仓库地址指向本机 / 内网地址，需知不拉取内网资源"
     return ""
 

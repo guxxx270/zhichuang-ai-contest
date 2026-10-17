@@ -97,6 +97,57 @@ def test_mock_mode_not_audited(tmp_path):
     assert audit.stats()["calls"] == 0
 
 
+def test_llm_mode_from_env(monkeypatch):
+    from xuzhi import config
+
+    kw = dict(model="m", api_base="https://gw.example/v1", api_key="k", audit=False)
+    monkeypatch.setattr(config, "LLM_MODE", "mock")
+    assert LLM(**kw).mode == "mock"                  # .env 里 LLM_MODE=mock：有 Key 也只走规则引擎
+    assert LLM(mode="api", **kw).mode == "api"       # 页面显式选的模式不受影响
+    monkeypatch.setattr(config, "LLM_MODE", "auto")
+    assert LLM(**kw).mode == "api"
+
+
+def _timeout_client() -> _FakeClient:
+    client = _FakeClient()
+
+    def create(**kw):
+        client.calls.append(kw)
+        raise TimeoutError("read timed out")
+
+    client.chat.completions.create = create
+    return client
+
+
+def test_gateway_timeout_trips_breaker(tmp_path):
+    audit = Audit(tmp_path / "a.sqlite3")
+    llm = _llm(audit, _timeout_client())
+    with pytest.raises(RuntimeError, match="read timed out"):
+        llm.chat_json("s", "u", purpose="问清润色")
+    assert len(llm._client.calls) == 1               # 超时不再去掉 json_object 重发一轮
+    with pytest.raises(RuntimeError, match="规则引擎"):
+        llm.chat("s", "u", purpose="写单润色")
+    assert len(llm._client.calls) == 1               # 冷却期内后续步骤不再等超时
+    assert audit.stats()["calls"] == 1               # 跳过的不算调用，不进审计
+    # 普通报错（502 等）不进冷却
+    bad = _llm(audit, _FakeClient(fail=True))
+    for _ in range(2):
+        with pytest.raises(RuntimeError):
+            bad.chat("s", "u")
+    assert len(bad._client.calls) == 2
+
+
+def test_analyze_survives_gateway_timeout(tmp_path):
+    from xuzhi import config
+    from xuzhi.pipeline import analyze
+
+    llm = _llm(Audit(tmp_path / "a.sqlite3"), _timeout_client())
+    text = next(config.SAMPLES_DIR.glob("01_*.md")).read_text(encoding="utf-8")
+    a = analyze(text, llm=llm)
+    assert len(llm._client.calls) == 1               # 问清润色超时后，写单 / 出样不再各等一轮
+    assert a.questions and a.spec.business_md and a.estimate.mid > 0 and a.prototype_html
+
+
 def test_scheme_policy_falls_back_to_rules():
     llm = LLM(mode="api", model="m", api_base="ftp://evil.example/v1", api_key="k", audit=False)
     assert llm.mode == "mock" and "沙箱策略" in llm.note
@@ -123,3 +174,8 @@ def test_policy_override_changes_behaviour(monkeypatch):
     assert is_secret_path("a/b.xyz")
     monkeypatch.setitem(sandbox.policy()["repo_fetch"], "allowed_schemes", ["https"])
     assert "只支持" in check_clone_url("http://github.com/acme/demo.git")
+    import socket
+
+    monkeypatch.setattr(socket, "getaddrinfo", lambda host, port: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("198.18.0.31", 0))])
+    monkeypatch.setitem(sandbox.policy()["repo_fetch"], "fake_ip_trusted_hosts", [])
+    assert "fake-ip" in check_clone_url("https://github.com/acme/demo.git")

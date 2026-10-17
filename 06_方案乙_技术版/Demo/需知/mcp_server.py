@@ -18,7 +18,10 @@ import json
 import os
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+try:
+    from mcp.server.fastmcp import FastMCP
+except ModuleNotFoundError as e:   # 没装 mcp，或装成了 2.x（FastMCP 已改名、接口也变了）
+    raise SystemExit("需知 MCP 服务需要 mcp 1.x：pip install -r requirements-api.txt（已锁 mcp<2）") from e
 
 from xuzhi import config, sandbox, service
 from xuzhi.ledger import Ledger

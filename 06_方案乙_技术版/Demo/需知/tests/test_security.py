@@ -44,6 +44,19 @@ def test_clone_url_whitelist(monkeypatch):
         assert check_clone_url(bad), bad
 
 
+def test_clone_url_under_proxy_fake_ip(monkeypatch):
+    """本机代理 fake-ip 模式：域名都解析成 198.18.x.x。公网代码托管放行，其余域名照拒，直接写 IP 的也照拒。"""
+    import socket
+
+    monkeypatch.setattr(socket, "getaddrinfo", lambda host, port: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("198.18.0.31", 0))])
+    assert check_clone_url("https://github.com/acme/demo.git") == ""
+    assert check_clone_url("https://gitee.com/acme/demo.git") == ""
+    assert check_clone_url("https://api.github.com/repos/acme/demo") == ""
+    assert "fake-ip" in check_clone_url("https://git.corp.example.com/acme/demo.git")
+    assert "fake-ip" in check_clone_url("https://evilgithub.com/acme/demo.git")
+    assert "内网" in check_clone_url("http://198.18.0.31/repo.git")
+
+
 @pytest.mark.parametrize("host, username, auth_user", [
     ("github.com", "wrong-user", "x-access-token"),
     ("gitee.com", "alice", "alice"),

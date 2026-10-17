@@ -21,6 +21,7 @@ repo_fetch:                            # 出样 / 定架读取代码仓库
   deny_private_networks: true          # 本机、内网、链路本地地址一律拒绝（不当内网探针）
   shallow_clone: true                  # 只浅克隆，只抽前后端源码摘要
   token_via_env_only: true             # Token 走环境变量传给 git，不进命令行、不进 .git/config、不进错误信息
+  fake_ip_trusted_hosts: [github.com, gitee.com, gitlab.com, codeup.aliyun.com]   # 本机代理 fake-ip 模式会把域名都解析成 198.18.x.x、看不到真实去向；这时只放行这几个公网代码托管（含子域），其余照拒
 
 files:                                 # 本机文件读取
   deny_read_globs:                     # 凭据类文件不读、不进模型、不进代码包（与 drafts.is_secret_path 的正则叠加）
