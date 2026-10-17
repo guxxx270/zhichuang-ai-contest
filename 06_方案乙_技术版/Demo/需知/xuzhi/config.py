@@ -34,7 +34,7 @@ LLM_PRESETS: list[tuple[str, str, str, str, str]] = [
     ("Fable", "api", "fable", os.getenv("FABLE_API_BASE", "").strip(), ""),
     ("Qoder Cloud Agents · 国内", "api", "qoder-cloud", "https://api.qoder.com.cn", "ultimate"),
     ("Qoder Cloud Agents · 国际", "api", "qoder-cloud-intl", "https://api.qoder.com", "ultimate"),
-    ("自定义 OpenAI 兼容网关", "api", "custom", "", "__custom__"),
+    ("自定义网关（如公司 AI 平台）", "api", "custom", "", "__custom__"),
 ]
 
 # 走 OpenAI 兼容 GET /models 实时目录的 provider（不含 Qoder Cloud Agents）

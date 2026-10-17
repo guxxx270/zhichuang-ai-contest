@@ -140,6 +140,7 @@ div[data-testid="stTabs"] [role="tab"][aria-selected="true"] p { color:#9BE7F7; 
 [data-testid="stMetric"] { background:var(--xz-panel); border:1px solid var(--xz-line); border-radius:12px; padding:10px 14px; }
 [data-testid="stMetricValue"] { color:#9BE7F7; }
 iframe[title="xuzhi_dictation"] { border: none !important; }
+[data-testid="stHeaderActionElements"] { display: none; }   /* 标题旁的锚点链接图标，演示用不上 */
 </style>""", unsafe_allow_html=True)
 
 
@@ -198,7 +199,7 @@ def render_ledger(ledger: Ledger, memory: Memory, audit: Audit, *, req_id: int =
     """一本账：按编号补任意历史需求的实际人天。刚开工的那条默认选中。"""
     catalog = list(reversed(ledger.export_rows()))
     st.markdown("#### 对账")
-    st.caption("从台账里选一条需求，回写交付后的实际人天。状态在下面的表格里改。刚开工的那条会默认选中；不必先点开工。")
+    st.caption("选一条需求，回写交付后的实际人天；刚开工的那条已默认选中。")
     if not catalog:
         st.info("台账里还没有需求。开工之后会出现在这里，可以直接补实际人天。")
     else:
@@ -327,7 +328,7 @@ def render_ledger(ledger: Ledger, memory: Memory, audit: Audit, *, req_id: int =
             st.info("还没有记忆：在「问清」里填业务答复并重算，口径就会被记住。")
 
     st.markdown("#### 台账明细")
-    st.caption("放不下时可以左右滑动。状态只在这里改：下拉选好，改多行后点「保存状态」。对账写上实际人天后，这一列会变成「已对账」。备注、AI 参与度是当时填的；没存过参与度的行是空的。改成「已对账」时，这一行须已有实际人天，否则请用上方对账。")
+    st.caption("表格可左右滑动；在「状态」列改好后点「保存状态」。改成「已对账」前，先在上方回写实际人天。")
     _skipped = st.session_state.pop("ledger_status_skipped", None)
     if _skipped:
         st.warning("这些编号改成「已对账」但没有实际人天，未保存：" + "、".join(f"#{i}" for i in _skipped) + "。请用上方对账表单填写。")
@@ -498,7 +499,7 @@ def _render_model_preset() -> tuple[str, str, str, str, str]:
             None,
         )
         st.session_state.model_preset = env_pick or labels[0]
-    preset_label = st.selectbox("选用模型", labels, key="model_preset")
+    preset_label = st.selectbox("模型来源", labels, key="model_preset")
     return next(p for p in api_presets if p[0] == preset_label)
 
 
@@ -586,9 +587,9 @@ def _render_live_model_pick(
 
 
 def _render_model_secrets(
-    mode_sel: str, provider_id: str, api_base_sel: str, model_sel: str
+    mode_sel: str, provider_id: str, api_base_sel: str, model_sel: str, key_slot=None,
 ) -> tuple[str, str, str, str, dict[str, str]]:
-    """Key / 自定义网关 / Qoder。须放在 form 外，填 PAT 才能立刻拉模型目录。"""
+    """Key / 自定义网关 / Qoder。须放在 form 外，填 PAT 才能立刻拉模型目录。key_slot：Key 输入框放哪（默认当前位置）。"""
     extra: dict[str, str] = {}
     backend_sel = "openai"
     api_key_sel = ""
@@ -598,13 +599,14 @@ def _render_model_secrets(
     key_state = f"api_key_input_{provider_id}"
     if key_state not in st.session_state and config.LLM_API_KEY and api_base_sel and api_base_sel == config.LLM_API_BASE:
         st.session_state[key_state] = config.LLM_API_KEY
-    api_key_sel = st.text_input(
-        f"API Key（{provider_id}）",
-        type="password",
-        key=f"api_key_input_{provider_id}",
-        placeholder="Qoder 请填 PAT（pt-…）；其它网关填 sk-…",
-        help="不会写入仓库。填 Key 后会向网关 GET /models 拉取当前可用模型，不使用本地写死列表。",
-    ).strip()
+    with (key_slot or st.container()):
+        api_key_sel = st.text_input(
+            "API Key",
+            type="password",
+            key=f"api_key_input_{provider_id}",
+            placeholder="PAT（pt-…）" if provider_id.startswith("qoder") else "sk-…（不填 = 规则引擎）",
+            help="只在本次会话内使用，不写入仓库。填了会实时拉取网关当前可用的模型。",
+        ).strip()
     st.session_state.api_keys[provider_id] = api_key_sel
 
     live_compat = getattr(config, "LIVE_OPENAI_PROVIDERS", {}) or {}
@@ -649,10 +651,9 @@ def _render_model_secrets(
                 help="须含 /v1；填 Key 后请求 GET /models。可用环境变量 FABLE_API_BASE 作默认。",
             ).strip()
         else:
-            st.caption(f"网关：`{api_base_sel}`　·　模型列表来自实时 GET /models")
+            st.caption(f":material/lan: 网关 `{api_base_sel}`")
 
         if not api_key_sel:
-            st.info(f"填写 API Key 后将实时拉取{provider_label}当前可用模型（不使用本地写死名单）。")
             model_sel = ""
         elif not (api_base_sel or "").strip():
             st.warning("请先填写 API Base URL。")
@@ -678,7 +679,6 @@ def _render_model_secrets(
         )
 
         if not api_key_sel:
-            st.info("填写 PAT 后将实时拉取账号模型目录（不使用本地兜底列表）。")
             model_sel = ""
         else:
             model_sel = _render_live_model_pick(
@@ -784,62 +784,27 @@ def _read_draft_link_entries() -> list[dict]:
 
 
 def _render_draft_link_rows() -> None:
+    """Git 仓库行：地址 / 分支 / Token / 用户名，各只留一个短标签；多于一行才出删除键。"""
     rows = _ensure_draft_link_rows()
-    st.caption(
-        "只填 Git 仓库 http(s) 地址。Token / 分支填在本行旁（不是上方模型 Key）。"
-        "分支可不填：不填则拉该仓**默认分支**（GitLab/GitHub 上设置的 default，常见 main / master）。"
-    )
     for idx, row in enumerate(list(rows)):
         rid = row["id"]
-        c1, c2, c3, c4, c5 = st.columns([2.8, 1.6, 1.3, 1.3, 0.5])
-        with c1:
-            st.text_input(
-                f"Git 仓库 {idx + 1}",
-                key=f"draft_link_url_{rid}",
-                placeholder="https://主机/组/仓.git（不支持本机 / 内网地址）",
-                label_visibility="collapsed" if idx else "visible",
-            )
-        with c2:
-            st.text_input(
-                "Token（可选）",
-                type="password",
-                key=f"draft_link_tok_{rid}",
-                placeholder="私有仓 Token",
-                label_visibility="collapsed" if idx else "visible",
-                help="仅本条仓库使用；不填则匿名拉取。",
-            )
-        with c3:
-            st.text_input(
-                "分支（可选）",
-                key=f"draft_link_branch_{rid}",
-                placeholder="默认分支",
-                label_visibility="collapsed" if idx else "visible",
-                help="不填则拉取仓库默认分支；也可在 URL 里写 /-/tree/分支名。",
-            )
-        with c4:
-            st.text_input(
-                "用户名（可选）",
-                key=f"draft_link_user_{rid}",
-                placeholder="多数可空",
-                label_visibility="collapsed" if idx else "visible",
-                help="GitHub 可空（只用 Token）；Gitee 填登录用户名。",
-            )
-        with c5:
-            label = "删" if len(rows) > 1 else " "
-            if st.button(label, key=f"draft_link_del_{rid}", disabled=len(rows) <= 1):
-                st.session_state.draft_link_rows = [r for r in rows if r["id"] != rid]
-                for suffix in ("url", "tok", "user", "branch"):
-                    st.session_state.pop(f"draft_link_{suffix}_{rid}", None)
-                st.rerun()
-    b1, b2 = st.columns([1, 4])
-    with b1:
-        if st.button("＋添加仓库", key="draft_link_add"):
-            nid = int(st.session_state.get("draft_link_next_id", len(rows)))
-            st.session_state.draft_link_rows = list(rows) + [{"id": nid}]
-            st.session_state.draft_link_next_id = nid + 1
+        vis = "collapsed" if idx else "visible"
+        c1, c2, c3, c4, c5 = st.columns([3.2, 1.3, 1.5, 1.3, 0.45], vertical_alignment="bottom")
+        c1.text_input("仓库地址", key=f"draft_link_url_{rid}", placeholder="https://github.com/组/仓库", label_visibility=vis)
+        c2.text_input("分支", key=f"draft_link_branch_{rid}", placeholder="默认分支", label_visibility=vis)
+        c3.text_input("Token", type="password", key=f"draft_link_tok_{rid}", placeholder="私有仓才填", label_visibility=vis)
+        c4.text_input("用户名", key=f"draft_link_user_{rid}", placeholder="Gitee 才填", label_visibility=vis)
+        if len(rows) > 1 and c5.button(":material/close:", key=f"draft_link_del_{rid}", help="删掉这一行", type="tertiary"):
+            st.session_state.draft_link_rows = [r for r in rows if r["id"] != rid]
+            for suffix in ("url", "tok", "user", "branch"):
+                st.session_state.pop(f"draft_link_{suffix}_{rid}", None)
             st.rerun()
-    with b2:
-        st.caption("网页请左侧上传 HTML；Token 仅会话内使用。")
+    if st.button("再加一个仓库", key="draft_link_add", icon=":material/add:", type="tertiary"):
+        nid = int(st.session_state.get("draft_link_next_id", len(rows)))
+        st.session_state.draft_link_rows = list(rows) + [{"id": nid}]
+        st.session_state.draft_link_next_id = nid + 1
+        st.rerun()
+    st.caption("只拉 http(s) 公网或公司代码托管地址，不拉本机 / 内网；Token 只在本次会话使用。")
 
 ledger = get_ledger()
 memory = get_memory()
@@ -868,41 +833,38 @@ st.markdown('<div class="xz-sec"><span class="no">01</span><span class="t">收�
 # 摆放：样例 / 口述 / 原话 / 开工在上，一屏看全；选模型、填 Key、底稿与仓库收进下方折叠栏（投屏时 Key 输入框也不露出）。
 # 代码顺序仍是先模型与材料、后输入区：开工处理要用到前者的取值。
 intake_area = st.container()
-settings_area = st.expander("模型与材料（可选）— 选用模型、填 API Key；上传页面底稿 / 填 Git 仓库", icon=":material/tune:", expanded=False)
+settings_area = st.expander("模型与参考材料（可选）", icon=":material/tune:", expanded=False)
 
+MAT_OPTIONS = ["不用", "示例底稿", "上传网页", "Git 仓库"]
+draft_uploads, use_sample_draft, git_ssl_no_verify = None, False, False
 with settings_area:
-    model_box = st.container(border=True)
-    with model_box:
-        st.markdown("**选用模型**")
-        preset_label, mode_sel, provider_id, api_base_sel, model_sel = _render_model_preset()
-        st.caption("开工调用所选模型。未填 API Key 时自动用规则引擎出初稿，可稍后在「问清」补 Key 再润色。")
-        api_key_sel, api_base_sel, model_sel, backend_sel, extra = _render_model_secrets(
-            mode_sel, provider_id, api_base_sel, model_sel
-        )
-    draft_box = st.container(border=True)
-    with draft_box:
-        st.markdown(
-            "**页面底稿 / 代码仓库（可选）** — 不传也能开工。"
-            "左侧 **上传 HTML** 做页面底稿；右侧只填 **Git 仓库**（Token 可选）。"
-            "不要贴浏览器网页地址（多为空壳）。"
-            "HTML 建议：页面加载完 F12 → Copy outerHTML → 存成 .html 再上传。"
-        )
-        d1, d2 = st.columns([1, 1])
-        with d1:
-            draft_uploads = st.file_uploader(
-                "上传 HTML 底稿（可多选）",
-                type=["html", "htm"],
-                accept_multiple_files=True,
-                key="draft_uploads",
+    col_model, col_mat = st.columns(2, gap="medium")
+    with col_model:
+        with st.container(border=True):
+            st.markdown("**:material/smart_toy: 模型**")
+            st.caption("不填 Key 也能开工（规则引擎，1～2 秒出全套）；填了 Key，开工时由模型补追问、润色需求单。")
+            m1, m2 = st.columns(2)
+            with m1:
+                preset_label, mode_sel, provider_id, api_base_sel, model_sel = _render_model_preset()
+            api_key_sel, api_base_sel, model_sel, backend_sel, extra = _render_model_secrets(
+                mode_sel, provider_id, api_base_sel, model_sel, key_slot=m2
             )
-            use_sample_draft = st.toggle("没有底稿时用示例「净值日报」底稿演示", value=False, key="use_sample_draft")
-        with d2:
-            _render_draft_link_rows()
-            git_ssl_no_verify = st.toggle(
-                "自建 Git 跳过 SSL 校验",
-                key="git_ssl_no_verify",
-                help="仅在确认自建 GitLab 使用可信的私有证书时勾选；默认校验证书。本机 / 内网地址仍不支持。",
-            )
+    with col_mat:
+        with st.container(border=True):
+            st.markdown("**:material/upload_file: 参考材料**")
+            st.caption("给一张现有页面，出样就在原页上改；给代码仓库，问清和定架会参考源码。")
+            mat_mode = st.segmented_control("参考材料", MAT_OPTIONS, default="不用", required=True, key="mat_mode",
+                                            label_visibility="collapsed") or "不用"
+            if mat_mode == "示例底稿":
+                st.caption(":material/check_circle: 用内置的「净值日报」页面演示：新列直接插进原表，客户版自动去掉内部字段。")
+            elif mat_mode == "上传网页":
+                draft_uploads = st.file_uploader("上传 HTML（可多选）", type=["html", "htm"], accept_multiple_files=True,
+                                                 key="draft_uploads", label_visibility="collapsed")
+                st.caption("直接「另存为」的网页常是空壳：页面加载完按 F12，复制 outerHTML，存成 .html 再上传。")
+            elif mat_mode == "Git 仓库":
+                _render_draft_link_rows()
+                git_ssl_no_verify = st.toggle("自建 GitLab 证书不受信时跳过 SSL 校验", key="git_ssl_no_verify")
+    use_sample_draft = mat_mode == "示例底稿"
 
 _has_key = mode_sel == "api" and bool((api_key_sel or "").strip())
 with hero_slot:
@@ -984,7 +946,7 @@ if go:
         do_polish = llm.mode == "api"
         drafts, repos, draft_errs = _collect_drafts(
             draft_uploads,
-            _read_draft_link_entries(),
+            _read_draft_link_entries() if mat_mode == "Git 仓库" else [],
             use_sample_draft,
             ssl_no_verify=bool(git_ssl_no_verify),
         )
@@ -1084,21 +1046,20 @@ with tabs[0]:
         st.markdown("".join(f'<span class="xz-chip">{html.escape(c)}</span>' for c in chips), unsafe_allow_html=True)
         if a.engine == "规则":
             polish_clicked = False
-            polish_box = st.container(border=True)
-            with polish_box:
+            with st.container(border=True):
+                p1, p2 = st.columns([3.2, 1], vertical_alignment="center")
                 if _last.get("mode") == "api":   # 开工时调了模型但没用上（超时 / 网关不通 / 返回不可用）
-                    st.markdown("**模型润色** — 这次开工调模型没成功，已用规则引擎出稿。可在上方「模型与材料」换个模型后点润色。")
+                    p1.caption(":material/error: 这次开工调模型没成功，已用规则引擎出稿；可在上方「模型与参考材料」换个模型再润色。")
                 else:
-                    st.markdown("**规则引擎初稿**（毫秒级、不调模型）。想让措辞更顺、多补几条追问，可在上方「模型与材料」选模型、填 Key，再点润色。")
-            with st.form("xuzhi_polish"):
-                polish_clicked = st.form_submit_button(
-                    "✨ 模型润色：补追问、润色标题 / 功能点 / 需求单"
-                )
+                    p1.caption(":material/bolt: 规则引擎初稿（毫秒级、不调模型）。想让措辞更顺、多补几条追问，填好模型 Key 后点右边润色。")
+                with p2:
+                    with st.form("xuzhi_polish", border=False):
+                        polish_clicked = st.form_submit_button("模型润色", icon=":material/auto_awesome:", width="stretch")
             if polish_clicked:
                 polish_key = (api_key_sel or st.session_state.api_keys.get(provider_id, "")).strip()
                 polish_llm = build_llm(mode_sel, model_sel, api_base_sel, polish_key, backend=backend_sel, extra=extra)
                 if polish_llm.mode != "api":
-                    st.warning("请先在上方「模型与材料」里选用模型并填写 API Key，再点润色。")
+                    st.warning("请先在上方「模型与参考材料」里选用模型并填写 API Key，再点润色。")
                 else:
                     with st.spinner(f"{polish_llm.model or '模型'} 正在读……"):
                         a2 = analyze(
@@ -1125,7 +1086,7 @@ with tabs[0]:
                 st.toast("模型润色完成")
                 st.success(
                     (f"已用 **{model_hint}** 润色标题、追问和需求单。" if model_hint else "模型润色完成。")
-                    + " 问清里不再出润色按钮，避免再调一次；改口径请填业务答复后点重算。"
+                    + " 改口径请填业务答复后点重算。"
                 )
             else:
                 st.caption(
@@ -1144,7 +1105,7 @@ with tabs[0]:
         st.markdown(f"#### 待确认清单（{len(a.questions)} 条，按影响排序；期货问题带 🌾"
                     + (f"；🧠 沿用上次口径 {_n_recalled} 条，本次不再问" if _n_recalled else "") + "）")
         if _n_recalled:
-            st.caption("追问记忆：同一提出方上次答过的口径直接沿用，答复框已预填；口径变了直接改再重算，记忆随之更新。")
+            st.caption("同一提出方上次答过的口径直接沿用，答复框已预填；口径变了改掉再重算即可。")
         answers = st.session_state.get("answers", {})
         for q in a.questions:
             cls = {"高": "hi", "中": "md", "低": "lo"}.get(q.impact, "md")
@@ -1180,7 +1141,7 @@ with tabs[0]:
         st.markdown("**发给业务的确认消息**（一键复制到企业微信）")
         st.code(a.message, language=None)
         st.download_button("下载确认消息 .txt", a.message, file_name=f"确认消息_{card.title}.txt")
-        st.markdown('<div class="xz-foot">清单来自「期货 IT 需求追问知识库」+ 通用检查项；答复后重算，未答复项按默认假设并在需求单里标注。</div>', unsafe_allow_html=True)
+        st.markdown('<div class="xz-foot">清单来自期货 IT 需求追问知识库 + 通用检查项；没答的按默认假设写进需求单。</div>', unsafe_allow_html=True)
 
 # ---------- 写单 ----------
 with tabs[1]:
@@ -1189,7 +1150,7 @@ with tabs[1]:
     with st.container(border=True):
         st.markdown(md)
     st.download_button("下载本版 .md", md, file_name=f"需求单_{'业务版' if v.startswith('业务') else '技术版'}_{card.title}.md")
-    st.markdown(f'<div class="xz-foot">技术版每条用户故事下方都带「原话」回链；已答复 {sum(1 for q in a.questions if q.answer.strip())} / {len(a.questions)} 项，其余按默认假设标注。</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="xz-foot">技术版每条用户故事都回链原话；已答复 {sum(1 for q in a.questions if q.answer.strip())} / {len(a.questions)} 项，其余按默认假设标注。</div>', unsafe_allow_html=True)
 
 # ---------- 估量 ----------
 with tabs[2]:
@@ -1218,13 +1179,13 @@ with tabs[2]:
         st.markdown("**六维复杂度**（1～5）")
         st.dataframe(pd.DataFrame({"维度": list(est.dims.keys()), "分": list(est.dims.values()), "依据": [est.reasons[d] for d in est.dims]}), hide_index=True, width="stretch")
     with r:
-        st.markdown("**类比估算：相似历史需求**（当前 30 条均为传统口径；上线后回写「是否用 AI / 参与度」，AI 轨随之校准）")
+        st.markdown("**类比估算：相似历史需求**")
         if est.similar:
             st.dataframe(pd.DataFrame([{"相似度": f"{s.score:.0%}", "需求": s.title, "类型": s.type, "部门": s.dept, "年份": s.year, "当时估": s.estimate_days, "实际": s.actual_days, "备注": s.note} for s in est.similar]),
                          hide_index=True, width="stretch")
         else:
             st.info("历史需求库里没有相似需求；上线后把实际工时回写，下次就有了。")
-    st.markdown('<div class="xz-foot">数字全由程序算：六维加权 → 基础人天；相似历史需求实际人天按相似度加权 → 传统轨；每个任务按「AI 能做 / AI 做人审 / 人必须做」乘系数 → AI 协同轨。涉及资金数字、交易链路、对客内容的任务只按"AI 做人审"折算，验证成本不打折。</div>', unsafe_allow_html=True)
+    st.markdown('<div class="xz-foot">数字全由程序算：六维复杂度 + 相似历史需求 → 传统轨；逐个任务乘 AI 协同系数 → AI 轨。涉及资金数字、交易链路、对客内容的任务，验证成本不打折。</div>', unsafe_allow_html=True)
 
 # ---------- 定架 ----------
 with tabs[3]:
@@ -1242,8 +1203,7 @@ with tabs[3]:
         st.dataframe(pd.DataFrame([{"数据项": x.need, "来源系统": x.system, "数据域": x.domain, "接口 / 取数方式": x.interface,
                                     "时效": x.freshness, "状态": x.status, "负责": x.owner, "说明": x.note} for x in dmap]),
                      hide_index=True, width="stretch", height=min(60 + 36 * len(dmap), 480))
-        st.markdown('<div class="xz-foot">数据地图来自「系统目录」里的数据域与接口（knowledge/system_catalog.json，换成公司真实目录即生效）：'
-                    '需求里的每个数据项定位到 系统 · 数据域 · 接口 · 时效；盘中 / 下单前的需求自动检查时效是否够用。</div>', unsafe_allow_html=True)
+        st.markdown('<div class="xz-foot">每个数据项定位到 系统 · 数据域 · 接口 · 时效（来自系统目录，换成公司真实目录即生效）；盘中 / 下单前的需求会自动检查时效够不够。</div>', unsafe_allow_html=True)
     l, r = st.columns([1, 1])
     with l:
         st.markdown("**可复用的系统 / 组件**")
@@ -1276,8 +1236,7 @@ with tabs[4]:
     t1.download_button("下载原型 .html", proto, file_name=f"原型_{card.title}.html")
     if draft_list or getattr(a, "repos", None):
         t1.markdown(
-            '<div class="xz-foot">在原 HTML 上落地改动；Git 源码用于问清/定架。'
-            "不相干菜单可点但进不去。</div>",
+            '<div class="xz-foot">在原页面上改；不相干的菜单可点但进不去。</div>',
             unsafe_allow_html=True,
         )
         caps = []
@@ -1292,7 +1251,7 @@ with tabs[4]:
             t1.caption(" · ".join(caps))
     else:
         t1.markdown(
-            '<div class="xz-foot">未提供底稿/仓库：有 Key 时模型按需求自行理解出样；否则用内置模板。</div>',
+            '<div class="xz-foot">没给参考页面：按需求生成原型（橙色表头是新增的列）。</div>',
             unsafe_allow_html=True,
         )
     with t2:
