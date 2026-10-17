@@ -9,7 +9,7 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
-from app_jira import SRC_OPTIONS, jira_text_from_analysis, load_history, render_jira_mode
+from app_jira import SRC_OPTIONS, calib_pool, jira_text_from_analysis, render_jira_mode
 
 from xuzhi import config, knowledge, sandbox
 from xuzhi.asr import correct_domain_speech
@@ -239,7 +239,8 @@ def render_ledger(ledger: Ledger, memory: Memory, audit: Audit, *, req_id: int =
                 st.toast("已记录")
             c2, c3 = st.columns([2.2, 1.2])
             with c2:
-                st.markdown("**对账：交付后回写实际人天**（写进历史需求库，估量飞轮）")
+                is_jira = row_now.get("source") == "Jira"
+                st.markdown("**对账：交付后回写实际人天**" + ("（记作 Jira 校准样本，下次评估即用）" if is_jira else "（写进历史需求库，估量飞轮）"))
                 r1, r2, r3 = st.columns([1, 1, 1])
                 actual_days = r1.number_input(
                     "实际人天", min_value=0.0, step=0.5,
@@ -256,10 +257,11 @@ def render_ledger(ledger: Ledger, memory: Memory, audit: Audit, *, req_id: int =
                     "备注（可空）", value=row_now.get("close_note") or "",
                     key=f"rec_note_{picked}", placeholder="例：范围比估时多了客户版",
                 )
-                if st.button("✅ 对账并回写历史需求库", key=f"rec_submit_{picked}"):
+                if st.button("对账并回写", key=f"rec_submit_{picked}", icon=":material/task_alt:"):
                     res = ledger.reconcile(picked, actual_days, ai_used, ai_share if ai_used else 0.0, rec_note)
                     _refresh_ledger_grid()
-                    st.success(f"#{picked} 已对账：估 {res['estimate']} 人天，实际 {res['actual']} 人天，偏差 {res['deviation']:+.0%}；已写入历史需求库（{res['history_id']}），下次估量即用。")
+                    st.success(f"#{picked} 已对账：估 {res['estimate']} 人天，实际 {res['actual']} 人天，偏差 {res['deviation']:+.0%}；"
+                               + ("已记作 Jira 校准样本，下次评估即用。" if is_jira else f"已写入历史需求库（{res['history_id']}），下次估量即用。"))
                     st.rerun()
             with c3:
                 st.markdown("**本条流水**")
@@ -278,7 +280,7 @@ def render_ledger(ledger: Ledger, memory: Memory, audit: Audit, *, req_id: int =
         _mem = memory.stats()
         k1, k2, k3, k4, k5, k6, k7 = st.columns(7)
         k1.metric("需求数", f"{dash['count']}", help=f"来自 {dash['depts']} 个部门")
-        k2.metric("平均追问", f"{dash['avg_questions']} 条", help=f"业务答复率 {dash['answer_rate']:.0%}")
+        k2.metric("平均追问", f"{dash['avg_questions']} 条", help=f"业务答复率 {dash['answer_rate']:.0%}；只算零散需求（Jira 工单不追问）")
         k7.metric("记忆省问", f"{_mem['hits']} 条", help=f"追问记忆：记住 {_mem['requesters']} 个提出方的 {_mem['entries']} 条口径；命中即不再问")
         k3.metric("平均澄清轮次", f"{dash['avg_rounds']}", help="开工一轮 + 每次按业务答复重算算一轮；人工通常三四轮")
         k4.metric("AI 协同省时", f"{dash['saved_days']} 人天", delta=f"-{dash['saving_pct']}%", delta_color="inverse",
@@ -288,6 +290,12 @@ def render_ledger(ledger: Ledger, memory: Memory, audit: Audit, *, req_id: int =
                         + "".join(f"，{n} {v}%" for n, v in (("传统轨", dash["mape_trad"]), ("AI 轨", dash["mape_ai"])) if v is not None))
                   if dash["closed"] else "还没有对账记录：交付后在上方回写实际人天")
         k6.metric("出稿用时", ("<1 s" if dash["avg_seconds"] < 1 else f"{dash['avg_seconds']} s"), help=f"规则引擎毫秒级，模型润色另计；👍 {dash['thumbs_up']} / 👎 {dash['thumbs_down']}")
+        if dash["jira_count"]:
+            _jt, _ja = dash["jira_coding_trad"], dash["jira_coding_ai"]
+            _kinds = " · ".join(f"{k} {v}" for k, v in dash["jira_by_kind"].items())
+            st.caption(f":material/fact_check: 其中 Jira 工单 {dash['jira_count']} 条（{_kinds}）：编码阶段 {_jt} → {_ja} 人天"
+                       + (f"（AI 编码省 {round(100 * (1 - _ja / _jt))}%）" if _jt else "")
+                       + "。下方部门 / 类型分布与平均追问、澄清轮次只算零散需求。")
         g1, g2, g3 = st.columns(3)
         with g1:
             st.markdown("**各部门需求量**")
@@ -346,7 +354,7 @@ def render_ledger(ledger: Ledger, memory: Memory, audit: Audit, *, req_id: int =
             ("来源", 0.85, "source"), ("类型", 0.65, "req_type"), ("提出方", 0.9, "requester"), ("引擎", 0.95, "engine"),
             ("状态", 1.35, None),
             ("问题数", 0.7, "n_questions"), ("已答复", 0.7, "n_answered"), ("高影响未答", 0.9, "n_high_open"),
-            ("传统(人天)", 0.85, "mid_days"), ("AI 协同(人天)", 1.05, "ai_days"), ("AI 参与度", 0.85, "ai_share"),
+            ("传统(人天)", 0.85, "mid_days"), ("AI 协同(人天)", 1.05, "ai_days"), ("AI 编码(人天)", 1.05, "coding_ai"), ("AI 参与度", 0.85, "ai_share"),
             ("实际(人天)", 0.85, "actual_days"),
             ("备注", 1.8, "close_note"),
             ("置信度", 0.65, "confidence"), ("脱敏处", 0.65, "redacted"),
@@ -851,7 +859,7 @@ if app_mode == "jira":
     st.markdown('<div class="xz-sec"><span class="no">01</span><span class="t">Jira 需求评估</span>'
                 '<span class="s">粘贴一条工单，或上传 Jira 导出的 CSV / Excel；不调模型，按技术复杂度给出工时与 AI 编码工时</span></div>',
                 unsafe_allow_html=True)
-    render_jira_mode()
+    render_jira_mode(ledger, show_ledger=lambda: render_ledger(ledger, memory, audit))
     _render_hero('<span class="xz-status"><span class="dot"></span>规则引擎 · 离线秒出</span>')
     st.stop()
 
@@ -915,7 +923,12 @@ def _to_jira(analysis) -> None:
     st.session_state.jira_sample = st.session_state.jira_sample_shown = "（粘贴自己的）"
     st.session_state.jira_text = text
     st.session_state.jira_rev = st.session_state.get("jira_rev", 0) + 1
-    st.session_state.jira_single = assess(parse_issue_text(text), calibrate(load_history()[0]))
+    led = get_ledger()
+    a_j = assess(parse_issue_text(text), calibrate(calib_pool(led)))
+    st.session_state.jira_single = a_j
+    rid = int(st.session_state.get("req_id", 0) or 0)
+    led.attach_jira(rid, a_j)   # 挂回零散需求那行账，不另开一行
+    st.session_state.jira_single_rid = rid or None
 
 
 def _sample_body(choice: str) -> str:

@@ -12,6 +12,7 @@ import streamlit as st
 
 from xuzhi import config, knowledge
 from xuzhi.jira import JiraIssue, load_export, parse_export, parse_issue_text
+from xuzhi.ledger import Ledger
 from xuzhi.pipeline.assess import Assessment, Calibration, assess, assess_many, calibrate
 
 JIRA_DIR = config.DATA_DIR / "jira"
@@ -32,6 +33,13 @@ def load_history() -> tuple[list[JiraIssue], str]:
     if SAMPLE_EXPORT.exists():
         return [it for it in load_export(SAMPLE_EXPORT) if it.done], "示例导出里已完成的工单（虚构）"
     return [], "无"
+
+
+def calib_pool(ledger: Ledger) -> list[JiraIssue]:
+    """校准样本 = 历史导出里已完成的工单 + 一本账里对过账的 Jira 工单（同一单号以一本账为准）。"""
+    pool = {it.key or it.summary: it for it in load_history()[0]}
+    pool.update({it.key or it.summary: it for it in ledger.jira_done_issues()})
+    return list(pool.values())
 
 
 def issue_as_text(it: JiraIssue) -> str:
@@ -74,10 +82,10 @@ def _kpi(col, n: str, label: str, color: str) -> None:
     col.markdown(f'<div class="xz-kpi" style="--c:{color}"><div class="n">{n}</div><div class="l">{label}</div></div>', unsafe_allow_html=True)
 
 
-def render_assessment(a: Assessment) -> None:
+def render_assessment(a: Assessment, rid: int | None = None) -> None:
     it = a.issue
     st.markdown(f"### {html.escape(it.key)} {html.escape(it.summary)}")
-    chips = [a.kind, it.issue_type, it.priority and f"优先级 {it.priority}", it.status, *it.components[:3],
+    chips = [rid and f"一本账 #{rid}", a.kind, it.issue_type, it.priority and f"优先级 {it.priority}", it.status, *it.components[:3],
              it.story_points and f"{it.story_points:g} 个故事点"]
     st.markdown("".join(f'<span class="xz-chip">{html.escape(str(c))}</span>' for c in chips if c), unsafe_allow_html=True)
     k = st.columns(4)
@@ -119,11 +127,12 @@ def render_assessment(a: Assessment) -> None:
                 f'{html.escape(a.calib_note)}。AI 系数为示例值，按公司 AI 编码工具的实际使用情况校准。</div>', unsafe_allow_html=True)
 
 
-def _batch_frame(results: list[Assessment]) -> pd.DataFrame:
+def _batch_frame(results: list[Assessment], rids: dict[str, int]) -> pd.DataFrame:
     rows = []
     for a in results:
         it = a.issue
         rows.append({
+            "一本账": f"#{rids[it.key or it.summary]}" if (it.key or it.summary) in rids else "",
             "单号": it.key, "摘要": it.summary, "类型": a.kind, "状态": it.status or "",
             "复杂度": f"{a.level} {a.total}", "需知估(人天)": a.mid, "区间": f"{a.low}～{a.high}",
             "AI 编码(人天)": a.coding_ai, "编码阶段人工(人天)": a.coding_trad, "全流程 AI(人天)": a.full_ai,
@@ -134,7 +143,8 @@ def _batch_frame(results: list[Assessment]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def render_batch(results: list[Assessment], calib: Calibration, source: str) -> None:
+def render_batch(results: list[Assessment], calib: Calibration, source: str, rids: dict[str, int] | None = None) -> None:
+    rids = rids or {}
     todo = [a for a in results if not a.issue.done] or results
     kinds = {}
     for a in todo:
@@ -166,7 +176,7 @@ def render_batch(results: list[Assessment], calib: Calibration, source: str) -> 
             width="stretch",
         )
     ordered = [a for a in results if not a.issue.done] + [a for a in results if a.issue.done]   # 待评估的排前面
-    df = _batch_frame(ordered)
+    df = _batch_frame(ordered, rids)
     st.markdown("**逐条结果**（点一行看详情）")
     ev = st.dataframe(df, hide_index=True, width="stretch", on_select="rerun", selection_mode="single-row", key="jira_table",
                       height=min(38 + 35 * len(df), 640),
@@ -177,12 +187,25 @@ def render_batch(results: list[Assessment], calib: Calibration, source: str) -> 
     pick = ordered[rows[0]] if rows else todo[0]
     st.write("")
     with st.container(border=True):
-        render_assessment(pick)
+        render_assessment(pick, rids.get(pick.issue.key or pick.issue.summary))
+
+
+def _log_batch(ledger: Ledger, results: list[Assessment]) -> tuple[dict[str, int], str]:
+    """整批记进一本账：同一单号只更新不重复；Jira 里已完成的按耗费时间对账。返回 (单号 → 编号, 提示语)。"""
+    rids, new, upd = {}, 0, 0
+    for a in results:
+        rid, created = ledger.log_jira(a, "导出")
+        rids[a.issue.key or a.issue.summary] = rid
+        new, upd = new + created, upd + (not created)
+    done = sum(1 for a in results if a.issue.done)
+    note = f"已记进一本账：新增 {new} 条、更新 {upd} 条" + (f"；其中 {done} 条 Jira 里已完成的已按耗费时间对账，作为下次评估的校准样本" if done else "")
+    return rids, note
 
 
 # ---------------------------------------------------------------- 入口
-def render_jira_mode() -> None:
-    history, hist_src = load_history()
+def render_jira_mode(ledger: Ledger, show_ledger=None) -> None:
+    """评估结果都记进一本账（来源「Jira」）；一本账里对过账的 Jira 工单反过来当校准样本。"""
+    history, hist_src = calib_pool(ledger), load_history()[1]
     src = st.segmented_control("工单来源", SRC_OPTIONS, default=SRC_OPTIONS[0], required=True, key="jira_src",
                                label_visibility="collapsed")
     if src == SRC_OPTIONS[0]:
@@ -207,11 +230,15 @@ def render_jira_mode() -> None:
                 st.warning("没读到工单内容，请粘贴 Jira 工单或选一个示例。")
             else:
                 st.session_state["jira_text"] = text
-                st.session_state["jira_single"] = assess(issue, calibrate(history))
+                a = assess(issue, calibrate(history))
+                rid, created = ledger.log_jira(a, "粘贴")
+                st.session_state["jira_single"] = a
+                st.session_state["jira_single_rid"] = rid
+                st.toast(f"已记进一本账 #{rid}" + ("" if created else "（同一单号，已更新）"), icon=":material/menu_book:")
         a = st.session_state.get("jira_single")
         if a:
             with st.container(border=True):
-                render_assessment(a)
+                render_assessment(a, st.session_state.get("jira_single_rid"))
     else:
         c1, c2 = st.columns([3, 1.2], vertical_alignment="bottom")
         up = c1.file_uploader("上传 Jira 导出（CSV / Excel）", type=["csv", "xlsx"], key="jira_upload",
@@ -223,12 +250,25 @@ def render_jira_mode() -> None:
             if not issues:
                 st.warning("没从文件里读到工单：请确认是 Jira 导出的 CSV / Excel，表头含「摘要」或「Summary」。")
             else:
-                st.session_state["jira_batch"] = (*assess_many(issues, history), f"上传的 {up.name}（{len(issues)} 条）")
+                results, calib = assess_many(issues, history)
+                rids, note = _log_batch(ledger, results)
+                st.session_state["jira_batch"] = (results, calib, f"上传的 {up.name}（{len(issues)} 条）", rids)
+                st.session_state["jira_batch_note"] = note
         if use_sample and SAMPLE_EXPORT.exists():
             issues = load_export(SAMPLE_EXPORT)
-            st.session_state["jira_batch"] = (*assess_many(issues, history), f"示例导出（虚构，{len(issues)} 条）")
+            results, calib = assess_many(issues, history)
+            rids, note = _log_batch(ledger, results)
+            st.session_state["jira_batch"] = (results, calib, f"示例导出（虚构，{len(issues)} 条）", rids)
+            st.session_state["jira_batch_note"] = note
         batch = st.session_state.get("jira_batch")
         if batch:
+            if st.session_state.get("jira_batch_note"):
+                st.caption(":material/menu_book: " + st.session_state["jira_batch_note"] + "。页面底部「查看一本账」可看。")
             render_batch(*batch)
         else:
-            st.caption(f"校准样本：{hist_src}。把公司 Jira 导出的历史工单（含耗费时间）放进 data/jira/历史/，估算就按你们团队的实际耗时校准。")
+            st.caption(f"校准样本：{hist_src}，加上一本账里对过账的 Jira 工单。把公司 Jira 导出的历史工单（含耗费时间）放进 data/jira/历史/，估算就按你们团队的实际耗时校准。")
+    if show_ledger is not None:
+        st.write("")
+        dash = ledger.dashboard()
+        if st.toggle(f"查看一本账 · {dash['count']} 条（其中 Jira {dash['jira_count']} 条）", key="jira_show_ledger"):
+            show_ledger()

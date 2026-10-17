@@ -91,3 +91,60 @@ def test_spec_to_jira_bridge():
     it = parse_issue_text(jira)
     assert it.summary.startswith("净值日报") and kind_of(it) == "需求" and len(it.acceptance) >= 2 and it.components
     assert assess(it, calibrate([])).mid > 0
+
+
+# ---------------------------------------------------------------- 记进一本账
+@pytest.fixture
+def jledger(tmp_path, monkeypatch):
+    from xuzhi import knowledge
+    from xuzhi.ledger import Ledger
+
+    monkeypatch.setattr(config, "HISTORY_LEARNED_PATH", tmp_path / "history_learned.json")
+    knowledge.history.cache_clear()
+    yield Ledger(tmp_path / "l.sqlite3")
+    knowledge.history.cache_clear()
+
+
+def test_jira_logged_into_ledger(jledger):
+    results, _ = assess_many(parse_export(SAMPLE.read_bytes(), SAMPLE.name))
+    first = [jledger.log_jira(a, "导出") for a in results]
+    assert all(created for _, created in first) and len({rid for rid, _ in first}) == 14
+    again = [jledger.log_jira(a, "导出") for a in results]          # 再评一遍：只更新，不重复建账
+    assert [rid for rid, _ in again] == [rid for rid, _ in first] and not any(created for _, created in again)
+    by_key = {a.issue.key: rid for a, (rid, _) in zip(results, first)}
+    done = jledger.get(by_key["XZ-981"])
+    assert done["source"] == "Jira" and done["status"] == "已对账" and done["actual_days"] == 2.5
+    assert done["coding_ai"] and done["coding_ai"] < done["coding_trad"] <= done["mid_days"]
+    assert not config.HISTORY_LEARNED_PATH.exists()                 # 不写零散需求的历史库
+    todo = jledger.get(by_key["XZ-1024"])
+    assert todo["status"] == "已确认" and todo["actual_days"] is None and todo["ext_key"] == "XZ-1024"
+    acts = [e["action"] for e in jledger.events_of(by_key["XZ-1024"])]
+    assert acts.count("Jira 评估") == 1 and acts.count("Jira 重新评估") == 1
+    d = jledger.dashboard()
+    assert d["count"] == 14 and d["jira_count"] == 14 and d["closed"] == 8 and d["avg_questions"] == 0.0 and d["avg_rounds"] == 0.0
+    assert 0 < d["jira_coding_ai"] < d["jira_coding_trad"]
+    assert d["by_dept"] == {} and d["by_type"] == {} and sum(d["jira_by_kind"].values()) == 14   # 部门 / 类型分布只算零散需求
+
+
+def test_ledger_reconcile_feeds_jira_calibration(jledger):
+    rid, _ = jledger.log_jira(assess(parse_issue_text(STORY), calibrate([])), "粘贴")
+    assert jledger.jira_done_issues() == []
+    res = jledger.reconcile(rid, 3.5, note="上线后回写")
+    assert res["history_id"] == "" and not config.HISTORY_LEARNED_PATH.exists()
+    pool = jledger.jira_done_issues()
+    assert len(pool) == 1 and pool[0].key == "XZ-1024" and pool[0].done and pool[0].spent_days == 3.5
+    assert pool[0].acceptance and pool[0].components == ["交易系统"]          # 工单内容原样存回，可做类比
+
+
+def test_free_text_metrics_exclude_jira(jledger):
+    from xuzhi.llm import LLM
+    from xuzhi.pipeline import analyze
+
+    a = analyze(next(config.SAMPLES_DIR.glob("01_*.md")).read_text(encoding="utf-8"), llm=LLM(mode="mock"))
+    rid = jledger.log_analysis(a)
+    jledger.log_jira(assess(parse_issue_text(BUG), calibrate([])), "粘贴")
+    d = jledger.dashboard()
+    assert d["count"] == 2 and d["jira_count"] == 1 and d["avg_questions"] == len(a.questions) and d["avg_rounds"] == 1.0
+    jledger.attach_jira(rid, assess(parse_issue_text(STORY), calibrate([])))   # 写单转 Jira：挂回原账，不另开一行
+    assert jledger.dashboard()["count"] == 2 and jledger.get(rid)["coding_ai"] > 0
+    assert any(e["action"] == "转 Jira 评估" for e in jledger.events_of(rid))

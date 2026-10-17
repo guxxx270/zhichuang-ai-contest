@@ -2,15 +2,31 @@
 既是审计留痕，也是估算飞轮的数据：对账回写实际人天 → 追加到历史需求库 → 下次估量自动校准；看板按部门 / 类型 / 状态汇总。"""
 from __future__ import annotations
 
+import dataclasses
 import json
+import re
 import sqlite3
 from datetime import datetime
 
 from . import config
+from .jira import DONE_STATUSES, HOURS_PER_DAY, JiraIssue
 
 MINUTES_SAVED = {"问清": 60, "写单": 90, "估量": 30, "定架": 60, "出样": 120}   # 与人工相比的估计节省，方案文档里需校准
 
 STATUSES = ["受理", "已确认", "开发中", "已交付", "已对账"]
+JIRA_SOURCE = "Jira"
+JIRA_DEPT = "Jira 工单"
+_NOT_JIRA = f"COALESCE(source,'') != '{JIRA_SOURCE}'"
+
+
+def _jira_status(issue: JiraIssue) -> str:
+    """Jira 状态 → 一本账状态。工单已写好，待办即「已确认」；已完成的先记「已交付」，有耗费时间再对账。"""
+    s = (issue.status or "").strip().lower()
+    if issue.done or s in DONE_STATUSES:
+        return "已交付"
+    if re.search(r"进行|处理中|开发|测试|验收|in progress|review|qa", s):
+        return "开发中"
+    return "已确认"
 
 
 def _dept_of(requester: str) -> str:
@@ -34,7 +50,8 @@ class Ledger:
         # 逐列补齐（老库无该列时才加）
         for col, typ in (("ai_days", "REAL"), ("dept", "TEXT"), ("status", "TEXT"), ("actual_days", "REAL"),
                          ("ai_assisted", "INTEGER"), ("ai_share", "REAL"), ("closed_ts", "TEXT"), ("close_note", "TEXT"),
-                         ("seconds", "REAL"), ("n_high_open", "INTEGER")):
+                         ("seconds", "REAL"), ("n_high_open", "INTEGER"),
+                         ("ext_key", "TEXT"), ("coding_trad", "REAL"), ("coding_ai", "REAL")):   # Jira 单号、编码阶段人工 / AI
             try:
                 self.conn.execute(f"ALTER TABLE requirements ADD COLUMN {col} {typ}")
             except sqlite3.OperationalError:
@@ -55,6 +72,67 @@ class Ledger:
                          "data_map": [r.__dict__ for r in getattr(a.architecture, "data_map", [])]}, ensure_ascii=False)))
         self.conn.commit()
         return int(cur.lastrowid)
+
+    def log_jira(self, a, origin: str = "粘贴") -> tuple[int, bool]:
+        """记一条 Jira 评估（xuzhi.pipeline.assess.Assessment）。同一单号再评只更新数字、记「Jira 重新评估」，不重复建账；
+        Jira 里已完成且有耗费时间的，直接按实际耗时对账。返回 (编号, 是否新建)。"""
+        it = a.issue
+        key = it.key or f"摘要:{it.summary[:40]}"
+        title = f"{it.key} {it.summary}".strip() or "未命名工单"
+        payload = json.dumps({
+            "jira": dataclasses.asdict(it), "kind": a.kind, "level": a.level, "dims": a.dims, "risks": a.risks,
+            "coding": [a.coding_trad, a.coding_ai], "full_ai": a.full_ai, "jira_days": a.jira_days, "deviation": a.deviation,
+            "tasks": [{"name": t.name, "phase": t.phase, "who": t.who, "trad": t.trad_days, "ai": t.ai_days} for t in a.tasks],
+        }, ensure_ascii=False)
+        n_hi = sum(1 for lv, _ in a.risks if lv == "高")
+        detail = (f"传统 {a.mid} 人天 · AI 编码 {a.coding_ai}（编码阶段 {a.coding_trad}）· 全流程 AI {a.full_ai} · "
+                  f"复杂度 {a.level} {a.total} · 来源 Jira {origin}")
+        found = self.conn.execute("SELECT id, status FROM requirements WHERE ext_key=?", (key,)).fetchone()
+        if found:
+            rid, cur_status, created = int(found[0]), found[1] or "受理", False
+            self.conn.execute(
+                "UPDATE requirements SET title=?, req_type=?, mid_days=?, ai_days=?, coding_trad=?, coding_ai=?, confidence=?, "
+                "n_high_open=?, payload=? WHERE id=?",
+                (title, a.kind, a.mid, a.full_ai, a.coding_trad, a.coding_ai, a.confidence, n_hi, payload, rid))
+            self.event(rid, "Jira 重新评估", detail)
+        else:
+            cur = self.conn.execute(
+                "INSERT INTO requirements(ts,title,source,req_type,requester,engine,n_questions,n_answered,mid_days,confidence,redacted,ai_days,"
+                "dept,status,seconds,n_high_open,payload,ext_key,coding_trad,coding_ai) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (datetime.now().isoformat(timespec="seconds"), title, JIRA_SOURCE, a.kind, "", "规则", 0, 0, a.mid, a.confidence, 0,
+                 a.full_ai, JIRA_DEPT, "已确认", 0.0, n_hi, payload, key, a.coding_trad, a.coding_ai))
+            rid, cur_status, created = int(cur.lastrowid), "已确认", True
+            self.event(rid, "Jira 评估", detail)
+        self.conn.commit()
+        want = _jira_status(it)
+        if cur_status != "已对账" and want != cur_status:
+            self.set_status(rid, want)
+        if it.done and it.spent_days and not (self.get(rid) or {}).get("actual_days"):
+            self.reconcile(rid, it.spent_days, note="Jira 耗费时间回填")
+        return rid, created
+
+    def attach_jira(self, req_id: int, a) -> None:
+        """零散需求那条转成 Jira 工单评估后，把编码阶段人工 / AI 挂回原来那行账（不另开一行）。"""
+        if not self.get(req_id):
+            return
+        self.conn.execute("UPDATE requirements SET coding_trad=?, coding_ai=? WHERE id=?", (a.coding_trad, a.coding_ai, req_id))
+        self.conn.commit()
+        self.event(req_id, "转 Jira 评估", f"传统 {a.mid} 人天 · AI 编码 {a.coding_ai}（编码阶段 {a.coding_trad}）· 复杂度 {a.level} {a.total}")
+
+    def jira_done_issues(self) -> list[JiraIssue]:
+        """对过账的 Jira 工单 → 下次评估的校准样本（Jira 自己的估算飞轮，不混进零散需求的历史库）。"""
+        out = []
+        fields = {f.name for f in dataclasses.fields(JiraIssue)}
+        for payload, actual in self.conn.execute(
+                f"SELECT payload, actual_days FROM requirements WHERE source='{JIRA_SOURCE}' AND actual_days IS NOT NULL AND actual_days>0"):
+            try:
+                d = (json.loads(payload or "{}").get("jira") or {})
+            except json.JSONDecodeError:
+                continue
+            it = JiraIssue(**{k: v for k, v in d.items() if k in fields})
+            it.status, it.spent_h = "完成", float(actual) * HOURS_PER_DAY
+            out.append(it)
+        return out
 
     def event(self, req_id: int, action: str, detail: str = "") -> None:
         self.conn.execute("INSERT INTO events(ts,req_id,action,detail) VALUES(?,?,?,?)", (datetime.now().isoformat(timespec="seconds"), req_id, action, detail))
@@ -92,7 +170,7 @@ class Ledger:
         dev = (est - actual) / actual if actual else 0.0
         self.event(req_id, "对账", f"实际 {actual} 人天，估 {est}，偏差 {dev:+.0%}" + ("，AI 协同" if ai_assisted else ""))
         hist_id = ""
-        if write_history:
+        if write_history and row.get("source") != JIRA_SOURCE:   # Jira 工单走自己的校准样本（jira_done_issues），不写零散需求的历史库
             hist_id = self._append_history(row, actual, ai_assisted, ai_share, note)
         return {"estimate": est, "actual": actual, "deviation": dev, "history_id": hist_id}
 
@@ -138,7 +216,7 @@ class Ledger:
 
     def recent(self, n: int = 20) -> list[dict]:
         cur = self.conn.execute(
-            "SELECT id,ts,title,dept,source,req_type,requester,engine,status,n_questions,n_answered,n_high_open,mid_days,ai_days,actual_days,close_note,ai_share,confidence,redacted "
+            "SELECT id,ts,title,dept,source,req_type,requester,engine,status,n_questions,n_answered,n_high_open,mid_days,ai_days,coding_ai,actual_days,close_note,ai_share,confidence,redacted,ext_key "
             "FROM requirements ORDER BY id DESC LIMIT ?", (n,))
         cols = [c[0] for c in cur.description]
         return [dict(zip(cols, r)) for r in cur.fetchall()]
@@ -150,8 +228,8 @@ class Ledger:
     def export_rows(self) -> list[dict]:
         """审计导出：全部需求行（不含 payload 原文）。"""
         cur = self.conn.execute(
-            "SELECT id,ts,title,dept,requester,source,req_type,engine,status,n_questions,n_answered,n_high_open,mid_days,ai_days,actual_days,"
-            "ai_assisted,ai_share,confidence,redacted,seconds,closed_ts,close_note FROM requirements ORDER BY id")
+            "SELECT id,ts,title,dept,requester,source,req_type,engine,status,n_questions,n_answered,n_high_open,mid_days,ai_days,coding_trad,coding_ai,"
+            "actual_days,ai_assisted,ai_share,confidence,redacted,seconds,closed_ts,close_note,ext_key FROM requirements ORDER BY id")
         cols = [c[0] for c in cur.description]
         return [dict(zip(cols, r)) for r in cur.fetchall()]
 
@@ -167,23 +245,33 @@ class Ledger:
         if not n:
             out.update({"avg_questions": 0.0, "answer_rate": 0.0, "avg_rounds": 0.0, "avg_seconds": 0.0, "high_open_rate": 0.0,
                         "trad_days": 0.0, "ai_days": 0.0, "saved_days": 0.0, "saving_pct": 0.0,
-                        "closed": 0, "mape": None, "mape_trad": None, "mape_ai": None, "bias_trad": None, "thumbs_up": 0, "thumbs_down": 0, "depts": 0})
+                        "closed": 0, "mape": None, "mape_trad": None, "mape_ai": None, "bias_trad": None,
+                        "jira_count": 0, "jira_coding_trad": 0.0, "jira_coding_ai": 0.0, "jira_by_kind": {}, "thumbs_up": 0, "thumbs_down": 0, "depts": 0})
             return out
-        for dept, k in c.execute("SELECT COALESCE(NULLIF(dept,''),'未注明'), COUNT(*) FROM requirements GROUP BY 1 ORDER BY 2 DESC"):
+        # 部门与类型分布只算零散需求：Jira 工单没有提出部门，类型（需求 / 缺陷…）也和业务类型（报表 / 页面…）不是一个口径
+        for dept, k in c.execute(f"SELECT COALESCE(NULLIF(dept,''),'未注明'), COUNT(*) FROM requirements WHERE {_NOT_JIRA} GROUP BY 1 ORDER BY 2 DESC"):
             out["by_dept"][dept] = k
-        for t, k in c.execute("SELECT COALESCE(NULLIF(req_type,''),'其他'), COUNT(*) FROM requirements GROUP BY 1 ORDER BY 2 DESC"):
+        for t, k in c.execute(f"SELECT COALESCE(NULLIF(req_type,''),'其他'), COUNT(*) FROM requirements WHERE {_NOT_JIRA} GROUP BY 1 ORDER BY 2 DESC"):
             out["by_type"][t] = k
+        out["jira_by_kind"] = dict(c.execute(
+            f"SELECT COALESCE(NULLIF(req_type,''),'其他'), COUNT(*) FROM requirements WHERE source='{JIRA_SOURCE}' GROUP BY 1 ORDER BY 2 DESC").fetchall())
         for m, k in c.execute("SELECT substr(ts,1,7), COUNT(*) FROM requirements GROUP BY 1 ORDER BY 1"):
             out["by_month"][m] = k
         for s, k in c.execute("SELECT COALESCE(NULLIF(status,''),'受理'), COUNT(*) FROM requirements GROUP BY 1"):
             out["by_status"][s] = out["by_status"].get(s, 0) + k
-        aq, sa, sq, ho, sec, trad, ai = c.execute(
-            "SELECT AVG(n_questions), SUM(n_answered), SUM(n_questions), SUM(COALESCE(n_high_open,0)), AVG(COALESCE(seconds,0)), "
-            "SUM(COALESCE(mid_days,0)), SUM(COALESCE(ai_days, mid_days, 0)) FROM requirements").fetchone()
+        # 追问 / 澄清 / 出稿用时只算零散需求（Jira 工单已写好，不追问）；工时与省时全算
+        n_free = c.execute(f"SELECT COUNT(*) FROM requirements WHERE {_NOT_JIRA}").fetchone()[0]
+        aq, sa, sq, ho, sec = c.execute(
+            "SELECT AVG(n_questions), SUM(n_answered), SUM(n_questions), SUM(COALESCE(n_high_open,0)), AVG(COALESCE(seconds,0)) "
+            f"FROM requirements WHERE {_NOT_JIRA}").fetchone()
+        trad, ai = c.execute("SELECT SUM(COALESCE(mid_days,0)), SUM(COALESCE(ai_days, mid_days, 0)) FROM requirements").fetchone()
         rounds = c.execute("SELECT COUNT(*) FROM events WHERE action='业务答复重算'").fetchone()[0]
+        jn, jct, jca = c.execute(
+            f"SELECT COUNT(*), SUM(COALESCE(coding_trad,0)), SUM(COALESCE(coding_ai,0)) FROM requirements WHERE source='{JIRA_SOURCE}'").fetchone()
+        out["jira_count"], out["jira_coding_trad"], out["jira_coding_ai"] = int(jn or 0), round(jct or 0.0, 1), round(jca or 0.0, 1)
         out["avg_questions"] = round(aq or 0.0, 1)
         out["answer_rate"] = round((sa or 0) / sq, 2) if sq else 0.0
-        out["avg_rounds"] = round(1 + rounds / n, 1)          # 开工一轮 + 每次答复重算算一轮
+        out["avg_rounds"] = round(1 + rounds / n_free, 1) if n_free else 0.0   # 开工一轮 + 每次答复重算算一轮
         out["avg_seconds"] = round(sec or 0.0, 1)
         out["high_open_rate"] = round((ho or 0) / sq, 2) if sq else 0.0
         out["trad_days"] = round(trad or 0.0, 1)
