@@ -13,6 +13,15 @@ from .estimate_references import build_references
 from .tasks import AI_DO, AI_REVIEW, HUMAN, PHASES, Task, who_split
 
 
+ESTIMATION_COMPARISON = {
+    "version": "agent-workflow-v2",
+    "before": "以前：熟悉技术栈的开发人员使用 IDE、搜索、调试器、SQL 和自动化测试完成同一变更，不使用生成式 AI。",
+    "after": "现在：同等人员使用可检索仓库、修改多文件、运行测试、读取报错并迭代修复的编程代理；人负责目标、业务口径、定向审查和最终验收。",
+    "unit": "有效人时：参与人员的实际投入之和；无人值守的模型生成、构建、测试运行及排期等待不计入人时，同一人的重叠时间不重复计算。",
+    "environment": "待验证的实施前提：开发时双方均可访问项目代码、已有开发环境和必要测试样本，代理获得相应工具权限；材料明确限制能力时，以限制为准。估算时未提供源码不等于开发时无法取得源码。",
+}
+
+
 @dataclass
 class Estimate:
     # 沿用人天字段兼容台账/API。None 表示未估时，不能按零工时处理。
@@ -45,6 +54,7 @@ class Estimate:
     summary: str = ""
     error: str = ""
     references: dict = field(default_factory=dict)
+    comparison: dict = field(default_factory=dict)
 
     @property
     def total_points(self) -> int:
@@ -99,8 +109,7 @@ def _payload(text: str, questions: list[Question], card: Card, repos: list[RepoB
         "code_files": files,
         "reference_pages": [{"name": redact_material(d["name"]), "html": d["html"]} for d in reference],
         "code_scope": "仅提供的源码摘录，未运行或验证完整系统" if files else "未提供有效源码，仅依据需求粗估",
-        "comparison": {"before": "以前：同一范围、同一现有系统，人工开发，不使用生成式AI",
-                       "after": "现在：同一范围，使用AI辅助分析、编码与测试，保留必要人工核对"},
+        "comparison": dict(ESTIMATION_COMPARISON),
     }
 
 
@@ -188,6 +197,8 @@ def _parse(data, payload: dict, result: Estimate) -> Estimate:
     result.assumptions.insert(0, "仅依据本次提供的源码摘录，未运行验证，未覆盖代码不作已确认处理。" if has_code_evidence
                               else "粗估：缺少可核对的相关代码依据，只根据需求与答复推断，实际改动范围待核实。")
     result.summary = summary
+    # 保存本次采用的比较口径；旧结果不随新提示词被重新解释。
+    result.comparison = dict(payload["comparison"])
     result.delivery = "以前与现在比较相同交付范围；两边均为预计投入工时，不含排期和等待时间。"
     result.method, result.status = "llm", "ready"
     return result

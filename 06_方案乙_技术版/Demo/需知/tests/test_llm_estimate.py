@@ -9,7 +9,7 @@ import pytest
 from test_intake_requirements import EQUITY_REQUIREMENT
 from xuzhi import knowledge
 from xuzhi.drafts import CodeFile, RepoBundle
-from xuzhi.pipeline.estimate import estimate
+from xuzhi.pipeline.estimate import ESTIMATION_COMPARISON, estimate
 from xuzhi.pipeline.intake import Question, extract_card
 
 
@@ -82,6 +82,7 @@ def _assert_unestimated(result, status):
     assert result.status == status
     assert result.tasks == []
     assert all(getattr(result, field) is None for field in TOTAL_FIELDS), "失败或不可用时不能冒出模板工时"
+    assert result.comparison == {}, "未成功估算时不能标记已采用某套比较口径"
 
 
 def _code_response(payload):
@@ -129,6 +130,22 @@ def test_ai_work_may_cost_more_and_is_not_forced_below_manual_work():
     assert result.ai_mid > result.mid
     assert result.saving_pct < 0
     assert all(task.ai_days > task.trad_days for task in result.tasks)
+
+
+def test_comparison_records_sent_conditions_and_ignores_model_forgery():
+    response = _response()
+    response["comparison"] = {"version": "model-invented-version", "after": "model-invented-capabilities"}
+    llm = FakeLLM(response)
+
+    result = _estimate(llm)
+
+    sent = llm.calls[0]["payload"]["comparison"]
+    assert result.status == "ready"
+    assert sent == ESTIMATION_COMPARISON
+    assert {"version", "before", "after", "unit", "environment"} <= set(sent)
+    assert all(isinstance(value, str) and value for value in sent.values())
+    assert result.comparison == sent
+    assert result.comparison != response["comparison"]
 
 
 @pytest.mark.parametrize("mock_model", [None, "mock"], ids=["absent", "offline"])
@@ -217,12 +234,16 @@ def test_incomplete_or_nonobject_model_response_is_rejected(bad_response):
 
 
 def test_requirement_only_estimate_is_labeled_rough_and_low_confidence():
-    result = _estimate(FakeLLM())
+    llm = FakeLLM()
+    result = _estimate(llm)
 
     assert result.status == "ready"
     assert result.basis == "requirements_only"
     assert result.confidence == "低", "模型自报高置信不能替代代码核对"
     assert not result.code_files
+    assert llm.calls[0]["payload"]["code_files"] == []
+    assert result.comparison == llm.calls[0]["payload"]["comparison"]
+    assert any("粗估" in line for line in result.assumptions)
     assert any("代码" in line for line in result.assumptions + [result.confidence_reason])
 
 

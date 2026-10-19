@@ -258,6 +258,12 @@ def test_independent_button_shows_two_ranges_and_rough_basis_without_new_ledger_
         assert any("参考投入：6 小时" in caption.value for caption in tab.caption)
         assert any("粗估" in message.value for message in tab.warning)
         assert any("test-estimator" in caption.value for caption in tab.caption)
+        comparison = ui.fake.calls[0]["payload"]["comparison"]
+        assert app.session_state["analysis"].estimate.comparison == comparison
+        scope = _by_label(tab.expander, "估算前提与材料范围")
+        scope_text = _visible_text(scope)
+        assert "本次比较口径" in scope_text
+        assert all(comparison[key] in scope_text for key in ("before", "after", "unit", "environment", "version"))
         task_table = next(frame.value for frame in tab.dataframe if "工作项" in frame.value.columns)
         assert len(task_table) == 3
         assert {"以前的依据", "现在的依据"} <= set(task_table.columns)
@@ -266,12 +272,34 @@ def test_independent_button_shows_two_ranges_and_rough_basis_without_new_ledger_
         assert ledger.stats()["count"] == count_before
         snapshot = json.loads(ledger.get(req_id)["payload"])["estimate"]
         assert snapshot["status"] == "ready" and snapshot["method"] == "llm"
+        assert snapshot["comparison"] == comparison
         assert snapshot["references"]["rule"]["after"]["mid"] == 8.5
         assert ledger.get(req_id)["mid_days"] == pytest.approx(9 / 8)
         assert ledger.get(req_id)["ai_days"] == pytest.approx(6 / 8)
         assert len(ui.fake.calls) == 1, "独立估时按钮只调用估时模型，不重跑问清/写单"
     finally:
         ledger.conn.close()
+
+
+def test_old_estimate_without_comparison_does_not_inherit_current_conditions(ui):
+    app = ui.app
+    _start_without_model(app)
+    _configure_fake_model(app)
+    _analyze_estimate(app)
+    analysis = app.session_state["analysis"]
+    current_comparison = dict(analysis.estimate.comparison)
+    analysis.estimate.comparison = {}
+    app.session_state["analysis"] = analysis
+    _run(app)
+
+    tab = _estimate_tab(app)
+    assert _by_label(tab.metric, BEFORE).value == "4～15 小时"
+    assert app.session_state["analysis"].estimate.comparison == {}
+    scope_text = _visible_text(_by_label(tab.expander, "估算前提与材料范围"))
+    assert "本次比较口径" not in scope_text
+    assert all(value not in scope_text for value in current_comparison.values())
+    assert any("粗估" in message.value for message in tab.warning)
+    assert len(ui.fake.calls) == 1, "显示旧估算不能自行重跑模型或改写其比较口径"
 
 
 def test_code_material_scope_and_exact_task_evidence_are_visible(ui):

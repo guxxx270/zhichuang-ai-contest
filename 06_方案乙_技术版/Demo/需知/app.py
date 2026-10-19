@@ -1483,10 +1483,19 @@ with tabs[2]:
         after.metric("现在（AI协同）", f"{est.ai_low * 8:g}～{est.ai_high * 8:g} 小时")
         after.caption(f"参考投入：{est.ai_mid * 8:g} 小时")
         st.caption("均为投入工时，8 小时 = 1 人天，不是日历工期；AI 协同包含人工审核、数字核对与验收。")
+        if est.saving_pct is not None:
+            st.caption(f"按参考投入计算，预计人时减少 {est.saving_pct:g}%；两边均为估计，不是实测提效。")
         code_files = getattr(est, "code_files", []) or []
         st.caption(f"估时模型：{getattr(est, 'model', '') or '未记录'} · 材料范围："
                    + (f"需求与 {len(code_files)} 份已读取代码摘录" if code_files else "需求与补充材料（未读取实现代码）"))
         with st.expander("估算前提与材料范围", expanded=requirements_only):
+            comparison = getattr(est, "comparison", {}) or {}
+            if comparison:
+                st.markdown("**本次比较口径**")
+                for key in ("before", "after", "unit", "environment"):
+                    if comparison.get(key):
+                        st.markdown(f"- {textutil.markdown_literal(comparison[key])}")
+                st.caption(f"口径版本：{comparison.get('version', '未记录')}")
             assumptions = getattr(est, "assumptions", []) or []
             if assumptions:
                 for assumption in assumptions:
