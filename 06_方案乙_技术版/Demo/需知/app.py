@@ -136,7 +136,7 @@ header[data-testid="stHeader"] { background: transparent; }
 /* 结果页签 */
 div[data-testid="stTabs"] [role="tab"] p { font-size:15.5px; font-weight:600; }
 div[data-testid="stTabs"] [role="tab"][aria-selected="true"] p { color:#9BE7F7; }
-[data-testid="stForm"], [data-testid="stExpander"] details { background:rgba(13,20,38,.55); }
+[data-testid="stForm"], .st-key-xuzhi_intake, [data-testid="stExpander"] details { background:rgba(13,20,38,.55); }
 [data-testid="stMetric"] { background:var(--xz-panel); border:1px solid var(--xz-line); border-radius:12px; padding:10px 14px; }
 [data-testid="stMetricValue"] { color:#9BE7F7; }
 iframe[title="xuzhi_dictation"] { border: none !important; }
@@ -705,6 +705,7 @@ def _commit_dictation(chunk: str, box: str | None = None) -> None:
     prev = box if box is not None else st.session_state.get("raw_composed", "")
     composed = append_dictation(prev, chunk)
     st.session_state.raw_composed = composed
+    st.session_state.setdefault("intake_drafts", {})["（粘贴自己的）"] = composed
     st.session_state.speech_rev = st.session_state.get("speech_rev", 0) + 1
     st.session_state.sample = "（粘贴自己的）"
     st.session_state.src = "口述"
@@ -887,6 +888,14 @@ def _sample_body(choice: str) -> str:
     return next((p.read_text(encoding="utf-8") for p in samples if p.stem == choice), "")
 
 
+def _save_intake_draft(choice: str, text_key: str) -> None:
+    """失焦时保存当前原话；切换样例不会覆盖各自尚未提交的修改。"""
+    text = st.session_state.get(text_key, "")
+    st.session_state.setdefault("intake_drafts", {})[choice] = text
+    if choice == "（粘贴自己的）":
+        st.session_state.raw_composed = text
+
+
 with intake_area:
     pick_l, pick_r = st.columns([2, 3])
     with pick_r:
@@ -906,29 +915,31 @@ with intake_area:
         st.session_state["sample_shown"] = choice
         st.session_state["speech_rev"] = int(st.session_state.get("speech_rev", 0) or 0) + 1
 
-    with st.form("xuzhi_go"):
+    # 原话需在失焦时同步到会话；form 会等到开工才提交，切样例时会丢掉未提交文字。
+    with st.container(border=True, key="xuzhi_intake"):
         c1, c2 = st.columns([2, 3])
         with c1:
             src = st.selectbox("来源（可不选）", ["自动识别", "企业微信", "会议纪要", "邮件", "需求单", "口述"], key="src")
             mobile = st.toggle("原型按手机版出", value=False, key="mobile")
             client = st.toggle("原型出客户版（脱敏）", value=False, key="client")
         with c2:
-            default_text = st.session_state.get("raw_composed", "") if choice == "（粘贴自己的）" else _sample_body(choice)
+            defaults = st.session_state.get("raw_composed", "") if choice == "（粘贴自己的）" else _sample_body(choice)
+            default_text = st.session_state.get("intake_drafts", {}).get(choice, defaults)
+            text_key = f"raw_text_{st.session_state.get('speech_rev', 0)}"
             text = st.text_area(
                 "原话",
                 value=default_text,
                 height=190,
                 placeholder="例如：净值日报能不能加一列……也可点上方「开始口述」",
-                key=f"raw_text_{st.session_state.get('speech_rev', 0)}",
+                key=text_key,
+                on_change=_save_intake_draft,
+                args=(choice, text_key),
             )
-            go = st.form_submit_button("需知，开工", type="primary", icon=":material/bolt:")
+            go = st.button("需知，开工", type="primary", icon=":material/bolt:")
 
 llm = None
 if go:
-    if choice == "（粘贴自己的）":
-        st.session_state.raw_composed = text
-    elif not text.strip():
-        text = _sample_body(choice)
+    _save_intake_draft(choice, text_key)
     if not text.strip():
         st.warning("请粘贴原话，或选一个样例后再点开工。")
     else:
