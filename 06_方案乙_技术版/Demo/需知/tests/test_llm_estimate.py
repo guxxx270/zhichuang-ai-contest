@@ -148,6 +148,17 @@ def test_model_exception_has_no_partial_or_fixed_estimate():
     _assert_unestimated(result, "failed")
 
 
+def test_missing_model_channel_has_an_actionable_safe_error():
+    error = RuntimeError("secret-key-must-not-appear")
+    error.body = {"error": {"code": "model_not_found", "message": "untrusted gateway details"}}
+    result = _estimate(FakeLLM(error=error))
+
+    _assert_unestimated(result, "failed")
+    assert "可用渠道" in result.error and "可用模型目录" in result.error
+    assert "secret-key" not in result.error and "untrusted" not in result.error
+    assert result.references["rule"]["status"] == "ready"
+
+
 @pytest.mark.parametrize(
     ("track", "field", "bad"),
     [

@@ -208,9 +208,14 @@ def estimate(card: Card, text: str, questions: list[Question], *, llm=None,
         llm.current_purpose = "估时分析"
         data = llm.chat_json(load_prompt("estimate_analysis"), json.dumps(payload, ensure_ascii=False))
         result.model = getattr(llm, "last_model", "") or result.model
-    except Exception:
+    except Exception as exc:
         result.status = "failed"
         result.error = "模型估时调用失败，尚未生成工时。请检查模型连接后重新分析。"
+        body = getattr(exc, "body", None)
+        detail = body.get("error", body) if isinstance(body, dict) else {}
+        error_code = getattr(exc, "code", None) or (detail.get("code") if isinstance(detail, dict) else None)
+        if error_code == "model_not_found":
+            result.error = "当前网关没有为所选模型提供可用渠道，尚未生成工时。请读取可用模型目录，并核对账号分组支持的模型后重试。"
         return result
     try:
         return _parse(data, payload, result)

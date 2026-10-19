@@ -4,6 +4,7 @@ from __future__ import annotations
 import html
 import json
 import re
+from hashlib import sha256
 from uuid import uuid4
 
 import altair as alt
@@ -712,6 +713,60 @@ def _render_live_model_pick(
     return chosen
 
 
+def _custom_model_binding(api_base: str, api_key: str) -> str:
+    """目录只属于当前网关与账号；缓存标识不再复制明文 Key。"""
+    return sha256(json.dumps([api_base.strip().rstrip("/"), api_key.strip()]).encode("utf-8")).hexdigest()
+
+
+def _apply_custom_catalog_selection(fallback_base: str) -> None:
+    # 回调在下一轮控件渲染前运行，才能同步手填框而不覆盖用户后续的手动修改。
+    current_base = (st.session_state.get("custom_api_base_custom") or "").strip() or fallback_base
+    current_key = (st.session_state.get("api_key_input_custom") or "").strip()
+    if st.session_state.get("custom_catalog_binding") != _custom_model_binding(current_base, current_key):
+        return
+    selected = st.session_state.get("custom_catalog_pick")
+    if selected in (st.session_state.get("custom_catalog_models") or {}):
+        st.session_state["custom_model_custom"] = selected
+
+
+def _render_custom_model_catalog(api_base: str, api_key: str, *, fallback_base: str) -> None:
+    """自定义网关仅在明确点击时读目录；读取本身不改变当前模型。"""
+    binding = _custom_model_binding(api_base, api_key)
+    if st.session_state.get("custom_catalog_binding") != binding:
+        st.session_state["custom_catalog_binding"] = binding
+        st.session_state["custom_catalog_models"] = {}
+        st.session_state["custom_catalog_note"] = ""
+        st.session_state["custom_catalog_pick"] = None
+    if st.button("读取可用模型", key="custom_read_models", disabled=not api_key or not api_base,
+                 help="使用当前网关和 API Key 读取目录；仅在你选择模型后修改模型 ID。"):
+        from xuzhi.llm import list_openai_models
+
+        with st.spinner("正在读取当前网关的模型目录……"):
+            try:
+                rows, note = list_openai_models(api_base, api_key)
+                catalog = {
+                    mid.strip(): str(label or mid)
+                    for mid, label in rows if isinstance(mid, str) and mid.strip()
+                }
+            except Exception:
+                catalog, note = {}, "读取模型目录失败，请检查网关配置后重试。"
+        st.session_state["custom_catalog_models"] = catalog
+        st.session_state["custom_catalog_note"] = str(note or ("当前账号的模型目录为空。" if not catalog else "")).replace(api_key, "[已隐藏]")
+        st.session_state["custom_catalog_pick"] = None
+    catalog = st.session_state.get("custom_catalog_models") or {}
+    note = st.session_state.get("custom_catalog_note") or ""
+    if catalog:
+        selected = st.session_state.get("custom_catalog_pick")
+        if selected not in catalog or selected != st.session_state.get("custom_model_custom"):
+            st.session_state["custom_catalog_pick"] = None
+        st.selectbox("网关可用模型", list(catalog), index=None, key="custom_catalog_pick",
+                     placeholder="选择后填入模型 ID", format_func=lambda mid: catalog.get(mid, mid),
+                     on_change=_apply_custom_catalog_selection, args=(fallback_base,))
+        st.caption((note + "；" if note else "") + "读取目录不会切换模型，选择后才填入上方模型 ID。")
+    elif note:
+        st.warning(note + " 当前模型 ID 保持不变。")
+
+
 def _render_model_secrets(
     mode_sel: str, provider_id: str, api_base_sel: str, model_sel: str, key_slot=None,
 ) -> tuple[str, str, str, str, dict[str, str]]:
@@ -731,7 +786,8 @@ def _render_model_secrets(
             type="password",
             key=f"api_key_input_{provider_id}",
             placeholder="PAT（pt-…）" if provider_id.startswith("qoder") else "sk-…（不填 = 规则引擎）",
-            help="只在本次会话内使用，不写入仓库。填了会实时拉取网关当前可用的模型。",
+            help=("只在本次会话内使用，不写入仓库。点击「读取可用模型」才请求当前网关的目录。" if provider_id == "custom"
+                  else "只在本次会话内使用，不写入仓库。填了会实时拉取网关当前可用的模型。"),
         ).strip()
     st.session_state.api_keys[provider_id] = api_key_sel
 
@@ -756,8 +812,10 @@ def _render_model_secrets(
             model_sel = c_model.text_input(
                 "模型 ID",
                 key=f"custom_model_{provider_id}",
-                placeholder="可先填 Key，在上方网关用 /models 核对 id",
+                placeholder="手填模型 ID，或点击下方「读取可用模型」" if provider_id == "custom" else "可先填 Key，在上方网关用 /models 核对 id",
             ).strip()
+        if provider_id == "custom":
+            _render_custom_model_catalog(api_base_sel, api_key_sel, fallback_base=default_base)
     elif not live_openai and not live_qoder:
         st.caption(f"网关：`{api_base_sel}`　·　模型：`{model_sel}`")
 
