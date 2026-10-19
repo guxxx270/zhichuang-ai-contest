@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass, field
 
 from ..llm import LLM, load_prompt
+from ..textutil import markdown_literal
 from .intake import Card, Question
 
 FIELD_DICT: dict[str, tuple[str, str]] = {   # 指标/对象 → (字段名, 类型/口径)
@@ -123,7 +124,7 @@ def build_spec(card: Card, questions: list[Question], reuse_line: str = "", llm:
          "## 2. 谁用、什么时候用", f"使用者：{'、'.join(card.users)}；触发：{card.trigger}；频率：{card.frequency}"
          + (f"；期望上线：{card.deadline}" if card.deadline else "；上线时间：待定"), "",
          "## 3. 要做什么"]
-    b += [f"{i}. {f}" for i, f in enumerate(card.features, 1)]
+    b += [f"{i}. {markdown_literal(f)}" for i, f in enumerate(card.features, 1)]
     b += ["", "## 4. 数据与口径"]
     b += [f"- 数据来源：{'、'.join(card.data_sources) or '待确认'}"]
     for q in _q_by_cat(questions, ("口径", "时点与日历", "数据来源", "风控口径", "品种范围", "展示格式")):
@@ -145,7 +146,7 @@ def build_spec(card: Card, questions: list[Question], reuse_line: str = "", llm:
     # ---- 技术版 ----
     t = [f"# {card.title} · 技术需求", "", "## A. 用户故事与验收标准"]
     for s in stories:
-        t += [f"**{s.id}** 作为 *{s.role}*，我希望 **{s.want}**，以便 {s.benefit}。", f"> 原话：{s.origin}"]
+        t += [f"**{s.id}** 作为 *{s.role}*，我希望 **{markdown_literal(s.want)}**，以便 {s.benefit}。", f"> 原话：{markdown_literal(s.origin)}"]
         t += [f"- {a}" for a in s.acceptance] + [""]
     t += ["## B. 数据字典（草案）", "| 中文 | 字段 | 类型 / 口径 |", "|---|---|---|"]
     t += [f"| {cn} | `{f}` | {tp} |" for cn, f, tp in fields]

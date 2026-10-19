@@ -47,7 +47,8 @@ CHANNEL_RULES: list[tuple[str, str]] = [
 ]
 
 FEATURE_CUES = re.compile(r"能不能|可不可以|要|需要|希望|最好|想做|加一|加上|放进|自动|生成|计算|测算|推送|提醒|提示|通知|抓取|采集|识别|"
-                          r"支持|导出|查询|展示|监控|统计|分析|留痕|发给|做一个|做个|改版|新增|增加|算出")
+                          r"支持|导出|查询|展示|监控|统计|分析|留痕|发给|做一个|做个|改版|新增|增加|算出|"
+                          r"修改|调整|改为|不得|不应|不能|无需|待确认|待核对")
 FILLER = re.compile(r"^(那个|对了|另外|然后|还有|其实|就是|小李|小王|在吗|跟你说个事|谢谢|请|麻烦|你好)[，,：:\s]*")
 
 
@@ -121,6 +122,26 @@ def find_indicators(text: str) -> list[str]:
     found = [i for i in INDICATORS if i in text]
     # 去掉被更长词覆盖的（单位净值 vs 净值）
     return [i for i in found if not any(i != j and i in j for j in found)]
+
+
+def find_changed_indicators(text: str) -> list[str]:
+    """优先提取明确指名的变更指标，不让公式中的净值、指数等依赖抢占主题。"""
+    # 仅接受明确的名称边界；不从整句里猜一个名词，也不依赖公司产品名。
+    name = r"[「\"“]?([^\s，,。；;：:（）()「」\"“”]{2,32})[」\"”]?"
+    patterns = (
+        r"(?:修改|调整|变更)(?:一个|一项|该)?指标的?(?:计算方法|计算方式|计算口径|取值口径)\s*[:：]\s*" + name,
+        r"(?:修改|调整|变更)[「\"“]([^」\"”]{2,32})[」\"”](?:指标)?的?(?:计算方法|计算方式|计算口径|取值口径)",
+    )
+    out: list[str] = []
+    for pattern in patterns:
+        for match in re.finditer(pattern, text):
+            merge_label(out, match.group(1))
+    return out
+
+
+def markdown_literal(text: str) -> str:
+    """用户原话作为正文显示，保留公式的乘号、下划线等 Markdown 特殊字符。"""
+    return re.sub(r"([\\`*_{}\[\]()#+.!|<>-])", r"\\\1", text)
 
 
 _COL_PATTERNS = [

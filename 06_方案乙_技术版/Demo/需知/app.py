@@ -9,7 +9,7 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
-from xuzhi import config, knowledge, sandbox
+from xuzhi import config, knowledge, sandbox, textutil
 from xuzhi.asr import correct_domain_speech
 from xuzhi.audit import Audit
 from xuzhi.drafts import (
@@ -1106,7 +1106,7 @@ with tabs[0]:
                 )
         st.markdown(f"**一句话理解**：{card.goal}。")
         cc = st.columns(2)
-        cc[0].markdown("**功能点（原话清洗）**\n" + "\n".join(f"{i}. {f}" for i, f in enumerate(card.features, 1)))
+        cc[0].markdown("**功能点（原话清洗）**\n" + "\n".join(f"{i}. {textutil.markdown_literal(f)}" for i, f in enumerate(card.features, 1)))
         cc[1].markdown("**抽到的要素**\n" + "\n".join(f"- {k}：{'、'.join(v) if isinstance(v, list) else v}" for k, v in (
             ("使用者", card.users), ("品种", card.symbols or ["—"]), ("指标", card.indicators or ["—"]), ("对象", card.scope_objects or ["—"]),
             ("数据来源", card.data_sources or ["待确认"]), ("渠道", card.channels or ["未提"]), ("非功能", card.nonfunctional or ["—"]))))
