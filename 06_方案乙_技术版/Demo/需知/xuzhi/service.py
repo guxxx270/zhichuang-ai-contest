@@ -104,6 +104,9 @@ def to_dict(a: Analysis, *, req_id: int = 0, include_spec: bool = True, include_
         ],
         "confirm_message": a.message,
         "estimate": {
+            "method": est.method,
+            "assumptions": list(est.assumptions),
+            "hours_per_day": 8,
             "trad_days": {"mid": est.mid, "low": est.low, "high": est.high},
             "ai_days": {"mid": est.ai_mid, "low": est.ai_low, "high": est.ai_high},
             "saving_pct": est.saving_pct,

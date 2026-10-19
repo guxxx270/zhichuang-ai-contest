@@ -50,7 +50,9 @@ class Ledger:
              len(a.questions), sum(1 for q in a.questions if q.answer.strip()), a.estimate.mid, a.estimate.confidence, a.redacted, a.estimate.ai_mid,
              _dept_of(a.card.requester), "受理", float(getattr(a, "seconds", 0.0) or 0.0), int(getattr(a.estimate, "unanswered_high", 0) or 0),
              json.dumps({"card": json.loads(a.card.to_json()), "questions": [q.__dict__ for q in a.questions],
-                         "estimate": {"mid": a.estimate.mid, "low": a.estimate.low, "high": a.estimate.high, "ai_mid": a.estimate.ai_mid, "dims": a.estimate.dims},
+                         "estimate": {"mid": a.estimate.mid, "low": a.estimate.low, "high": a.estimate.high, "ai_mid": a.estimate.ai_mid, "dims": a.estimate.dims,
+                                      "method": a.estimate.method, "assumptions": a.estimate.assumptions,
+                                      "ai_low": a.estimate.ai_low, "ai_high": a.estimate.ai_high},
                          "decisions": [d.recommended for d in a.architecture.decisions],
                          "data_map": [r.__dict__ for r in getattr(a.architecture, "data_map", [])]}, ensure_ascii=False)))
         self.conn.commit()

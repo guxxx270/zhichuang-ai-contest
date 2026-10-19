@@ -1,4 +1,4 @@
-"""估量：六维复杂度 → 基础人天；类比估算（历史需求库实际人天校准）→ 区间 + 置信度 + 阶段拆分。数字全由程序算。"""
+"""估量：既有计算变更按工作项估小时；其他需求按复杂度与历史类比估人天。"""
 from __future__ import annotations
 
 import re
@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 
 from .. import config, knowledge
 from .intake import Card, Question
+from .incremental import ChangeScope, build_change_work, calculation_change_scope
 from .tasks import Task, allocate, build_tasks, delivery_mode, who_split
 
 DIMS = ["功能点", "数据接入", "界面", "权限", "性能", "合规"]
@@ -48,6 +49,8 @@ class Estimate:
     who: dict[str, float] = field(default_factory=dict)
     ai_phases: dict[str, float] = field(default_factory=dict)
     delivery: str = ""
+    method: str = "complexity"
+    assumptions: list[str] = field(default_factory=list)
 
     @property
     def total_points(self) -> int:
@@ -93,7 +96,48 @@ def find_similar(card: Card, text: str, k: int = 3) -> list[Similar]:
     return out[:k]
 
 
+def _estimate_change(card: Card, text: str, questions: list[Question], scope: ChangeScope) -> Estimate:
+    work = build_change_work(scope)
+    tasks = [w.task for w in work]
+    mid, ai_mid = sum(t.trad_days for t in tasks), sum(t.ai_days for t in tasks)
+    phases: dict[str, float] = {}
+    ai_phases: dict[str, float] = {}
+    for t in tasks:
+        phases[t.phase] = phases.get(t.phase, 0.0) + t.trad_days
+        ai_phases[t.phase] = ai_phases.get(t.phase, 0.0) + t.ai_days
+    assumptions = [
+        "按已有计算与报送链路的局部修改估算，沿用现有数据、权限和发布流程。",
+        "真实代码、字段映射及样本尚未核对；发现缺少数据、接口或需回补历史时重新估算。",
+    ]
+    if scope.parent_rollup:
+        assumptions.append("母子关系、筛选标记与本母层明细市值可复用的前提待核对；按关系动态汇总，不逐个维护产品。")
+    if scope.price_ratio_in_field:
+        assumptions.append("已确认价格比包含在现有字段中，不重复计算；具体字段仍需核对。")
+    dims = {d: 1 for d in DIMS}
+    dims.update({"功能点": 2 if scope.parent_rollup else 1, "合规": 2 if "报送" in text else 1})
+    reasons = {d: "沿用现有能力；未计新增建设" for d in DIMS}
+    reasons["功能点"] = "计算口径修改" + ("及母层动态汇总" if scope.parent_rollup else "")
+    reasons["合规"] = "人工核对关键数字及发布验收"
+    return Estimate(
+        dims=dims, reasons=reasons, base_days=mid, history_days=None, mid=mid,
+        low=sum(w.trad_low for w in work) / 8, high=sum(w.trad_high for w in work) / 8,
+        confidence="低", confidence_reason="现有逻辑增量修改：按工作项估小时；尚未核对代码与字段，属于有前提的规则初估。",
+        similar=find_similar(card, text), phases=phases,
+        unanswered_high=sum(1 for q in questions if q.impact == "高" and not q.answer.strip()),
+        tasks=tasks, ai_mid=ai_mid, ai_low=sum(w.ai_low for w in work) / 8,
+        ai_high=sum(w.ai_high for w in work) / 8, saving_pct=round((1 - ai_mid / mid) * 100),
+        who=who_split(tasks), ai_phases=ai_phases,
+        delivery="技术人员使用 AI 修改现有逻辑，人工核对字段和关键数字，再按既有流程发布验收。",
+        method="incremental", assumptions=assumptions,
+    )
+
+
 def estimate(card: Card, text: str, questions: list[Question]) -> Estimate:
+    # 答复中明确增加的范围同样要生效，但默认假设和未答问题不能当作新增工作。
+    scope_text = text + "\n" + "\n".join(q.answer for q in questions if q.answer.strip())
+    scope = calculation_change_scope(scope_text)
+    if scope is not None:
+        return _estimate_change(card, scope_text, questions, scope)
     dims, reasons = score_dims(card, text)
     base = 1.5 + sum(WEIGHTS[d] * (dims[d] - 1) for d in DIMS)
     sims = find_similar(card, text)

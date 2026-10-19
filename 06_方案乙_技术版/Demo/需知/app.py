@@ -276,13 +276,14 @@ def render_ledger(ledger: Ledger, memory: Memory, audit: Audit, *, req_id: int =
         k2.metric("平均追问", f"{dash['avg_questions']} 条", help=f"业务答复率 {dash['answer_rate']:.0%}")
         k7.metric("记忆省问", f"{_mem['hits']} 条", help=f"追问记忆：记住 {_mem['requesters']} 个提出方的 {_mem['entries']} 条口径；命中即不再问")
         k3.metric("平均澄清轮次", f"{dash['avg_rounds']}", help="开工一轮 + 每次按业务答复重算算一轮；人工通常三四轮")
-        k4.metric("AI 协同省时", f"{dash['saved_days']} 人天", delta=f"-{dash['saving_pct']}%", delta_color="inverse",
-                  help=f"传统估 {dash['trad_days']} → AI 协同估 {dash['ai_days']}")
+        k4.metric("全部台账预计省时", f"{dash['saved_days']} 人天", delta=f"-{dash['saving_pct']}%", delta_color="inverse",
+                  help=f"全部记录的传统估算 {dash['trad_days']} 减 AI 协同估算 {dash['ai_days']} 人天；包含测试及重复录入，不是本条估时，也不是已实现省时。本条工作量见「估量」。")
         k5.metric("估算偏差", "—" if dash["mape"] is None else f"{dash['mape']}%",
                   help=("已对账 " + str(dash["closed"]) + " 条；平均绝对偏差（估 vs 实际；用了 AI 协同的比 AI 轨估算）"
                         + "".join(f"，{n} {v}%" for n, v in (("传统轨", dash["mape_trad"]), ("AI 轨", dash["mape_ai"])) if v is not None))
                   if dash["closed"] else "还没有对账记录：交付后在上方回写实际人天")
         k6.metric("出稿用时", ("<1 s" if dash["avg_seconds"] < 1 else f"{dash['avg_seconds']} s"), help=f"规则引擎毫秒级，模型润色另计；👍 {dash['thumbs_up']} / 👎 {dash['thumbs_down']}")
+        st.caption("预计省时汇总全部台账，含测试及重复录入；不代表已实现省时。本条工作量见「估量」。")
         g1, g2, g3 = st.columns(3)
         with g1:
             st.markdown("**各部门需求量**")
@@ -824,8 +825,9 @@ hero_slot = st.container()   # 品牌区等「模型与材料」渲染完再填�
 k = st.columns(4)
 for col, n, l, c in ((k[0], f"{stats['count']} 份", "已分析需求", "#22D3EE"), (k[1], f"{len(knowledge.probes())} 条", "期货追问知识库", "#A78BFA"),
                      (k[2], f"{len(knowledge.history())} / {len(knowledge.systems())} / {knowledge.data_domains()}", "历史需求 · 系统目录 · 数据域", "#34D399"),
-                     (k[3], f"{dash0['saved_days']} 人天" + (f" · 偏差 {dash0['mape']}%" if dash0.get("mape") is not None else ""), "AI 协同累计省时（估）· 已对账估算偏差", "#FBBF24")):
+                     (k[3], f"{dash0['saved_days']} 人天", "全部台账预计省时", "#FBBF24")):
     col.markdown(f'<div class="xz-kpi" style="--c:{c}"><div class="n">{n}</div><div class="l">{l}</div></div>', unsafe_allow_html=True)
+k[3].caption("含测试及重复录入；不是本条估时，也不是已实现省时。本条工作量见「估量」。")
 st.write("")
 
 st.markdown('<div class="xz-sec"><span class="no">01</span><span class="t">收需求</span>'
@@ -1165,38 +1167,62 @@ with tabs[1]:
 
 # ---------- 估量 ----------
 with tabs[2]:
+    incremental = getattr(est, "method", "complexity") == "incremental"
+    effort_unit = "小时" if incremental else "人天"
+    effort_factor = 8 if incremental else 1
     m = st.columns(5)
-    m[0].metric("传统开发", f"{est.mid} 人天", help=f"区间 {est.low} ～ {est.high}；六维加权 + 历史需求类比")
-    m[1].metric("AI 协同", f"{est.ai_mid} 人天", delta=f"-{est.saving_pct}%", delta_color="inverse", help=f"区间 {est.ai_low} ～ {est.ai_high}；按任务性质分别乘 AI 协同系数")
+    m[0].metric("传统开发", f"{est.mid * effort_factor:g} {effort_unit}",
+                help=f"区间 {est.low * effort_factor:g} ～ {est.high * effort_factor:g} {effort_unit}；" + ("按增量工作项累计" if incremental else "六维加权 + 历史需求类比"))
+    m[1].metric("AI 协同", f"{est.ai_mid * effort_factor:g} {effort_unit}", delta=f"-{est.saving_pct}%", delta_color="inverse",
+                help=f"区间 {est.ai_low * effort_factor:g} ～ {est.ai_high * effort_factor:g} {effort_unit}；" + ("按任务估算 AI 辅助后的投入工时" if incremental else "按任务性质分别乘 AI 协同系数"))
     m[2].metric("置信度", est.confidence)
     m[3].metric("未答复的高影响问题", f"{est.unanswered_high} 个")
     m[4].metric("AI 能做的活占", f"{est.who.get('AI 能做', 0):.0%}", help="按传统人天口径统计")
-    st.caption(est.confidence_reason)
+    if incremental:
+        st.caption(f"AI 协同预计投入 {est.ai_low * 8:g}～{est.ai_high * 8:g} 小时（参考 {est.ai_mid * 8:g} 小时），"
+                   f"其中编码修改参考 {est.ai_phases.get('开发', 0) * 8:g} 小时。")
+        st.caption("8 小时 = 1 人天，表示投入工时，不是日历天；规则初估，待核对现有代码与字段。")
+    else:
+        st.caption(est.confidence_reason)
+    if incremental and getattr(est, "assumptions", None):
+        with st.expander("估算前提与待核对项"):
+            for assumption in est.assumptions:
+                st.markdown(f"- {assumption}")
     st.markdown(f"**建议交付方式**：{est.delivery}")
     st.markdown("#### 双轨拆分：先拆活，再分工")
     who_cls = {"AI 能做": "lo", "AI 做人审": "md", "人必须做": "hi"}
     st.markdown("".join(f'<span class="xz-chip {who_cls[k]}">{k} {v:.0%}</span>' for k, v in est.who.items()), unsafe_allow_html=True)
-    tdf = pd.DataFrame([{"任务": t.name, "阶段": t.phase, "分工": t.who, "传统人天": t.trad_days, "AI 协同人天": t.ai_days, "系数": t.coef, "为什么": t.note} for t in est.tasks])
+    tdf = pd.DataFrame([{"任务": t.name, "阶段": t.phase, "分工": t.who,
+                         f"传统（{effort_unit}）": round(t.trad_days * effort_factor, 2),
+                         f"AI 协同（{effort_unit}）": round(t.ai_days * effort_factor, 2),
+                         **({} if incremental else {"系数": t.coef}), "为什么": t.note} for t in est.tasks])
     st.dataframe(tdf, hide_index=True, width="stretch", height=min(60 + 36 * len(tdf), 620))
     l, r = st.columns([1, 1])
     with l:
-        st.markdown("**按阶段对比（人天）**")
-        pdf = pd.DataFrame({"传统开发": est.phases, "AI 协同": est.ai_phases})
+        st.markdown(f"**按阶段对比（{effort_unit}）**")
+        pdf = pd.DataFrame({"传统开发": {phase: round(days * effort_factor, 2) for phase, days in est.phases.items()},
+                            "AI 协同": {phase: round(days * effort_factor, 2) for phase, days in est.ai_phases.items()}})
         try:
             st.bar_chart(pdf, height=220, stack=False)
         except TypeError:
             st.bar_chart(pdf, height=220)
-        st.markdown(f"基础估算 **{est.base_days} 人天**（六维加权）" + (f"；类比校准 **{est.history_days} 人天**（相似历史需求实际值加权）" if est.history_days else "；无相似历史需求，未校准"))
-        st.markdown("**六维复杂度**（1～5）")
-        st.dataframe(pd.DataFrame({"维度": list(est.dims.keys()), "分": list(est.dims.values()), "依据": [est.reasons[d] for d in est.dims]}), hide_index=True, width="stretch")
+        if not incremental:
+            st.markdown(f"基础估算 **{est.base_days} 人天**（六维加权）" + (f"；类比校准 **{est.history_days} 人天**（相似历史需求实际值加权）" if est.history_days else "；无相似历史需求，未校准"))
+            st.markdown("**六维复杂度**（1～5）")
+            st.dataframe(pd.DataFrame({"维度": list(est.dims.keys()), "分": list(est.dims.values()), "依据": [est.reasons[d] for d in est.dims]}), hide_index=True, width="stretch")
     with r:
-        st.markdown("**类比估算：相似历史需求**")
+        st.markdown("**相似历史需求（仅供参考）**" if incremental else "**类比估算：相似历史需求**")
+        if incremental:
+            st.caption("以下历史项目的范围尚未核对，未用于校准本次增量工时。")
         if est.similar:
-            st.dataframe(pd.DataFrame([{"相似度": f"{s.score:.0%}", "需求": s.title, "类型": s.type, "部门": s.dept, "年份": s.year, "当时估": s.estimate_days, "实际": s.actual_days, "备注": s.note} for s in est.similar]),
+            st.dataframe(pd.DataFrame([{"相似度": f"{s.score:.0%}", "需求": s.title, "类型": s.type, "部门": s.dept, "年份": s.year, "当时估（人天）": s.estimate_days, "实际（人天）": s.actual_days, "备注": s.note} for s in est.similar]),
                          hide_index=True, width="stretch")
         else:
             st.info("历史需求库里没有相似需求；上线后把实际工时回写，下次就有了。")
-    st.markdown('<div class="xz-foot">数字全由程序算：六维复杂度 + 相似历史需求 → 传统轨；逐个任务乘 AI 协同系数 → AI 轨。涉及资金数字、交易链路、对客内容的任务，验证成本不打折。</div>', unsafe_allow_html=True)
+    if incremental:
+        st.markdown('<div class="xz-foot">按具体改动、复用核对、回归比对和发布验收累计工时；AI 辅助编码后，关键数字仍需人工核对。</div>', unsafe_allow_html=True)
+    else:
+        st.markdown('<div class="xz-foot">数字全由程序算：六维复杂度 + 相似历史需求 → 传统轨；逐个任务乘 AI 协同系数 → AI 轨。涉及资金数字、交易链路、对客内容的任务，验证成本不打折。</div>', unsafe_allow_html=True)
 
 # ---------- 定架 ----------
 with tabs[3]:
