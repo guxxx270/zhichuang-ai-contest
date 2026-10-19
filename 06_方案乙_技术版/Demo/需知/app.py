@@ -4,6 +4,7 @@ from __future__ import annotations
 import html
 import json
 import re
+from uuid import uuid4
 
 import altair as alt
 import pandas as pd
@@ -13,6 +14,7 @@ import streamlit.components.v1 as components
 from xuzhi import config, knowledge, sandbox, textutil
 from xuzhi.asr import correct_domain_speech
 from xuzhi.audit import Audit
+from xuzhi.background import start_analysis_job, start_estimate_job
 from xuzhi.drafts import (
     Draft,
     RepoBundle,
@@ -26,7 +28,7 @@ from xuzhi.ledger import STATUSES, Ledger
 from xuzhi.llm import LLM
 from xuzhi.memory import Memory
 from xuzhi.pipeline import analyze
-from xuzhi.pipeline.estimate import estimate
+from xuzhi.pipeline.estimate import Estimate, estimate
 from xuzhi.pipeline.prototype import apply_prototype_view, render as render_proto
 from xuzhi.speech import append_dictation, dictation_bar
 
@@ -96,9 +98,11 @@ header[data-testid="stHeader"] { background: transparent; }
 .xz-hero .slogan { font-size:15px; color:#C7D2E8; margin:12px 0 2px; }
 .xz-status { display:inline-flex; align-items:center; gap:8px; padding:6px 12px; border-radius:999px; font-size:12.5px;
   background:rgba(15,23,42,.7); border:1px solid var(--xz-line); color:#C7D2E8; white-space:nowrap; }
-.xz-status .dot { width:8px; height:8px; border-radius:50%; background:var(--xz-cyan); box-shadow:0 0 10px var(--xz-cyan); animation:xzpulse 1.8s infinite; }
+.xz-status .dot { width:8px; height:8px; border-radius:50%; background:var(--xz-cyan); box-shadow:0 0 10px var(--xz-cyan); }
 .xz-status.model .dot { background:var(--xz-green); box-shadow:0 0 10px var(--xz-green); }
-@keyframes xzpulse { 0%,100% { opacity:1; } 50% { opacity:.35; } }
+.xz-loading { display:inline-block; width:16px; height:16px; border:2px solid #22304F; border-top-color:#22D3EE;
+  border-radius:50%; animation:xzspin .8s linear infinite; margin-right:8px; vertical-align:middle; }
+@keyframes xzspin { to { transform:rotate(360deg); } }
 .xz-skills { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
 .xz-skill { --c:#22D3EE; display:inline-flex; align-items:center; gap:6px; padding:4px 11px; border-radius:999px; font-size:12.5px;
   color:#DCE4F5; background:color-mix(in srgb, var(--c) 12%, transparent); border:1px solid color-mix(in srgb, var(--c) 45%, transparent); }
@@ -147,7 +151,7 @@ iframe[title="xuzhi_dictation"] { border: none !important; }
 
 
 @st.cache_resource
-def get_ledger(api_version: str = "model-estimate-v1") -> Ledger:
+def get_ledger(api_version: str = "progressive-analysis-v2") -> Ledger:
     """API 版本参与缓存，升级后不复用缺少模型估时接口的旧实例。"""
     return Ledger()
 
@@ -298,7 +302,7 @@ def render_ledger(ledger: Ledger, memory: Memory, audit: Audit, *, req_id: int =
         k2.metric("平均追问", f"{dash['avg_questions']} 条", help=f"业务答复率 {dash['answer_rate']:.0%}")
         k7.metric("记忆省问", f"{_mem['hits']} 条", help=f"追问记忆：记住 {_mem['requesters']} 个提出方的 {_mem['entries']} 条口径；命中即不再问")
         k3.metric("平均澄清轮次", f"{dash['avg_rounds']}", help="开工一轮 + 每次按业务答复重算算一轮；人工通常三四轮")
-        saving_value = f"{dash['saved_days']} 人天" if dash.get("saved_days") is not None else "待模型估算"
+        saving_value = f"{dash['saved_days']} 人天" if dash.get("saved_days") is not None else "暂无模型统计"
         saving_delta = f"{-dash['saving_pct']:+g}%" if dash.get("saving_pct") is not None else None
         k4.metric("全部台账预计省时", saving_value, delta=saving_delta, delta_color="inverse",
                   help="仅汇总有有效双轨估算的记录；包含测试及重复录入，不是本条估时，也不是已实现省时。本条工作量见「估量」。")
@@ -494,6 +498,103 @@ def build_llm(mode: str, model: str, api_base: str, api_key: str, backend: str =
     except Exception as e:
         st.warning(f"模型初始化失败，模型估时暂不可用；需求初稿、规则模板和历史参考仍可查看：{e}")
         return LLM(mode="mock")
+
+
+def _cancel_model_job() -> None:
+    previous = st.session_state.pop("_model_job", None)
+    if previous is not None:
+        previous.discard()
+    st.session_state.pop("_model_job_meta", None)
+    st.session_state.pop("_model_last_status", None)
+    st.session_state["_analysis_revision"] = uuid4().hex
+
+
+def _model_running() -> bool:
+    # 未归并完成结果前也保持忙碌，避免快速点击重复提交。
+    return st.session_state.get("_model_job") is not None
+
+
+def _begin_model_job(seed, client, *, kind: str) -> None:
+    _cancel_model_job()
+    if client.mode != "api":
+        return
+    if kind == "estimate":
+        seed.estimate = Estimate(unanswered_high=seed.estimate.unanswered_high,
+                                 references=getattr(seed.estimate, "references", {}) or {})
+        ledger.update_estimate(st.session_state.req_id, seed.estimate)
+    client.req_id = st.session_state.get("req_id", 0)
+    # 每项后台任务使用独立审计连接，结束后由任务释放。
+    if isinstance(getattr(client, "audit", None), Audit):
+        client.audit = Audit()
+        client._job_owned_audit = True
+    factory = start_estimate_job if kind == "estimate" else start_analysis_job
+    job = factory(seed, client)
+    st.session_state["_model_job"] = job
+    st.session_state["_model_job_meta"] = {
+        "req_id": client.req_id, "revision": st.session_state["_analysis_revision"], "kind": kind,
+    }
+    st.session_state["analysis"] = seed
+
+
+def _settle_model_job(ledger: Ledger) -> bool:
+    job = st.session_state.get("_model_job")
+    if job is None:
+        return False
+    meta = st.session_state.get("_model_job_meta") or {}
+    if (meta.get("req_id") != st.session_state.get("req_id")
+            or meta.get("revision") != st.session_state.get("_analysis_revision")):
+        _cancel_model_job()
+        return True
+    snapshot = job.snapshot()
+    if snapshot["status"] == "running":
+        return False
+    st.session_state.pop("_model_job", None)
+    st.session_state.pop("_model_job_meta", None)
+    if snapshot.get("discarded"):
+        return True
+    current = st.session_state.get("analysis")
+    if current is None:
+        return True
+    result = snapshot.get("result")
+    failed = snapshot["status"] == "failed"
+    if result is not None:
+        if meta["kind"] == "estimate":
+            current.estimate = result
+        else:
+            current = result
+            current.prototype_html = apply_prototype_view(
+                current.prototype_source_html, mobile=bool(st.session_state.get("mobile")),
+                client_view=bool(st.session_state.get("client")),
+            )
+        failed = failed or current.estimate.status != "ready"
+        st.session_state.analysis = current
+        if meta["kind"] == "estimate":
+            ledger.update_estimate(meta["req_id"], current.estimate)
+        else:
+            ledger.update_analysis(meta["req_id"], current)
+    else:
+        # 后台异常不能让旧模型数字冒充本轮结果；初稿及参考仍然保留。
+        current.estimate = Estimate(status="failed", error=snapshot.get("error") or "模型分析失败，请重试。",
+                                    references=getattr(current.estimate, "references", {}) or {})
+        ledger.update_estimate(meta["req_id"], current.estimate)
+    st.session_state["_model_last_status"] = {
+        "status": "failed" if failed else "completed", "elapsed": snapshot["elapsed"],
+        "kind": meta["kind"], "error": snapshot.get("error") or current.estimate.error,
+    }
+    ledger.event(meta["req_id"], "后台模型分析", "失败或部分未成功" if failed else "已完成")
+    return True
+
+
+@st.fragment(run_every=1.0)
+def _render_model_progress() -> None:
+    if _settle_model_job(ledger):
+        st.rerun()
+    job = st.session_state.get("_model_job")
+    if job is not None:
+        progress = job.snapshot()
+        box = st.status(f"模型正在分析 · {progress['stage']} · 已等待 {progress['elapsed']:.0f} 秒",
+                        state="running", expanded=True)
+        box.write("规则初稿、规则模板、历史参考和原型已可查看；你可以先切换下方页签。模型结果完成后会自动更新。")
 
 
 def _preset_row(p: tuple) -> tuple[str, str, str, str, str]:
@@ -835,6 +936,7 @@ def _render_draft_link_rows() -> None:
 ledger = get_ledger()
 memory = get_memory()
 audit = get_audit()
+_settle_model_job(ledger)
 samples = sorted(config.SAMPLES_DIR.glob("*.md"))
 stats = ledger.stats()
 dash0 = ledger.dashboard()
@@ -849,9 +951,9 @@ hero_slot = st.container()   # 品牌区等「模型与材料」渲染完再填�
 k = st.columns(4)
 for col, n, l, c in ((k[0], f"{stats['count']} 份", "已分析需求", "#22D3EE"), (k[1], f"{len(knowledge.probes())} 条", "期货追问知识库", "#A78BFA"),
                      (k[2], f"{len(knowledge.history())} / {len(knowledge.systems())} / {knowledge.data_domains()}", "历史需求 · 系统目录 · 数据域", "#34D399"),
-                     (k[3], f"{dash0['saved_days']} 人天" if dash0.get("saved_days") is not None else "待模型估算", "全部台账预计省时", "#FBBF24")):
+                     (k[3], f"{dash0['saved_days']} 人天" if dash0.get("saved_days") is not None else "暂无模型统计", "全部台账预计省时", "#FBBF24")):
     col.markdown(f'<div class="xz-kpi" style="--c:{c}"><div class="n">{n}</div><div class="l">{l}</div></div>', unsafe_allow_html=True)
-k[3].caption("仅汇总有效估算，含测试及重复录入；不是本条估时，也不是已实现省时。本条工作量见「估量」。")
+k[3].caption("这是台账汇总，不表示模型正在运行。仅汇总有效模型估算，含测试及重复录入；本条进度和结果见下方。")
 st.write("")
 
 st.markdown('<div class="xz-sec"><span class="no">01</span><span class="t">收需求</span>'
@@ -897,7 +999,7 @@ _has_key = mode_sel == "api" and bool((api_key_sel or "").strip())
 with hero_slot:
     _skills = "".join(f'<span class="xz-skill" style="--c:{SKILL_COLORS[n]}"><b>{n}</b>{html.escape(d)}</span>'
                       for n, d in [*config.SKILLS, ("隐盾", "进模型前脱敏")])
-    _status = (f'<span class="xz-status model"><span class="dot"></span>开工调用模型 · {html.escape(preset_label)}</span>' if _has_key
+    _status = (f'<span class="xz-status model"><span class="dot"></span>模型已配置 · {html.escape(preset_label)}</span>' if _has_key
                else '<span class="xz-status"><span class="dot"></span>规则初稿与参考可用 · 模型未配置</span>')
     st.markdown(f"""
 <div class="xz-hero">
@@ -969,6 +1071,7 @@ if go:
     if not text.strip():
         st.warning("请粘贴原话，或选一个样例后再点开工。")
     else:
+        _cancel_model_job()
         run_mode, run_model, run_base, run_key = mode_sel, model_sel, api_base_sel, api_key_sel
         if run_mode == "api" and (not run_model or run_model in ("__custom__", "__custom_qoder_model__")):
             st.info("未填模型 ID，本次按规则引擎运行。")
@@ -1004,17 +1107,11 @@ if go:
                     st.warning(h)
                 if drafts and not visual_drafts(drafts) and not repos:
                     st.info("没有可复刻的静态界面，出样将按需求原话生成。")
-        if do_polish and (drafts or repos):
-            spin = "模型正在读现有材料并出结果……"
-        elif do_polish:
-            spin = "模型正在理解需求并出结果……"
-        else:
-            spin = "正在整理需求、生成规则与历史参考、出原型……"
         try:
-            with st.spinner(spin):
+            with st.spinner("正在生成快速初稿、规则模板、历史参考和原型……"):
                 a = analyze(
                     text, "" if src == "自动识别" else src, llm, answers=None,
-                    mobile=mobile, client_view=client, llm_polish=do_polish,
+                    mobile=mobile, client_view=client, llm_polish=False,
                     drafts=drafts, repos=repos, memory=memory,
                 )
         except Exception as e:
@@ -1030,7 +1127,7 @@ if go:
             "provider_id": provider_id,
         }
         if do_polish:
-            st.session_state.just_polished = a.engine != "规则"
+            _begin_model_job(a, llm, kind="analysis")
         st.session_state.scroll_to_results = True
         st.rerun()
 
@@ -1052,6 +1149,16 @@ if not a:
     st.stop()
 
 card, est, arch = a.card, a.estimate, a.architecture
+if _model_running():
+    _render_model_progress()
+else:
+    last_status = st.session_state.get("_model_last_status") or {}
+    if last_status.get("status") == "completed":
+        st.success(f"模型分析已完成 · 用时 {last_status['elapsed']:.0f} 秒。结果已自动更新到本条需求。")
+    elif last_status.get("status") == "failed":
+        st.warning("模型分析未完全成功；已保留快速初稿、规则模板和历史参考，可在对应页签重试。")
+    else:
+        st.info("快速结果已生成 · 尚未调用模型。规则初稿、模板和历史参考均可查看。")
 _mat = st.session_state.get("materials_report") or materials_report(
     getattr(a, "drafts", None) or st.session_state.get("drafts"),
     getattr(a, "repos", None) or st.session_state.get("repos"),
@@ -1084,41 +1191,38 @@ with tabs[0]:
             polish_clicked = False
             with st.container(border=True):
                 p1, p2 = st.columns([3.2, 1], vertical_alignment="center")
-                if _last.get("mode") == "api":   # 开工时调了模型但没用上（超时 / 网关不通 / 返回不可用）
+                if _model_running():
+                    p1.caption("模型正在后台分析，当前先展示规则初稿；你可以先查看和填写待确认项。")
+                elif (st.session_state.get("_model_last_status") or {}).get("status") == "failed":
                     p1.caption(":material/error: 这次开工调模型没成功，已用规则引擎出稿；可在上方「模型与参考材料」换个模型再润色。")
                 else:
                     p1.caption(":material/bolt: 规则引擎初稿（毫秒级、不调模型）。想让措辞更顺、多补几条追问，填好模型 Key 后点右边润色。")
                 with p2:
                     with st.form("xuzhi_polish", border=False):
-                        polish_clicked = st.form_submit_button("模型润色", icon=":material/auto_awesome:", width="stretch")
+                        polish_clicked = st.form_submit_button("模型润色", icon=":material/auto_awesome:", width="stretch", disabled=_model_running())
             if polish_clicked:
                 polish_key = (api_key_sel or st.session_state.api_keys.get(provider_id, "")).strip()
                 polish_llm = build_llm(mode_sel, model_sel, api_base_sel, polish_key, backend=backend_sel, extra=extra)
                 if polish_llm.mode != "api":
                     st.warning("请先在上方「模型与参考材料」里选用模型并填写 API Key，再点润色。")
                 else:
-                    with st.spinner(f"{polish_llm.model or '模型'} 正在读……"):
-                        a2 = analyze(
-                            a.raw_text, "" if src == "自动识别" else src, polish_llm,
-                            answers={k: v for k, v in st.session_state.get("answers", {}).items() if v.strip()},
-                            mobile=mobile, client_view=client, llm_polish=True,
-                            drafts=getattr(a, "drafts", None) or st.session_state.get("drafts") or [],
-                            repos=getattr(a, "repos", None) or st.session_state.get("repos") or [],
-                            memory=memory,
-                        )
+                    a2 = analyze(
+                        a.raw_text, "" if src == "自动识别" else src, polish_llm,
+                        answers={k: v for k, v in st.session_state.get("answers", {}).items() if v.strip()},
+                        mobile=mobile, client_view=client, llm_polish=False,
+                        drafts=getattr(a, "drafts", None) or st.session_state.get("drafts") or [],
+                        repos=getattr(a, "repos", None) or st.session_state.get("repos") or [], memory=memory,
+                    )
                     st.session_state.analysis = a2
                     st.session_state.last_llm = {
                         "mode": polish_llm.mode, "model": polish_llm.model, "api_base": api_base_sel,
                         "backend": backend_sel, "provider_id": provider_id,
                     }
                     _rid = st.session_state.get("req_id", 0)
-                    ledger.event(_rid, "模型润色", f"{a2.seconds}s")
+                    ledger.event(_rid, "模型润色", "后台启动；规则初稿已显示")
                     if _rid:
                         ledger.update_estimate(_rid, a2.estimate)
-                    if a2.engine != "规则":
-                        st.session_state.just_polished = True
-                    else:
-                        st.session_state.polish_unchanged = True
+                    _begin_model_job(a2, polish_llm, kind="analysis")
                     st.rerun()
             if st.session_state.pop("polish_unchanged", False):
                 st.warning("模型未改写需求初稿；估时结果已单独更新，可在「估量」查看。")
@@ -1160,13 +1264,14 @@ with tabs[0]:
             answers[q.id] = st.text_input("业务答复", value=_prefill, key=f"ans_{q.id}", label_visibility="collapsed",
                                           placeholder="业务答复（留空 = 按默认假设）")
         st.session_state.answers = answers
-        if st.button("🔁 按业务答复重算（写单 / 估量 / 定架同步更新）", type="primary"):
+        if st.button("🔁 按业务答复重算（写单 / 估量 / 定架同步更新）", type="primary", disabled=_model_running()):
+            _cancel_model_job()
             with st.spinner("重算中……"):
                 a2 = analyze(
                     a.raw_text, "" if src == "自动识别" else src, llm,
                     answers={k: v for k, v in answers.items() if v.strip()},
                     mobile=mobile, client_view=client,
-                    llm_polish=(llm.mode == "api"),
+                    llm_polish=False,
                     drafts=getattr(a, "drafts", None) or st.session_state.get("drafts") or [],
                     repos=getattr(a, "repos", None) or st.session_state.get("repos") or [],
                     memory=memory,
@@ -1184,6 +1289,8 @@ with tabs[0]:
             _learned = memory.learn(a2.card, a2.questions, _rid)
             if _learned:
                 ledger.event(_rid, "追问记忆", f"记住 {_learned} 条口径（{a2.card.requester or '未注明'}）")
+            if llm.mode == "api":
+                _begin_model_job(a2, llm, kind="analysis")
             st.rerun()
     with right:
         st.markdown("**发给业务的确认消息**（一键复制到企业微信）")
@@ -1237,11 +1344,14 @@ with tabs[2]:
     source_model, source_rule, source_history = st.columns(3)
     with source_model, st.container(border=True):
         st.markdown("**独立模型估时**")
-        if estimate_ready:
+        if _model_running():
+            st.markdown('<div role="status" aria-live="polite"><span class="xz-loading"></span>模型正在分析</div>', unsafe_allow_html=True)
+            st.caption("完成后自动更新；规则模板和历史参考已先展示。")
+        elif estimate_ready:
             st.markdown(f"以前 **{est.mid * 8:g} 小时** · 现在 **{est.ai_mid * 8:g} 小时**")
             st.caption("模型按本次材料逐项分析；下方展开区间、理由与证据。")
         else:
-            st.markdown("本次未成功" if estimate_status == "failed" else "待模型分析")
+            st.markdown("本次未成功" if estimate_status == "failed" else "尚未调用模型")
             st.caption("使用页面选择的模型，需要配置 Key。")
     with source_rule, st.container(border=True):
         st.markdown("**规则模板参考**")
@@ -1264,30 +1374,34 @@ with tabs[2]:
 
     st.markdown("#### 独立模型分析")
     st.caption("模型根据本条需求和已提供的材料拆分工作，分别判断人工开发与 AI 协同的投入；程序校验并汇总模型的逐项数字。")
-    estimate_label = "重新分析估时" if estimate_ready or estimate_status == "failed" else "大模型分析估时"
-    if st.button(estimate_label, type="primary", key="estimate_with_model"):
+    estimate_label = "模型分析中……" if _model_running() else "重新分析估时" if estimate_ready or estimate_status == "failed" else "大模型分析估时"
+    if st.button(estimate_label, type="primary", key="estimate_with_model", disabled=_model_running()):
         estimate_llm = build_llm(page_mode, model_sel, api_base_sel, api_key_sel,
                                  backend=backend_sel, extra=extra)
         estimate_llm.req_id = st.session_state.get("req_id", 0)
-        with st.spinner("模型正在拆分工作并分析两种开发方式的工时……"):
+        if estimate_llm.mode != "api":
+            _cancel_model_job()
             next_estimate = estimate(
                 a.card, a.redacted_text, a.questions, llm=estimate_llm,
                 repos=getattr(a, "repos", None) or [],
                 drafts=getattr(a, "drafts", None) or [],
             )
-        a.estimate = next_estimate
-        st.session_state.analysis = a
+            a.estimate = next_estimate
+            st.session_state.analysis = a
+            _rid = st.session_state.get("req_id", 0)
+            if _rid:
+                ledger.update_estimate(_rid, next_estimate)
+        else:
+            _begin_model_job(a, estimate_llm, kind="estimate")
         st.session_state.last_llm = {
             "mode": estimate_llm.mode, "model": estimate_llm.model, "api_base": api_base_sel,
             "backend": backend_sel, "provider_id": provider_id,
         }
-        _rid = st.session_state.get("req_id", 0)
-        if _rid:
-            ledger.update_estimate(_rid, next_estimate)
-            ledger.event(_rid, "模型估时", getattr(next_estimate, "status", "unavailable"))
         st.rerun()
 
-    if not estimate_ready:
+    if _model_running():
+        st.info("模型正在分析；下方规则模板与历史参考已可查看，模型结果会自动补充。")
+    elif not estimate_ready:
         if estimate_method not in ("llm", "unavailable"):
             st.info("当前会话尚无独立模型结果；规则模板已在参考区单独列出，可配置模型后增加分析。")
         elif estimate_status == "failed":
@@ -1295,7 +1409,7 @@ with tabs[2]:
             if getattr(est, "error", ""):
                 st.caption(est.error)
         else:
-            st.info("尚无模型估时。规则模板和历史记录可在下方查看；如需模型分析，请在上方选择模型、填写 Key，再点击「大模型分析估时」。")
+            st.info("尚未调用模型，尚无模型估时。规则模板和历史记录可在下方查看；如需模型分析，请在上方选择模型、填写 Key，再点击「大模型分析估时」。")
         st.caption("未提供代码时可根据需求粗估；估时仅使用本条需求已经读取的材料。")
     else:
         requirements_only = getattr(est, "basis", "requirements_only") != "code_excerpt"

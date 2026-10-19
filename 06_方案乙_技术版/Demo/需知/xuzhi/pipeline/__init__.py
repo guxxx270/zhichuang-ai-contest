@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import time
+from copy import deepcopy
 from dataclasses import dataclass, field
+from typing import Callable
 
 from ..drafts import Draft, RepoBundle
 from ..llm import LLM
@@ -44,6 +46,8 @@ class Analysis:
     repos: list[RepoBundle] = field(default_factory=list)
     prototype_source_html: str = ""
     recalled: int = 0          # 追问记忆沿用了几条（问过的不再问）
+    mobile: bool = False
+    client_view: bool = False
 
 
 class _Mock:
@@ -97,6 +101,7 @@ def analyze(
     a = Analysis(
         text, red.text, red.total, red.mapping, card, questions, msg, spec, est, arch, proto,
         layers_html(arch.layers), drafts=drafts, repos=repos, prototype_source_html=source,
+        mobile=mobile, client_view=client_view,
     )
     a.seconds = round(time.time() - t0, 2)
     a.engine = "规则 + 模型" if (card.engine != "规则" or spec.engine != "规则" or est.status == "ready") else "规则"
@@ -114,3 +119,66 @@ def analyze(
         if llm.mode == "api" and a.engine != "规则":
             a.notes.append("模型已读底稿 HTML 与仓库代码摘录")
     return a
+
+
+def enhance_analysis(
+    seed: Analysis,
+    llm: LLM,
+    *,
+    onstage: Callable[[str], None] | None = None,
+    mobile: bool | None = None,
+    client_view: bool | None = None,
+) -> Analysis:
+    """在已完成的快速结果上做模型增强，不重跑记忆、不记业务台账。
+
+    各模型 helper 自带的失败回退仍保留；未捕获的异常交给任务层处理。
+    onstage 也用于阶段之间检查任务是否已被丢弃，因此不能吞掉其异常。
+    """
+    started = time.monotonic()
+    result = deepcopy(seed)
+    result.mobile = getattr(seed, "mobile", False) if mobile is None else mobile
+    result.client_view = getattr(seed, "client_view", False) if client_view is None else client_view
+
+    def stage(name: str) -> None:
+        if onstage is not None:
+            onstage(name)
+
+    protected = {question.id: deepcopy(question) for question in result.questions if question.answer.strip() or question.recalled}
+    stage("模型问清")
+    result.card, refined = refine_with_llm(
+        result.redacted_text, result.card, result.questions, llm, drafts=result.drafts, repos=result.repos,
+    )
+    # 有材料时模型可能移除某些规则题；已答或沿用的口径仍需保留，不能随润色丢失。
+    result.questions = []
+    seen = set()
+    for question in refined:
+        if question.id in seen:
+            continue
+        result.questions.append(protected.get(question.id, question))
+        seen.add(question.id)
+    result.questions += [question for key, question in protected.items() if key not in seen]
+    result.recalled = sum(bool(question.recalled) for question in result.questions)
+
+    stage("模型写单")
+    result.architecture = build_architecture(result.card, result.redacted_text, drafts=result.drafts, repos=result.repos)
+    result.spec = build_spec(result.card, result.questions, result.architecture.coverage_line, llm)
+    result.message = confirm_message(result.card, result.questions, result.redacted_text)
+
+    stage("模型估时")
+    result.estimate = estimate(result.card, result.redacted_text, result.questions, llm=llm,
+                               drafts=result.drafts, repos=result.repos)
+
+    stage("模型出样")
+    source = render_source(result.card, drafts=result.drafts, repos=result.repos, llm=llm, demand_text=result.redacted_text)
+    result.prototype_source_html = source
+    result.prototype_html = apply_prototype_view(source, mobile=result.mobile, client_view=result.client_view)
+    result.layers_html = layers_html(result.architecture.layers)
+    result.seconds = round(float(seed.seconds or 0) + time.monotonic() - started, 2)
+    result.engine = ("规则 + 模型" if result.card.engine != "规则" or result.spec.engine != "规则"
+                     or result.estimate.status == "ready" or source != seed.prototype_source_html else "规则")
+    if result.estimate.status == "failed":
+        result.notes.append("模型估时未完成，其余结果与规则、历史参考仍可查看。")
+    elif result.estimate.status == "unavailable":
+        result.notes.append("当前没有可用模型估时；规则与历史参考保留。")
+    stage("模型增强完成")
+    return result

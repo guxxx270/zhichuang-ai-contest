@@ -130,6 +130,22 @@ class Ledger:
                  json.dumps({"previous": previous, "current": current}, ensure_ascii=False)),
             )
 
+    def update_analysis(self, req_id: int, analysis) -> None:
+        """把后台增强结果更新到同一条需求，保留其状态和审计记录。"""
+        self.update_estimate(req_id, analysis.estimate)
+        row = self.get(req_id)
+        payload = json.loads(row.get("payload") or "{}")
+        payload.update(card=json.loads(analysis.card.to_json()), questions=[q.__dict__ for q in analysis.questions],
+                       decisions=[d.recommended for d in analysis.architecture.decisions],
+                       data_map=[r.__dict__ for r in getattr(analysis.architecture, "data_map", [])])
+        with self.conn:
+            self.conn.execute(
+                "UPDATE requirements SET title=?,engine=?,n_questions=?,n_answered=?,n_high_open=?,seconds=?,payload=? WHERE id=?",
+                (analysis.card.title, analysis.engine, len(analysis.questions),
+                 sum(bool(q.answer.strip()) for q in analysis.questions), analysis.estimate.unanswered_high,
+                 analysis.seconds, json.dumps(payload, ensure_ascii=False), req_id),
+            )
+
     def event(self, req_id: int, action: str, detail: str = "") -> None:
         self.conn.execute("INSERT INTO events(ts,req_id,action,detail) VALUES(?,?,?,?)", (datetime.now().isoformat(timespec="seconds"), req_id, action, detail))
         self.conn.commit()
