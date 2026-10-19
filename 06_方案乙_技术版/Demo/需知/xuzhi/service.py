@@ -106,7 +106,7 @@ def to_dict(a: Analysis, *, req_id: int = 0, include_spec: bool = True, include_
         ],
         "confirm_message": a.message,
         "estimate": {
-            **{key: snapshot[key] for key in ("method", "status", "basis", "model", "code_files", "summary", "error", "assumptions", "before", "after")},
+            **{key: snapshot[key] for key in ("method", "status", "basis", "model", "code_files", "summary", "error", "assumptions", "before", "after", "references")},
             "hours_per_day": 8,
             "trad_days": {key: snapshot.get(key) for key in ("mid", "low", "high")},
             "ai_days": {key: snapshot.get("ai_" + key) for key in ("mid", "low", "high")},

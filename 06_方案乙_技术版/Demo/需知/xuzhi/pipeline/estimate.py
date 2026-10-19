@@ -9,6 +9,7 @@ from decimal import Decimal
 from ..drafts import Draft, RepoBundle, draft_context_for_llm, redact_material
 from ..llm import load_prompt
 from .intake import Card, Question
+from .estimate_references import build_references
 from .tasks import AI_DO, AI_REVIEW, HUMAN, PHASES, Task, who_split
 
 
@@ -43,6 +44,7 @@ class Estimate:
     code_files: list[str] = field(default_factory=list)
     summary: str = ""
     error: str = ""
+    references: dict = field(default_factory=dict)
 
     @property
     def total_points(self) -> int:
@@ -194,8 +196,10 @@ def _parse(data, payload: dict, result: Estimate) -> Estimate:
 def estimate(card: Card, text: str, questions: list[Question], *, llm=None,
              repos: list[RepoBundle] | None = None, drafts: list[Draft] | None = None) -> Estimate:
     result = Estimate(unanswered_high=sum(q.impact == "高" and not q.answer.strip() for q in questions))
+    # 独立保留规则与历史参考，不参与模型提示、模型结果或模型汇总。
+    result.references = build_references(card, text, questions)
     if llm is None or getattr(llm, "mode", "mock") != "api":
-        result.error = "未接入大模型，尚未估时。请在模型设置中配置模型后分析，不使用固定工时模板。"
+        result.error = "未接入大模型，尚无模型估时。规则模板与历史记录可独立参考；配置模型后可补充分析。"
         return result
     result.model = getattr(llm, "model", "")
     try:

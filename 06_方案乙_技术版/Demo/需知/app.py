@@ -492,7 +492,7 @@ def build_llm(mode: str, model: str, api_base: str, api_key: str, backend: str =
             channel="Web",
         )
     except Exception as e:
-        st.warning(f"模型初始化失败，需求初稿可继续使用；估时暂不可用：{e}")
+        st.warning(f"模型初始化失败，模型估时暂不可用；需求初稿、规则模板和历史参考仍可查看：{e}")
         return LLM(mode="mock")
 
 
@@ -869,7 +869,7 @@ with settings_area:
     with col_model:
         with st.container(border=True):
             st.markdown("**:material/smart_toy: 模型**")
-            st.caption("不填 Key 可先整理需求和出原型；估时需要模型。填好后可开工，也可在「估量」单独分析工时。")
+            st.caption("不填 Key 可整理需求、出原型，并查看规则模板和历史参考；填好后可增加独立模型估时，也可在「估量」单独重估。")
             m1, m2 = st.columns(2)
             with m1:
                 preset_label, mode_sel, provider_id, api_base_sel, model_sel = _render_model_preset()
@@ -898,7 +898,7 @@ with hero_slot:
     _skills = "".join(f'<span class="xz-skill" style="--c:{SKILL_COLORS[n]}"><b>{n}</b>{html.escape(d)}</span>'
                       for n, d in [*config.SKILLS, ("隐盾", "进模型前脱敏")])
     _status = (f'<span class="xz-status model"><span class="dot"></span>开工调用模型 · {html.escape(preset_label)}</span>' if _has_key
-               else '<span class="xz-status"><span class="dot"></span>规则初稿 · 估时待模型（未填 Key）</span>')
+               else '<span class="xz-status"><span class="dot"></span>规则初稿与参考可用 · 模型未配置</span>')
     st.markdown(f"""
 <div class="xz-hero">
   <div class="xz-hero-top">
@@ -977,7 +977,7 @@ if go:
             st.info("未填 API Base URL，本次按规则引擎运行。")
             run_mode = "mock"
         if run_mode == "api" and not run_key:
-            st.info("未填 Key → 本次先出需求初稿；补 Key 后可在「问清」润色，或在「估量」单独分析工时。")
+            st.info("未填 Key → 本次先出需求初稿、规则模板和历史参考；补 Key 后可在「问清」润色，或在「估量」增加模型分析。")
             run_mode = "mock"
         llm = build_llm(run_mode, run_model, run_base, run_key, backend=backend_sel, extra=extra)
         do_polish = llm.mode == "api"
@@ -1009,7 +1009,7 @@ if go:
         elif do_polish:
             spin = "模型正在理解需求并出结果……"
         else:
-            spin = "规则引擎正在整理需求、出原型；估时待模型……"
+            spin = "正在整理需求、生成规则与历史参考、出原型……"
         try:
             with st.spinner(spin):
                 a = analyze(
@@ -1208,7 +1208,62 @@ with tabs[2]:
         getattr(est, field, None) is not None
         for field in ("mid", "low", "high", "ai_mid", "ai_low", "ai_high")
     )
-    st.markdown("大模型根据本条需求和已提供的材料拆分工作，分别判断人工开发与 AI 协同的投入；程序只校验和汇总。")
+    references = getattr(est, "references", {}) or {}
+    if not references:
+        # 兼容热更新前的会话：只补充展示参考，不改变已有模型结果或台账。
+        try:
+            from xuzhi.pipeline.estimate_references import build_references
+            references = build_references(a.card, a.redacted_text, a.questions)
+        except Exception:
+            references = {}
+    rule_reference = references.get("rule") or {}
+    history_reference = references.get("history") or {}
+    rule_ready = rule_reference.get("status") == "ready"
+    history_items = history_reference.get("items") or []
+    history_ready = history_reference.get("status") == "ready" and bool(history_items)
+
+    def reference_hours(value) -> str:
+        if isinstance(value, dict):
+            low, mid, high = (value.get(key) for key in ("low", "mid", "high"))
+            if all(isinstance(number, (int, float)) and not isinstance(number, bool) for number in (low, mid, high)):
+                return f"{low:g}～{high:g} 小时（参考 {mid:g}）"
+            return "暂无数值"
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return f"{value:g} 小时"
+        return "暂无数值"
+
+    st.markdown("模型分析、规则模板、历史记录分开提供依据，便于核对范围和差异。")
+    st.caption("三路结果不自动加权混合；只有成功的模型估时进入模型工时汇总。未配置模型时，仍可查看规则与历史参考。")
+    source_model, source_rule, source_history = st.columns(3)
+    with source_model, st.container(border=True):
+        st.markdown("**独立模型估时**")
+        if estimate_ready:
+            st.markdown(f"以前 **{est.mid * 8:g} 小时** · 现在 **{est.ai_mid * 8:g} 小时**")
+            st.caption("模型按本次材料逐项分析；下方展开区间、理由与证据。")
+        else:
+            st.markdown("本次未成功" if estimate_status == "failed" else "待模型分析")
+            st.caption("使用页面选择的模型，需要配置 Key。")
+    with source_rule, st.container(border=True):
+        st.markdown("**规则模板参考**")
+        if rule_ready:
+            st.markdown("以前：" + reference_hours(rule_reference.get("before")))
+            st.markdown("现在：" + reference_hours(rule_reference.get("after")))
+            st.caption(rule_reference.get("label") or "固定规则计算，独立于模型判断。")
+        else:
+            st.markdown("暂无规则参考")
+            st.caption(rule_reference.get("summary") or "当前没有可用的规则模板结果。")
+    with source_history, st.container(border=True):
+        st.markdown("**历史记录参考**")
+        if history_ready:
+            st.markdown(f"找到 **{len(history_items)} 条**相关记录")
+            st.caption("来源：" + "；".join(dict.fromkeys(item.get("source") or "来源未确认" for item in history_items)))
+            st.caption("对照当时估算、实际工时与开发方式；历史范围可能不同。")
+        else:
+            st.markdown("暂无匹配记录")
+            st.caption(history_reference.get("summary") or "尚无可比的历史记录。")
+
+    st.markdown("#### 独立模型分析")
+    st.caption("模型根据本条需求和已提供的材料拆分工作，分别判断人工开发与 AI 协同的投入；程序校验并汇总模型的逐项数字。")
     estimate_label = "重新分析估时" if estimate_ready or estimate_status == "failed" else "大模型分析估时"
     if st.button(estimate_label, type="primary", key="estimate_with_model"):
         estimate_llm = build_llm(page_mode, model_sel, api_base_sel, api_key_sel,
@@ -1234,13 +1289,13 @@ with tabs[2]:
 
     if not estimate_ready:
         if estimate_method not in ("llm", "unavailable"):
-            st.warning("此前的规则模板估算已停用。请使用当前页面配置的模型重新分析，本页不再展示旧数。")
+            st.info("当前会话尚无独立模型结果；规则模板已在参考区单独列出，可配置模型后增加分析。")
         elif estimate_status == "failed":
-            st.error("本次模型估时未成功，尚无可用工时。请检查模型设置后重试。")
+            st.error("本次模型估时未成功。请检查模型设置后重试；规则与历史参考仍独立保留。")
             if getattr(est, "error", ""):
                 st.caption(est.error)
         else:
-            st.info("尚无模型估时。请在上方「模型与参考材料」选择模型、填写 Key，再点击「大模型分析估时」。")
+            st.info("尚无模型估时。规则模板和历史记录可在下方查看；如需模型分析，请在上方选择模型、填写 Key，再点击「大模型分析估时」。")
         st.caption("未提供代码时可根据需求粗估；估时仅使用本条需求已经读取的材料。")
     else:
         requirements_only = getattr(est, "basis", "requirements_only") != "code_excerpt"
@@ -1309,6 +1364,60 @@ with tabs[2]:
                 st.bar_chart(phase_frame, height=220)
         if est.delivery:
             st.markdown(f"**建议交付方式**：{est.delivery}")
+
+    with st.expander("规则模板参考 · 公式、任务与前提", expanded=True):
+        if rule_ready:
+            if rule_reference.get("summary"):
+                st.markdown(rule_reference["summary"])
+            rule_before, rule_after = st.columns(2)
+            rule_before.markdown("**以前（规则模板）**\n\n" + reference_hours(rule_reference.get("before")))
+            rule_after.markdown("**现在（规则模板）**\n\n" + reference_hours(rule_reference.get("after")))
+            if rule_reference.get("formula"):
+                st.markdown("**计算公式**")
+                st.code(rule_reference["formula"], language=None)
+            rule_tasks = rule_reference.get("tasks") or []
+            if rule_tasks:
+                st.dataframe(pd.DataFrame([{
+                    "模板工作项": task.get("name", ""), "阶段": task.get("phase", ""),
+                    "以前（小时）": reference_hours(task.get("before")),
+                    "现在（小时）": reference_hours(task.get("after")),
+                    "模板系数（现在/以前）": task.get("coefficient"),
+                    "规则说明": task.get("note", ""),
+                } for task in rule_tasks]), hide_index=True, width="stretch")
+            dims = rule_reference.get("dims")
+            if isinstance(dims, dict) and dims:
+                reasons = rule_reference.get("reasons") or {}
+                weights = rule_reference.get("weights") or {}
+                st.dataframe(pd.DataFrame([{
+                    "规则维度": name, "分值": score,
+                    **({"评分依据": reasons.get(name, "")} if reasons else {}),
+                    **({"规则权重": weights.get(name)} if weights else {}),
+                } for name, score in dims.items()]), hide_index=True, width="stretch")
+            if rule_reference.get("assumptions"):
+                st.markdown("**适用前提与局限**")
+                for assumption in rule_reference["assumptions"]:
+                    st.markdown(f"- {textutil.markdown_literal(assumption)}")
+            st.caption("这是规则模板参考，不是模型输出；它不会替换模型结果，也不与模型工时自动加权。")
+        else:
+            st.info(rule_reference.get("summary") or "当前没有可用规则模板参考；模型结果和历史记录不受影响。")
+
+    with st.expander("历史记录参考 · 当时估算与实际工时", expanded=not estimate_ready):
+        if history_reference.get("summary"):
+            st.markdown(history_reference["summary"])
+        if history_ready:
+            st.dataframe(pd.DataFrame([{
+                "编号": item.get("id", ""), "历史需求": item.get("title", ""), "类型": item.get("type", ""),
+                "相关度": f"{item['score']:.0%}" if isinstance(item.get("score"), (int, float)) else "—",
+                "当时估算": reference_hours(item.get("estimated_hours")),
+                "实际工时": reference_hours(item.get("actual_hours")),
+                "实际开发方式": "AI 协同" if item.get("ai_assisted") is True else "人工开发" if item.get("ai_assisted") is False else "未注明",
+                "来源": item.get("source", ""), "备注": item.get("note", ""),
+            } for item in history_items]), hide_index=True, width="stretch")
+        else:
+            st.info("暂无匹配的历史记录；这不影响模型或规则模板各自提供结果。")
+        for limitation in history_reference.get("limitations") or []:
+            st.caption(limitation)
+        st.caption("历史实际工时属于当时的需求范围和开发条件，仅供对照，不直接套入本条需求，也不计入本条模型工时。")
 
 # ---------- 定架 ----------
 with tabs[3]:

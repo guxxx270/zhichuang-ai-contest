@@ -38,7 +38,17 @@ def main() -> None:
             print(f"   {task.id:3} {task.phase} · {task.name}：以前 {task.trad_days * 8:g} → 现在 {task.ai_days * 8:g} 小时")
             print(f"     以前：{task.before_reason}\n     现在：{task.after_reason}")
     else:
-        print(f"【估量】{'估算失败' if e.status == 'failed' else '未估时'}：{e.error or e.summary or e.confidence_reason}")
+        print(f"【模型估量】{'估算失败' if e.status == 'failed' else '未估时'}：{e.error or e.summary or e.confidence_reason}")
+    rule = e.references.get("rule", {})
+    if rule.get("status") == "ready":
+        b, now = rule["before"], rule["after"]
+        print(f"【规则模板参考（未校准）】以前 {b['mid']:g} 小时（{b['low']:g}～{b['high']:g}）｜现在 {now['mid']:g} 小时（{now['low']:g}～{now['high']:g}）")
+        print(f"  {rule['formula']}")
+    history = e.references.get("history", {})
+    print(f"【历史记录参考】{history.get('summary', '暂无记录')}；不与模型或规则工时加权合并。")
+    for item in history.get("items", []):
+        actual = f"{item['actual_hours']:g} 小时" if item.get("actual_hours") is not None else "未记录"
+        print(f"  {item['title']}｜{item['source']}｜记录实际投入 {actual}")
     print("=" * 70); print(f"【定架】{a.architecture.coverage_line}")
     for d in a.architecture.decisions:
         print(f"  {d.id} {d.topic} → {d.recommended}（{d.impact}）")

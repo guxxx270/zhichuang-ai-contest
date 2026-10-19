@@ -33,7 +33,7 @@ def _number(value) -> float | None:
 
 
 def estimate_snapshot(estimate) -> dict:
-    """保存完整模型结果；未完成的估量不保留上一次的工时。"""
+    """保存模型与独立参考；模型失败仅清模型工时，保留各来源的参考快照。"""
     snapshot = asdict(estimate) if is_dataclass(estimate) else dict(vars(estimate))
     ready = snapshot.get("status") == "ready"
     snapshot.update({
@@ -42,6 +42,7 @@ def estimate_snapshot(estimate) -> dict:
         "basis": snapshot.get("basis", "requirements_only"),
         "model": snapshot.get("model", ""), "code_files": list(snapshot.get("code_files") or []),
         "summary": snapshot.get("summary", ""), "error": snapshot.get("error", ""),
+        "references": dict(snapshot.get("references") or {}),
         "assumptions": list(snapshot.get("assumptions") or []), "hours_per_day": 8,
     })
     if not ready:

@@ -86,31 +86,36 @@ def ui(tmp_path, monkeypatch):
     st.cache_resource.clear()
 
 
-def test_no_model_shows_unestimated_without_zero_or_old_template_hours(ui):
+def test_no_model_keeps_model_unestimated_and_shows_separate_rule_reference(ui):
     _start_without_model(ui.app)
     tab = _estimate_tab(ui.app)
 
     assert any("尚无模型估时" in message.value for message in tab.info)
-    assert not tab.metric, "未估时不能显示零小时或残留的固定模板数字"
-    assert "0 小时" not in _visible_text(tab)
-    assert "8.5" not in _visible_text(tab)
+    assert not tab.metric, "规则参考不能冒充模型的工时指标"
+    reference = _by_label(tab.expander, "规则模板参考 · 公式、任务与前提")
+    assert "8.5" in _visible_text(reference)
+    assert "15" in _visible_text(reference)
+    assert "不是模型输出" in _visible_text(reference)
+    assert any("模板工作项" in frame.value.columns for frame in reference.dataframe)
+    assert "不自动加权混合" in _visible_text(tab)
     assert ui.fake.calls == []
 
 
-def test_stale_rule_template_is_hidden_even_if_it_has_numeric_totals(ui):
+def test_stale_primary_rule_total_is_not_treated_as_model_result(ui):
     _start_without_model(ui.app)
     analysis = ui.app.session_state["analysis"]
     analysis.estimate.method = "incremental"
     analysis.estimate.status = "ready"
     for field in ("low", "mid", "high", "ai_low", "ai_mid", "ai_high"):
-        setattr(analysis.estimate, field, 8.5 / 8)
+        setattr(analysis.estimate, field, 9999 / 8)
     ui.app.session_state["analysis"] = analysis
     _run(ui.app)
     tab = _estimate_tab(ui.app)
 
-    assert any("规则模板估算已停用" in message.value for message in tab.warning)
+    assert any("尚无独立模型结果" in message.value for message in tab.info)
     assert not tab.metric
-    assert "8.5" not in _visible_text(tab)
+    assert "9999" not in _visible_text(tab)
+    assert "8.5" in _visible_text(_by_label(tab.expander, "规则模板参考 · 公式、任务与前提"))
 
 
 def test_independent_button_shows_two_ranges_and_rough_basis_without_new_ledger_row(ui):
@@ -142,6 +147,7 @@ def test_independent_button_shows_two_ranges_and_rough_basis_without_new_ledger_
         assert ledger.stats()["count"] == count_before
         snapshot = json.loads(ledger.get(req_id)["payload"])["estimate"]
         assert snapshot["status"] == "ready" and snapshot["method"] == "llm"
+        assert snapshot["references"]["rule"]["after"]["mid"] == 8.5
         assert ledger.get(req_id)["mid_days"] == pytest.approx(9 / 8)
         assert ledger.get(req_id)["ai_days"] == pytest.approx(6 / 8)
         assert len(ui.fake.calls) == 1, "独立估时按钮只调用估时模型，不重跑问清/写单"
@@ -195,6 +201,8 @@ def test_failed_reestimate_removes_old_ui_numbers_and_old_ledger_totals(ui):
         snapshot = json.loads(row["payload"])["estimate"]
         assert row["mid_days"] is None and row["ai_days"] is None
         assert snapshot["status"] == "failed" and snapshot["tasks"] == []
+        assert snapshot["references"]["rule"]["after"]["mid"] == 8.5
+        assert "8.5" in _visible_text(_by_label(tab.expander, "规则模板参考 · 公式、任务与前提"))
         assert all(snapshot[field] is None for field in ("mid", "low", "high", "ai_mid", "ai_low", "ai_high"))
         assert len(ui.fake.calls) == 2
     finally:

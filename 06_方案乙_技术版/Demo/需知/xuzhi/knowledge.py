@@ -70,8 +70,11 @@ class HistoryItem:
     estimate_days: float
     actual_days: float
     note: str
-    ai_assisted: bool = False
+    ai_assisted: bool | None = False
     ai_share: float = 0.0
+    provenance: str = "unknown"  # demo / imported / ledger / unknown
+    source: str = ""
+    source_ref: str = ""
 
 
 def _load(path):
@@ -111,17 +114,58 @@ def interfaces() -> int:
 
 @lru_cache(maxsize=1)
 def history() -> list[HistoryItem]:
-    """样本 / 导入的历史需求库 + 台账对账回写的真实样本（后者同 id 覆盖前者）。"""
-    raw = list(_load(config.HISTORY_PATH)["items"])
+    """历史原记录与来源：同 ID 的台账记录覆盖基础库，演示记录始终标明虚构。"""
+    base = _load(config.HISTORY_PATH)
+    raw = [(h, base, config.HISTORY_PATH.name) for h in base["items"]]
     learned = config.HISTORY_LEARNED_PATH
     if learned.exists():
         try:
-            extra = _load(learned).get("items") or []
+            document = _load(learned)
+            extra = document.get("items") or []
         except (OSError, ValueError):
             extra = []
+            document = {}
         ids = {h.get("id") for h in extra}
-        raw = [h for h in raw if h.get("id") not in ids] + list(extra)
-    return [HistoryItem(h["id"], h["year"], h["title"], h["type"], h["dept"], tuple(h["keywords"]), h["estimate_days"], h["actual_days"], h.get("note", ""), bool(h.get("ai_assisted", False)), float(h.get("ai_share", 0))) for h in raw]
+        raw = [(h, doc, ref) for h, doc, ref in raw if h.get("id") not in ids]
+        raw += [(h, document, learned.name) for h in extra]
+    out = []
+    for h, document, source_ref in raw:
+        provenance, source = _history_source(h, document)
+        ai = h.get("ai_assisted")
+        # 缺少标记保留未知；不能把字符串 "false" 当成 True。
+        marker = str(ai).strip().lower()
+        ai_assisted = (ai if isinstance(ai, bool) else True if marker in ("true", "1", "是", "y", "yes")
+                       else False if marker in ("false", "0", "否", "n", "no") else None)
+        out.append(HistoryItem(
+            h["id"], h["year"], h["title"], h["type"], h["dept"], tuple(h["keywords"]),
+            h["estimate_days"], h["actual_days"], h.get("note", ""), ai_assisted, float(h.get("ai_share", 0)),
+            provenance, source, str(h.get("source_ref") or source_ref),
+        ))
+    return out
+
+
+def _history_source(item: dict, document: dict) -> tuple[str, str]:
+    labels = {"demo": "虚构演示数据", "imported": "公司导入记录（未核验）", "ledger": "台账对账记录", "unknown": "来源未确认"}
+    source = str(item.get("source") or "")
+    item_note = source + " " + str(item.get("note") or "")
+    description = str(document.get("_说明") or "")
+    explicit = item.get("provenance")
+    if explicit == "demo" or re.search(r"虚构|演示数据|示例数据", item_note):
+        provenance = "demo"
+    elif explicit in labels:
+        provenance = explicit
+    elif source == "台账对账":
+        provenance = "ledger"
+    elif re.search(r"虚构|演示数据|示例数据", description):
+        provenance = "demo"
+    elif document.get("provenance") in labels:
+        provenance = document["provenance"]
+    elif re.search(r"来自公司(?:工单系统导出|真实需求记录)|本机导入", description):
+        provenance = "imported"
+    else:
+        provenance = "unknown"
+    label = labels[provenance]
+    return provenance, label + (f" · {source}" if source and source != label else "")
 
 
 IMPACT_ORDER = {"高": 0, "中": 1, "低": 2}
