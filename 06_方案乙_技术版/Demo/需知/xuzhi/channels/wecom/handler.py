@@ -243,6 +243,7 @@ class WecomHandler:
                 ledger.event(session.req_id, "业务答复重算", f"{answered} 条（企微）")
                 ledger.update_answers(session.req_id, sum(1 for q in qs if (q.answer or "").strip()),
                                       int(getattr(analysis.estimate, "unanswered_high", 0) or 0))
+                ledger.update_estimate(session.req_id, analysis.estimate)
             if memory is not None and answered:
                 n = memory.learn(analysis.card, list(getattr(analysis, "questions", None) or []), session.req_id)
                 if n and ledger is not None:

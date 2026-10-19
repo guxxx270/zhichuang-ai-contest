@@ -73,6 +73,7 @@ class FakeCard:
 
 @dataclass
 class FakeEst:
+    status: str = "ready"
     mid: float = 8.0
     low: float = 6.0
     high: float = 12.0
@@ -125,7 +126,7 @@ def test_render_has_all_sections():
     assert "先和业务确认" in out
     assert "1. [高] 持仓按合约还是按品种汇总？" in out
     assert "未答就按：按日终口径" in out
-    assert "传统 8 人天" in out and "AI 协同 **4.5 人天**" in out and "省 44%" in out
+    assert "以前 64 小时" in out and "现在 **36 小时**" in out and "省 44%" in out
     assert "把握度 中" in out and "2 个高影响问题未答" in out
     assert "需要 IT 拍板" in out and "复用数据中台日终快照" in out
     assert "可复用" in out and "报表平台" in out
@@ -290,7 +291,7 @@ def test_new_requirement_then_answer():
         mock, rec = rig.mock, rig.rec
         await mock.push("m2", "025058", f"@需知 {REQ}")
         final = await mock.wait_final("m2")
-        assert "先和业务确认" in final and "传统 8 人天" in final
+        assert "先和业务确认" in final and "以前 64 小时" in final
         assert "@需知" not in final                              # @前缀已剥掉
         assert rec.calls[0]["text"] == REQ
         assert rec.calls[0]["source_hint"] == "企业微信"
@@ -386,7 +387,7 @@ def test_render_against_real_pipeline():
     assert "隐盾" in out and "手机 1" in out and "账号 1" in out      # 真的脱敏了
     assert "13800138000" not in out and "6225880123456789" not in out  # 明文没漏出去
     assert "先和业务确认" in out and "未答就按：" in out
-    assert "**工时**" in out and "AI 协同" in out
+    assert "**工时**" in out and "未估时" in out and "None" not in out
     assert "需要 IT 拍板" in out
     assert len(out.encode("utf-8")) < 20000
 

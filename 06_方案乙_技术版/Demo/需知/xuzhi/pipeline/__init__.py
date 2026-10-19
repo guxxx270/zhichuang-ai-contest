@@ -90,7 +90,7 @@ def analyze(
             recalled = 0
     arch = build_architecture(card, red.text, drafts=drafts, repos=repos)
     spec = build_spec(card, questions, arch.coverage_line, llm)
-    est = estimate(card, red.text, questions)
+    est = estimate(card, red.text, questions, llm=llm, drafts=drafts, repos=repos)
     msg = confirm_message(card, questions, red.text)
     source = render_source(card, drafts=drafts, repos=repos, llm=llm, demand_text=red.text)
     proto = apply_prototype_view(source, mobile=mobile, client_view=client_view)
@@ -99,7 +99,7 @@ def analyze(
         layers_html(arch.layers), drafts=drafts, repos=repos, prototype_source_html=source,
     )
     a.seconds = round(time.time() - t0, 2)
-    a.engine = "规则 + 模型" if (card.engine != "规则" or spec.engine != "规则") else "规则"
+    a.engine = "规则 + 模型" if (card.engine != "规则" or spec.engine != "规则" or est.status == "ready") else "规则"
     a.recalled = recalled
     if recalled:
         a.notes.append(f"追问记忆：沿用上次口径 {recalled} 条，未再问")

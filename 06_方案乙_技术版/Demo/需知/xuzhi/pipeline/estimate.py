@@ -1,175 +1,216 @@
-"""估量：既有计算变更按工作项估小时；其他需求按复杂度与历史类比估人天。"""
+"""大模型逐项分析以前/现在的工时；程序校验证据和数字，只做汇总。"""
 from __future__ import annotations
 
-import re
+import json
+import math
 from dataclasses import dataclass, field
+from decimal import Decimal
 
-from .. import config, knowledge
+from ..drafts import Draft, RepoBundle, draft_context_for_llm, redact_material
+from ..llm import load_prompt
 from .intake import Card, Question
-from .incremental import ChangeScope, build_change_work, calculation_change_scope
-from .tasks import Task, allocate, build_tasks, delivery_mode, who_split
-
-DIMS = ["功能点", "数据接入", "界面", "权限", "性能", "合规"]
-WEIGHTS = {"功能点": 1.2, "数据接入": 1.5, "界面": 1.2, "权限": 0.8, "性能": 1.5, "合规": 0.8}   # 每提高 1 分增加的人天
-
-
-@dataclass
-class Similar:
-    id: str
-    title: str
-    type: str
-    dept: str
-    year: int
-    score: float
-    estimate_days: float
-    actual_days: float
-    note: str
+from .tasks import AI_DO, AI_REVIEW, HUMAN, PHASES, Task, who_split
 
 
 @dataclass
 class Estimate:
-    dims: dict[str, int]
-    reasons: dict[str, str]
-    base_days: float
-    history_days: float | None
-    mid: float
-    low: float
-    high: float
-    confidence: str
-    confidence_reason: str
-    similar: list[Similar]
+    # 沿用人天字段兼容台账/API。None 表示未估时，不能按零工时处理。
+    dims: dict[str, int] = field(default_factory=dict)
+    reasons: dict[str, str] = field(default_factory=dict)
+    base_days: float | None = None
+    history_days: float | None = None
+    mid: float | None = None
+    low: float | None = None
+    high: float | None = None
+    confidence: str = "未估时"
+    confidence_reason: str = ""
+    similar: list = field(default_factory=list)
     phases: dict[str, float] = field(default_factory=dict)
     unanswered_high: int = 0
-    # ---- AI 协同轨 ----
     tasks: list[Task] = field(default_factory=list)
-    ai_mid: float = 0.0
-    ai_low: float = 0.0
-    ai_high: float = 0.0
-    saving_pct: float = 0.0
+    ai_mid: float | None = None
+    ai_low: float | None = None
+    ai_high: float | None = None
+    saving_pct: float | None = None
     who: dict[str, float] = field(default_factory=dict)
     ai_phases: dict[str, float] = field(default_factory=dict)
     delivery: str = ""
-    method: str = "complexity"
+    method: str = "unavailable"
     assumptions: list[str] = field(default_factory=list)
+    status: str = "unavailable"
+    basis: str = "requirements_only"
+    model: str = ""
+    code_files: list[str] = field(default_factory=list)
+    summary: str = ""
+    error: str = ""
 
     @property
     def total_points(self) -> int:
         return sum(self.dims.values())
 
 
-def _clip(v: int) -> int:
-    return max(1, min(5, v))
+def _text(value, label: str, limit: int = 3000) -> str:
+    if not isinstance(value, str) or not value.strip() or len(value) > limit:
+        raise ValueError(f"{label}缺失或过长")
+    return value.strip()
 
 
-def score_dims(card: Card, text: str) -> tuple[dict[str, int], dict[str, str]]:
-    n = len(card.features)
-    fp = 1 if n <= 2 else 2 if n <= 4 else 3 if n <= 6 else 4 if n <= 9 else 5
-    ds = len(card.data_sources)
-    external = bool(re.search(r"现货|第三方|公告|交易所日报|新闻", text))
-    realtime = card.frequency in ("实时", "分钟级") or bool(re.search(r"实时|盘中|下单前", text))
-    di = _clip(ds + (1 if external else 0) + (1 if realtime else 0))
-    ui = {"页面": 3, "报表": 2, "提醒": 1, "接口": 1, "数据": 1, "流程": 2}.get(card.req_type, 2) + (1 if "手机端可看" in card.nonfunctional else 0)
-    pm = 1 + (2 if "客户" in card.scope_objects else 0) + (1 if re.search(r"权限|只能看|按人|投资经理", text) else 0) + (1 if "对外" in text else 0)
-    perf = 4 if realtime else 3 if card.frequency == "分钟级" else 2 if re.search(r"\d+\s*分钟内", text) else 1
-    perf += 1 if re.search(r"全品种|所有品种|全部客户|逐客户|五家交易所", text) else 0
-    comp = 1 + (2 if "客户" in card.scope_objects else 0) + (1 if re.search(r"合规|适当性|监管|报送", text) else 0) + (1 if re.search(r"留痕|审计", text) else 0) + (1 if re.search(r"下单|指令|阻断", text) else 0)
-    dims = {"功能点": _clip(fp), "数据接入": di, "界面": _clip(ui), "权限": _clip(pm), "性能": _clip(perf), "合规": _clip(comp)}
-    reasons = {
-        "功能点": f"{n} 个功能点",
-        "数据接入": f"{ds} 类数据源" + ("，含外部 / 非结构化来源" if external else "") + ("，需实时接入" if realtime else ""),
-        "界面": f"{card.req_type}类" + ("，含手机端" if "手机端可看" in card.nonfunctional else ""),
-        "权限": ("涉及客户数据，" if "客户" in card.scope_objects else "") + ("需按人 / 产品授权" if pm >= 2 else "沿用现有角色权限"),
-        "性能": "实时 / 盘中" if realtime else ("有限时要求" if perf >= 2 else "日终批处理"),
-        "合规": ("客户信息脱敏与审阅；" if "客户" in card.scope_objects else "") + ("触及交易链路；" if re.search(r"下单|指令|阻断", text) else "") + ("留痕 / 审计" if re.search(r"留痕|审计", text) else "常规"),
+def _hours(track, label: str) -> tuple[Decimal, Decimal, Decimal, str]:
+    if not isinstance(track, dict):
+        raise ValueError(f"{label}缺少工时区间")
+    values = []
+    for key in ("low", "mid", "high"):
+        value = track.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 100000 or not math.isfinite(value):
+            raise ValueError(f"{label}须为有限的非负小时数")
+        values.append(Decimal(str(value)))
+    low, mid, high = values
+    if not low <= mid <= high or mid <= 0:
+        raise ValueError(f"{label}区间应满足下界 ≤ 参考值 ≤ 上界，参考值须大于零")
+    return low, mid, high, _text(track.get("reason"), f"{label}依据")
+
+
+def _finite_number(value: Decimal) -> float:
+    number = float(value)
+    if not math.isfinite(number) or (value != 0 and number == 0):
+        raise ValueError("工时换算或比较结果超出有效数值范围")
+    return number
+
+
+def _payload(text: str, questions: list[Question], card: Card, repos: list[RepoBundle], drafts: list[Draft]) -> dict:
+    # 仅使用调用方提供的材料；不扫描磁盘，不连接业务数据库。
+    context = draft_context_for_llm([], repos, code_limit=28000,
+                                    keywords=card.keywords() | set(card.indicators))
+    files = []
+    for index, repo in enumerate(context["repos"], 1):
+        for file_index, item in enumerate(repo["files"], 1):
+            if item["excerpt"].strip():
+                path = redact_material(item["path"])
+                # 脱敏可能把不同原路径变成同一标签；证据 ID 另带序号，避免字典覆盖。
+                files.append({"id": f"R{index}/F{file_index}/{path}", "path": path, "excerpt": item["excerpt"]})
+    # HTML 底稿可辅助理解页面，但不能据此声称已核对业务后端代码。
+    reference = draft_context_for_llm(drafts, [], html_limit=6000)["html_drafts"] if drafts else []
+    return {
+        "requirement": redact_material(text),
+        "answers": [{"id": q.id, "question": redact_material(q.question), "answer": redact_material(q.answer)}
+                    for q in questions if q.answer.strip()],
+        "code_files": files,
+        "reference_pages": [{"name": redact_material(d["name"]), "html": d["html"]} for d in reference],
+        "code_scope": "仅提供的源码摘录，未运行或验证完整系统" if files else "未提供有效源码，仅依据需求粗估",
+        "comparison": {"before": "以前：同一范围、同一现有系统，人工开发，不使用生成式AI",
+                       "after": "现在：同一范围，使用AI辅助分析、编码与测试，保留必要人工核对"},
     }
-    return dims, reasons
 
 
-def find_similar(card: Card, text: str, k: int = 3) -> list[Similar]:
-    out = []
-    for h in knowledge.history():
-        hit = sum(1 for kw in h.keywords if kw in text or kw in card.title)
-        score = hit / max(len(h.keywords), 1) + (0.2 if h.type == card.req_type else 0.0)
-        if score >= 0.3:
-            out.append(Similar(h.id, h.title, h.type, h.dept, h.year, round(min(score, 1.0), 2), h.estimate_days, h.actual_days, h.note))
-    out.sort(key=lambda s: -s.score)
-    return out[:k]
+def _parse(data, payload: dict, result: Estimate) -> Estimate:
+    if not isinstance(data, dict):
+        raise ValueError("模型未返回估时对象")
+    summary = _text(data.get("summary"), "分析摘要")
+    why = _text(data.get("confidence_reason"), "置信度说明")
+    confidence = data.get("confidence")
+    if confidence not in ("低", "中", "高"):
+        raise ValueError("置信度格式错误")
+    assumptions = data.get("assumptions")
+    if not isinstance(assumptions, list) or not 1 <= len(assumptions) <= 30:
+        raise ValueError("需要明确估算前提与待核对项")
+    assumptions = [_text(a, "估算前提") for a in assumptions]
+    raw_tasks = data.get("tasks")
+    if not isinstance(raw_tasks, list) or not 1 <= len(raw_tasks) <= 40:
+        raise ValueError("需要1至40项具体工作")
+    code = {f["id"]: f["excerpt"] for f in payload["code_files"]}
+    answers = [a["answer"] for a in payload["answers"]]
+    tasks, totals, phases, ai_phases = [], [Decimal(0) for _ in range(6)], {}, {}
+    has_code_evidence = False
+    names = set()
+    for index, raw in enumerate(raw_tasks, 1):
+        if not isinstance(raw, dict):
+            raise ValueError("工作项格式错误")
+        name = _text(raw.get("name"), "工作项名称", 160)
+        if name in names:
+            raise ValueError("工作项名称重复，请合并后重估")
+        names.add(name)
+        phase, who = raw.get("phase"), raw.get("who")
+        if phase not in PHASES or who not in (AI_DO, AI_REVIEW, HUMAN):
+            raise ValueError("工作阶段或分工格式错误")
+        change = _text(raw.get("change"), "具体改动")
+        b_low, b_mid, b_high, b_reason = _hours(raw.get("before"), "以前")
+        a_low, a_mid, a_high, a_reason = _hours(raw.get("after"), "现在")
+        evidence = raw.get("evidence")
+        if not isinstance(evidence, list) or not 1 <= len(evidence) <= 12:
+            raise ValueError("每项工作都需要需求或代码依据")
+        checked = []
+        for ref in evidence:
+            if not isinstance(ref, dict):
+                raise ValueError("依据格式错误")
+            source = ref.get("source")
+            quote = _text(ref.get("quote"), "依据摘录", 1500)
+            file = ref.get("file", "")
+            if source == "code":
+                if not isinstance(file, str) or file not in code or quote not in code[file]:
+                    raise ValueError("代码依据未出现在本次提供的源码摘录中")
+                has_code_evidence = True
+            elif source == "requirement":
+                if quote not in payload["requirement"]:
+                    raise ValueError("需求依据未出现在原话中")
+                file = ""
+            elif source == "answer":
+                if not any(quote in a for a in answers):
+                    raise ValueError("答复依据未出现在业务答复中")
+                file = ""
+            else:
+                raise ValueError("依据来源类型错误")
+            checked.append({"source": source, "file": file, "quote": quote})
+        tasks.append(Task(f"E{index}", name, phase, who, _finite_number(b_mid), _finite_number(a_mid / b_mid), change,
+                          trad_days=_finite_number(b_mid / 8), ai_days=_finite_number(a_mid / 8),
+                          trad_low_hours=float(b_low), trad_high_hours=float(b_high),
+                          ai_low_hours=float(a_low), ai_high_hours=float(a_high),
+                          before_reason=b_reason, after_reason=a_reason, evidence=checked))
+        totals = [x + y for x, y in zip(totals, (b_low, b_mid, b_high, a_low, a_mid, a_high))]
+        phases[phase] = phases.get(phase, Decimal(0)) + b_mid
+        ai_phases[phase] = ai_phases.get(phase, Decimal(0)) + a_mid
+    # 所有检查通过后才公开整份结果；模型给的总计、系数、节省比例一律不采用。
+    converted_totals = [_finite_number(n / 8) for n in totals]
+    converted_phases = {k: _finite_number(v / 8) for k, v in phases.items()}
+    converted_ai_phases = {k: _finite_number(v / 8) for k, v in ai_phases.items()}
+    saving_pct = round(_finite_number((1 - totals[4] / totals[1]) * 100), 1)
+    result.low, result.mid, result.high, result.ai_low, result.ai_mid, result.ai_high = converted_totals
+    result.tasks = tasks
+    result.phases = converted_phases
+    result.ai_phases = converted_ai_phases
+    result.saving_pct = saving_pct
+    result.who = who_split(tasks)
+    result.basis = "code_excerpt" if has_code_evidence else "requirements_only"
+    result.confidence = ("中" if confidence == "高" else confidence) if has_code_evidence else "低"
+    result.confidence_reason = why
+    result.assumptions = assumptions
+    result.assumptions.insert(0, "仅依据本次提供的源码摘录，未运行验证，未覆盖代码不作已确认处理。" if has_code_evidence
+                              else "粗估：缺少可核对的相关代码依据，只根据需求与答复推断，实际改动范围待核实。")
+    result.summary = summary
+    result.delivery = "以前与现在比较相同交付范围；两边均为预计投入工时，不含排期和等待时间。"
+    result.method, result.status = "llm", "ready"
+    return result
 
 
-def _estimate_change(card: Card, text: str, questions: list[Question], scope: ChangeScope) -> Estimate:
-    work = build_change_work(scope)
-    tasks = [w.task for w in work]
-    mid, ai_mid = sum(t.trad_days for t in tasks), sum(t.ai_days for t in tasks)
-    phases: dict[str, float] = {}
-    ai_phases: dict[str, float] = {}
-    for t in tasks:
-        phases[t.phase] = phases.get(t.phase, 0.0) + t.trad_days
-        ai_phases[t.phase] = ai_phases.get(t.phase, 0.0) + t.ai_days
-    assumptions = [
-        "按已有计算与报送链路的局部修改估算，沿用现有数据、权限和发布流程。",
-        "真实代码、字段映射及样本尚未核对；发现缺少数据、接口或需回补历史时重新估算。",
-    ]
-    if scope.parent_rollup:
-        assumptions.append("母子关系、筛选标记与本母层明细市值可复用的前提待核对；按关系动态汇总，不逐个维护产品。")
-    if scope.price_ratio_in_field:
-        assumptions.append("已确认价格比包含在现有字段中，不重复计算；具体字段仍需核对。")
-    dims = {d: 1 for d in DIMS}
-    dims.update({"功能点": 2 if scope.parent_rollup else 1, "合规": 2 if "报送" in text else 1})
-    reasons = {d: "沿用现有能力；未计新增建设" for d in DIMS}
-    reasons["功能点"] = "计算口径修改" + ("及母层动态汇总" if scope.parent_rollup else "")
-    reasons["合规"] = "人工核对关键数字及发布验收"
-    return Estimate(
-        dims=dims, reasons=reasons, base_days=mid, history_days=None, mid=mid,
-        low=sum(w.trad_low for w in work) / 8, high=sum(w.trad_high for w in work) / 8,
-        confidence="低", confidence_reason="现有逻辑增量修改：按工作项估小时；尚未核对代码与字段，属于有前提的规则初估。",
-        similar=find_similar(card, text), phases=phases,
-        unanswered_high=sum(1 for q in questions if q.impact == "高" and not q.answer.strip()),
-        tasks=tasks, ai_mid=ai_mid, ai_low=sum(w.ai_low for w in work) / 8,
-        ai_high=sum(w.ai_high for w in work) / 8, saving_pct=round((1 - ai_mid / mid) * 100),
-        who=who_split(tasks), ai_phases=ai_phases,
-        delivery="技术人员使用 AI 修改现有逻辑，人工核对字段和关键数字，再按既有流程发布验收。",
-        method="incremental", assumptions=assumptions,
-    )
-
-
-def estimate(card: Card, text: str, questions: list[Question]) -> Estimate:
-    # 答复中明确增加的范围同样要生效，但默认假设和未答问题不能当作新增工作。
-    scope_text = text + "\n" + "\n".join(q.answer for q in questions if q.answer.strip())
-    scope = calculation_change_scope(scope_text)
-    if scope is not None:
-        return _estimate_change(card, scope_text, questions, scope)
-    dims, reasons = score_dims(card, text)
-    base = 1.5 + sum(WEIGHTS[d] * (dims[d] - 1) for d in DIMS)
-    sims = find_similar(card, text)
-    history_days = None
-    if sims:
-        wsum = sum(s.score for s in sims)
-        history_days = sum(s.actual_days * s.score for s in sims) / wsum
-        # 大需求（功能点多）按功能点比例放大历史值
-        scale = max(1.0, len(card.features) / 4)
-        history_days *= min(scale, 2.0)
-        mid = config.ESTIMATE_BLEND_HISTORY * history_days + (1 - config.ESTIMATE_BLEND_HISTORY) * base
-    else:
-        mid = base
-    unanswered_high = sum(1 for q in questions if q.impact == "高" and not q.answer.strip())
-    high_factor = 1.4 + 0.05 * unanswered_high
-    low, high = mid * 0.8, mid * high_factor
-    top = sims[0].score if sims else 0.0
-    if top >= 0.6 and unanswered_high <= 2:
-        conf, why = "高", f"有高度相似的历史需求（{sims[0].title}，相似度 {top:.0%}），且高影响问题基本答清"
-    elif top >= 0.35:
-        conf, why = "中", f"有相似历史需求可参照（相似度 {top:.0%}），但仍有 {unanswered_high} 个高影响问题未答复"
-    else:
-        conf, why = "低", f"无相似历史需求，且 {unanswered_high} 个高影响问题未答复；建议先问清再报数"
-    tasks = allocate(build_tasks(card, text), mid)
-    phases: dict[str, float] = {}
-    ai_phases: dict[str, float] = {}
-    for t in tasks:
-        phases[t.phase] = round(phases.get(t.phase, 0.0) + t.trad_days, 1)
-        ai_phases[t.phase] = round(ai_phases.get(t.phase, 0.0) + t.ai_days, 1)
-    ai_mid = round(sum(t.ai_days for t in tasks), 1)
-    ratio = ai_mid / mid if mid else 1.0
-    split = who_split(tasks)
-    return Estimate(dims, reasons, round(base, 1), round(history_days, 1) if history_days else None, round(mid, 1), round(low, 1), round(high, 1),
-                    conf, why, sims, phases, unanswered_high, tasks, ai_mid, round(low * ratio, 1), round(high * ratio, 1),
-                    round((1 - ratio) * 100), split, ai_phases, delivery_mode(card, split, text))
+def estimate(card: Card, text: str, questions: list[Question], *, llm=None,
+             repos: list[RepoBundle] | None = None, drafts: list[Draft] | None = None) -> Estimate:
+    result = Estimate(unanswered_high=sum(q.impact == "高" and not q.answer.strip() for q in questions))
+    if llm is None or getattr(llm, "mode", "mock") != "api":
+        result.error = "未接入大模型，尚未估时。请在模型设置中配置模型后分析，不使用固定工时模板。"
+        return result
+    result.model = getattr(llm, "model", "")
+    try:
+        payload = _payload(text, questions, card, list(repos or []), list(drafts or []))
+        result.code_files = [f["id"] for f in payload["code_files"]]
+        llm.current_purpose = "估时分析"
+        data = llm.chat_json(load_prompt("estimate_analysis"), json.dumps(payload, ensure_ascii=False))
+        result.model = getattr(llm, "last_model", "") or result.model
+    except Exception:
+        result.status = "failed"
+        result.error = "模型估时调用失败，尚未生成工时。请检查模型连接后重新分析。"
+        return result
+    try:
+        return _parse(data, payload, result)
+    except ValueError as exc:
+        result.status = "failed"
+        result.error = "模型估时结果未通过校验：" + str(exc) + "。请重新分析。"
+        return result

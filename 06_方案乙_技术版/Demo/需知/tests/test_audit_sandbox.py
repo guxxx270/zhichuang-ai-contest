@@ -145,7 +145,8 @@ def test_analyze_survives_gateway_timeout(tmp_path):
     text = next(config.SAMPLES_DIR.glob("01_*.md")).read_text(encoding="utf-8")
     a = analyze(text, llm=llm)
     assert len(llm._client.calls) == 1               # 问清润色超时后，写单 / 出样不再各等一轮
-    assert a.questions and a.spec.business_md and a.estimate.mid > 0 and a.prototype_html
+    assert a.questions and a.spec.business_md and a.prototype_html
+    assert a.estimate.mid is None and a.estimate.ai_mid is None and a.estimate.status == "failed"
 
 
 def test_scheme_policy_falls_back_to_rules():

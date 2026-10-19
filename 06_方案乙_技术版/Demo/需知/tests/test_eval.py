@@ -8,7 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 
-from eval_req import DEFAULT_SET, THRESHOLDS, score_case, summarize  # noqa: E402
+from eval_req import DEFAULT_SET, THRESHOLDS, render_report, score_case, summarize  # noqa: E402
 from xuzhi.llm import LLM  # noqa: E402
 
 
@@ -20,3 +20,8 @@ def test_eval_set_meets_thresholds():
     assert s["pass"], {k: s[k] for k in THRESHOLDS}
     assert s["type_acc"] >= THRESHOLDS["type_acc"] and s["probe_false"] <= THRESHOLDS["probe_false"]
     assert s["redact"] == 1.0 and s["realtime_acc"] == 1.0
+    assert s["estimate_state_acc"] == 1.0 and s["unestimated_cases"] == len(cases)
+    assert s["days_in_range"] is None and s["avg_saving_pct"] is None
+    assert all(row["mid"] is None and row["ai_mid"] is None for row in rows)
+    report = render_report(rows, s, DEFAULT_SET)
+    assert "未估时" in report and "None" not in report

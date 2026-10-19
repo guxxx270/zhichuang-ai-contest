@@ -9,6 +9,7 @@ import pytest
 from xuzhi import service
 from xuzhi.ledger import Ledger
 from xuzhi.memory import Memory
+from xuzhi.pipeline.estimate import Estimate
 
 SAMPLE = "资管运营小周：净值日报能不能加一列'较上一交易日变动'，风险指标也放进去，周五给客户那版也要，最好下周就能用。客户张伟 13812345678。"
 
@@ -27,16 +28,26 @@ def test_service_run_records_and_serializes(deps):
     json.dumps(d, ensure_ascii=False)                      # 必须可序列化
     assert d["redacted"] >= 2 and d["card"]["title"] and d["questions"]
     assert set(d["estimate"]) >= {"trad_days", "ai_days", "saving_pct", "confidence", "tasks", "similar"}
+    assert d["estimate"]["status"] == "unavailable" and d["estimate"]["trad_days"]["mid"] is None
+    assert d["estimate"]["before"] == {"label": "以前", "unit": "小时", "low": None, "mid": None, "high": None}
+    assert d["estimate"]["after"]["label"] == "现在" and d["estimate"]["after"]["mid"] is None
     assert set(d["architecture"]) >= {"decisions", "data_map", "reuse", "adr_md"}
     assert d["spec"]["business_md"].startswith("#") and d["prototype_html"]
     assert "13812345678" not in json.dumps(d["card"], ensure_ascii=False)   # 卡片来自脱敏文本
     # 答复重算：同一条账更新，并记进追问记忆
     qid = d["questions"][0]["id"]
+    # 人工设置一次旧结果，确认无模型重算会清掉旧值，而非继续报上次工时。
+    ledger.update_estimate(res.req_id, Estimate(
+        method="llm", status="ready", mid=4, low=3, high=5, ai_mid=2, ai_low=1.5, ai_high=3,
+    ))
     res2 = service.run(SAMPLE, answers={qid: "按结算价"}, req_id=res.req_id, channel="API", ledger=ledger, memory=memory)
     assert res2.req_id == res.req_id and res2.learned >= 1
     row = ledger.get(res.req_id)
     assert row["n_answered"] >= 1 and row["status"] == "已确认"
+    assert row["mid_days"] is None and row["ai_days"] is None
+    assert json.loads(row["payload"])["estimate"]["status"] == "unavailable"
     assert any(e["action"] == "追问记忆" for e in ledger.events_of(res.req_id))
+    assert any(e["action"] == "估量重算" for e in ledger.events_of(res.req_id))
     # 不记账
     res3 = service.run(SAMPLE, record=False, ledger=ledger, memory=memory)
     assert res3.req_id == 0 and len(ledger.recent()) == 1
@@ -129,7 +140,8 @@ def test_mcp_tools(deps, monkeypatch):
         rid, qid = payload["req_id"], payload["questions"][0]["id"]
         out = await ms.mcp.call_tool("xuzhi_estimate", {"text": SAMPLE, "answers": {qid: "按结算价"}, "req_id": rid})
         est = json.loads((out[0] if isinstance(out, list) else out[0][0]).text)["estimate"]
-        assert est["trad_days"]["mid"] > 0 and est["ai_days"]["mid"] > 0
+        assert est["trad_days"]["mid"] is None and est["ai_days"]["mid"] is None
+        assert est["status"] == "unavailable" and est["tasks"] == []
         out = await ms.mcp.call_tool("xuzhi_architect", {"text": SAMPLE, "req_id": rid})
         arch = json.loads((out[0] if isinstance(out, list) else out[0][0]).text)["architecture"]
         assert arch["decisions"] and "adr_md" in arch

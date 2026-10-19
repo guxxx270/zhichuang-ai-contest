@@ -18,7 +18,7 @@ HELP_TEXT = (
     "**① 需求分析**（默认）：把一堆话（需求、诉求、会议里的原话）直接发给我 →\n"
     "- 🛡 隐盾：先脱敏，再进模型\n"
     "- ❓ 要和业务确认什么（可直接在聊天里按编号回答）\n"
-    "- ⏱ 复杂度与工时（传统人天 ｜ AI 协同人天）\n"
+    "- ⏱ 模型估时（以前 ｜ 现在）；未接入模型时不报工时\n"
     "- 🧭 需要 IT 拍板的技术选择\n\n"
     "**② 问码**：问关于需知这个项目本身的问题，我去翻代码回答 →\n"
     "- 单条：`/问 隐盾的脱敏规则在哪实现的`\n"
@@ -125,13 +125,18 @@ def render_analysis(analysis: Any, *, answered: int = 0, max_questions: int = 4)
     out.append("")
 
     # ---- 估量（双轨）----
-    if est is not None:
-        mid, low, high = _num(getattr(est, "mid", 0)), _num(getattr(est, "low", 0)), _num(getattr(est, "high", 0))
-        line = f"**工时**：传统 {mid} 人天（{low}~{high}）"
-        ai_mid = getattr(est, "ai_mid", 0) or 0
+    if est is not None and getattr(est, "status", "unavailable") != "ready":
+        state = "估算失败" if getattr(est, "status", "") == "failed" else "未估时"
+        reason = getattr(est, "error", "") or getattr(est, "summary", "") or "请接入模型后估算，以前和现在均无工时结果。"
+        out.append(f"**工时**：{state}。{reason}")
+        out.append("")
+    elif est is not None:
+        mid, low, high = (_num(getattr(est, field) * 8) for field in ("mid", "low", "high"))
+        line = f"**工时**：以前 {mid} 小时（{low}~{high}）"
+        ai_mid = getattr(est, "ai_mid", None)
         if ai_mid:
             saving = getattr(est, "saving_pct", 0) or 0
-            line += f" ｜ AI 协同 **{_num(ai_mid)} 人天**"
+            line += f" ｜ 现在 **{_num(ai_mid * 8)} 小时**"
             if saving:
                 line += f"，省 {_num(saving)}%"
         out.append(line)
