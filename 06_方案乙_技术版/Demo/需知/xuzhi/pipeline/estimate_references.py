@@ -76,7 +76,10 @@ def _rule_reference(card: Card, text: str, questions: list[Question]) -> dict:
         }
 
     dims, reasons = score_dims(card, text)
-    base_hours = (Decimal("1.5") + sum(Decimal(str(WEIGHTS[key])) * (dims[key] - 1) for key in WEIGHTS)) * 8
+    added = {key: Decimal(str(WEIGHTS[key])) * (Decimal(dims[key]) - 1) for key in WEIGHTS if key in dims}
+    base_hours = (Decimal("1.5") + sum(added.values(), Decimal("0"))) * 8
+    hour_parts = {"底数": _round(Decimal("1.5") * 8)}
+    hour_parts.update({key: _round(value * 8) for key, value in added.items()})
     unanswered = sum(question.impact == "高" and not str(question.answer or "").strip() for question in questions)
     high_factor = Decimal("1.4") + Decimal("0.05") * unanswered
     totals = {"low": base_hours * Decimal("0.8"), "mid": base_hours, "high": base_hours * high_factor}
@@ -110,6 +113,7 @@ def _rule_reference(card: Card, text: str, questions: list[Question]) -> dict:
         "summary": "一般需求：六维固定加权后按任务占比分配，再用各任务固定系数计算现在的参考工时。",
         "before": _sum_tasks(tasks, "before"), "after": _sum_tasks(tasks, "after"),
         "assumptions": assumptions, "dims": dims, "reasons": reasons, "weights": dict(WEIGHTS),
+        "hour_parts": hour_parts,
         "formula": (
             "以前参考小时 = 8 × [1.5 + Σ(维度权重 × (评分 - 1))]；"
             f"下界 = 参考值 × 0.8，上界 = 参考值 × (1.4 + 0.05 × 未答高影响问题数 {unanswered})；"

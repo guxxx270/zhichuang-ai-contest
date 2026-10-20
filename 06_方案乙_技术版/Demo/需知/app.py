@@ -108,6 +108,10 @@ header[data-testid="stHeader"] { background: transparent; }
 .xz-skill { --c:#22D3EE; display:inline-flex; align-items:center; gap:6px; padding:4px 11px; border-radius:999px; font-size:12.5px;
   color:#DCE4F5; background:color-mix(in srgb, var(--c) 12%, transparent); border:1px solid color-mix(in srgb, var(--c) 45%, transparent); }
 .xz-skill b { color:var(--c); font-weight:700; }
+.xz-dims { width:100%; border-collapse:collapse; margin:4px 0 8px; }
+.xz-dims th, .xz-dims td { text-align:left; padding:8px 10px; border-bottom:1px solid #22304F; vertical-align:top; color:#E6ECF8; font-size:14px; white-space:normal; line-height:1.45; }
+.xz-dims th { color:#8A97B4; font-weight:600; }
+.xz-dims td.num { white-space:nowrap; width:4.5em; }
 /* 指标卡：每张一种强调色 */
 .xz-kpi { --c:#22D3EE; position:relative; overflow:hidden; background:var(--xz-panel); border:1px solid var(--xz-line); border-radius:14px; padding:13px 16px;
   backdrop-filter: blur(6px); }
@@ -186,14 +190,14 @@ def _refresh_ledger_grid() -> None:
 CHART_COLORS = ["#22D3EE", "#A78BFA", "#34D399", "#FBBF24", "#F472B6", "#FB923C", "#60A5FA", "#2DD4BF"]
 
 
-def _color_bars(data: dict, value_name: str, height: int = 220, colors: list[str] | None = None) -> None:
+def _color_bars(data: dict, value_name: str, height: int = 220, colors: list[str] | None = None, label_angle: int = -30) -> None:
     """一类一色的柱状图：暗底上比同色柱子好认；类别名就在横轴上，不再出图例。"""
     df = pd.DataFrame({"类别": list(data.keys()), value_name: list(data.values())})
     chart = (
         alt.Chart(df)
         .mark_bar(cornerRadiusTopLeft=5, cornerRadiusTopRight=5)
         .encode(
-            x=alt.X("类别:N", sort=None, title=None, axis=alt.Axis(labelAngle=-30)),
+            x=alt.X("类别:N", sort=None, title=None, axis=alt.Axis(labelAngle=label_angle, labelLimit=80)),
             y=alt.Y(f"{value_name}:Q", title=None),
             color=alt.Color("类别:N", sort=None, legend=None, scale=alt.Scale(range=colors or CHART_COLORS)),
             tooltip=["类别", f"{value_name}:Q"],
@@ -201,6 +205,63 @@ def _color_bars(data: dict, value_name: str, height: int = 220, colors: list[str
         .properties(height=height)
     )
     st.altair_chart(chart, width="stretch")
+
+
+def _radar_dims(dims: dict, reasons: dict | None = None) -> None:
+    """六维雷达：每维 1～5，轴从中心 0 画到外圈 5。"""
+    import math
+
+    order = [name for name in ("功能点", "数据接入", "界面", "权限", "性能", "合规") if name in dims]
+    order += [name for name in dims if name not in order]
+    why = reasons or {}
+    n = len(order)
+    if n < 3:
+        return
+    cx, cy, rmax = 280, 198, 108
+
+    def at(index: int, score: float, turn: float = 0.0, *, beyond: bool = False) -> tuple[float, float]:
+        angle = -math.pi / 2 + index * 2 * math.pi / n + turn
+        raw = max(0.0, score)
+        if not beyond:
+            raw = min(5.0, raw)
+        radius = rmax * raw / 5
+        return cx + radius * math.cos(angle), cy + radius * math.sin(angle)
+
+    rings = []
+    spokes = []
+    for level in (1, 2, 3, 4, 5):
+        points = " ".join(f"{at(i, level)[0]:.1f},{at(i, level)[1]:.1f}" for i in range(n))
+        rings.append(f'<polygon points="{points}" fill="none" stroke="#334155" stroke-width="1"/>')
+    for index in range(n):
+        x, y = at(index, 5)
+        spokes.append(f'<line x1="{cx}" y1="{cy}" x2="{x:.1f}" y2="{y:.1f}" stroke="#334155" stroke-width="1"/>')
+    shape = " ".join(f"{at(i, int(dims[name]))[0]:.1f},{at(i, int(dims[name]))[1]:.1f}" for i, name in enumerate(order))
+    labels = []
+    dots = []
+    ticks = []
+    for level in (1, 5):
+        tx, ty = at(0, level)
+        ticks.append(
+            f'<text x="{tx - 8:.1f}" y="{ty:.1f}" fill="#E5E7EB" font-size="12" text-anchor="end" dominant-baseline="middle" '
+            f'stroke="#070B16" stroke-width="3" paint-order="stroke">{level}</text>'
+        )
+    for index, name in enumerate(order):
+        score = int(dims[name])
+        lx, ly = at(index, 6.35, beyond=True)
+        labels.append(
+            f'<text x="{lx:.1f}" y="{ly:.1f}" fill="#E5E7EB" font-size="13" text-anchor="middle" dominant-baseline="middle">{html.escape(name)} {score}</text>'
+        )
+        dx, dy = at(index, score)
+        title = html.escape(f"{name} {score} 分 {why.get(name, '')}")
+        dots.append(f'<g><title>{title}</title><circle cx="{dx:.1f}" cy="{dy:.1f}" r="4" fill="#22D3EE"/></g>')
+    svg = (
+        '<svg viewBox="0 0 560 400" width="100%" height="380" role="img" aria-label="六维复杂度">'
+        + "".join(rings) + "".join(spokes) + "".join(ticks)
+        + f'<polygon points="{shape}" fill="rgba(34,211,238,0.28)" stroke="#22D3EE" stroke-width="2"/>'
+        + "".join(dots) + "".join(labels)
+        + "</svg>"
+    )
+    st.markdown(svg, unsafe_allow_html=True)
 
 
 def render_ledger(ledger: Ledger, memory: Memory, audit: Audit, *, req_id: int = 0, mid: float | None = None) -> None:
@@ -1546,13 +1607,45 @@ with tabs[2]:
         if est.delivery:
             st.markdown(f"**建议交付方式**：{est.delivery}")
 
-    with st.expander("规则模板参考 · 公式、任务与前提", expanded=True):
+    with st.expander("规则模板参考 · 六维复杂度、公式与任务", expanded=True):
         if rule_ready:
             if rule_reference.get("summary"):
                 st.markdown(rule_reference["summary"])
             rule_before, rule_after = st.columns(2)
             rule_before.markdown("**以前（规则模板）**\n\n" + reference_hours(rule_reference.get("before")))
             rule_after.markdown("**现在（规则模板）**\n\n" + reference_hours(rule_reference.get("after")))
+            dims = rule_reference.get("dims")
+            if isinstance(dims, dict) and dims:
+                reasons = rule_reference.get("reasons") or {}
+                weights = rule_reference.get("weights") or {}
+                st.markdown("**六维复杂度**")
+                _radar_dims(dims, reasons)
+                weight_line = "，".join(
+                    f"{name} {weights[name]:g}" for name in ("功能点", "数据接入", "界面", "权限", "性能", "合规") if name in weights
+                )
+                st.caption("图形只表示 1～5 分，六条轴一样长。工时还要乘权重"
+                           + (f"：{weight_line}" if weight_line else "")
+                           + "。这些权重是手写示例，没有用实际工时校准。")
+                parts = rule_reference.get("hour_parts")
+                if isinstance(parts, dict) and parts:
+                    st.markdown("**各维加进参考工时（小时）**")
+                    _color_bars({str(name): float(value) for name, value in parts.items()}, "小时", label_angle=0)
+                    st.caption("底数是 1.5 人天换成的 12 小时。其余每柱是 (分数 − 1) × 权重 × 8，1 分的维是 0。"
+                               "加总等于上面「以前（规则模板）」的参考小时。这些是手写权重算出的模板小时，不是实测工时。")
+                head = "<tr><th>规则维度</th><th>分值</th>" + ("<th>评分依据</th>" if reasons else "") + ("<th>规则权重</th>" if weights else "") + "</tr>"
+                body = []
+                for name, score in dims.items():
+                    cells = f"<td>{html.escape(str(name))}</td><td class='num'>{html.escape(str(score))}</td>"
+                    if reasons:
+                        cells += f"<td>{html.escape(str(reasons.get(name, '')))}</td>"
+                    if weights:
+                        weight = weights.get(name, "")
+                        cells += f"<td class='num'>{html.escape(f'{weight:g}' if isinstance(weight, float) else str(weight))}</td>"
+                    body.append(f"<tr>{cells}</tr>")
+                st.markdown(f"<table class='xz-dims'><thead>{head}</thead><tbody>{''.join(body)}</tbody></table>", unsafe_allow_html=True)
+            elif rule_reference.get("method") == "incremental":
+                st.markdown("**六维复杂度**")
+                st.caption("这条匹配的是已有计算口径小改模板，按固定工作项加总，不打功能点、数据接入、界面、权限、性能、合规这六分。")
             if rule_reference.get("formula"):
                 st.markdown("**计算公式**")
                 st.code(rule_reference["formula"], language=None)
@@ -1565,15 +1658,6 @@ with tabs[2]:
                     "模板系数（现在/以前）": task.get("coefficient"),
                     "规则说明": task.get("note", ""),
                 } for task in rule_tasks]), hide_index=True, width="stretch")
-            dims = rule_reference.get("dims")
-            if isinstance(dims, dict) and dims:
-                reasons = rule_reference.get("reasons") or {}
-                weights = rule_reference.get("weights") or {}
-                st.dataframe(pd.DataFrame([{
-                    "规则维度": name, "分值": score,
-                    **({"评分依据": reasons.get(name, "")} if reasons else {}),
-                    **({"规则权重": weights.get(name)} if weights else {}),
-                } for name, score in dims.items()]), hide_index=True, width="stretch")
             if rule_reference.get("assumptions"):
                 st.markdown("**适用前提与局限**")
                 for assumption in rule_reference["assumptions"]:

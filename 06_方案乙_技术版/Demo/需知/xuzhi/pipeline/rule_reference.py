@@ -14,26 +14,40 @@ def _clip(v: int) -> int:
     return max(1, min(5, v))
 
 
+def _bounded(raw: int, detail: str) -> str:
+    """分值仍按 1～5 计入工时；依据里写明被上下限截住的加总。"""
+    shown = _clip(raw)
+    if raw > 5:
+        return f"{detail}；加总 {raw}，超过 5，已按上限记 {shown}"
+    if raw < 1:
+        return f"{detail}；加总 {raw}，低于 1，已按下限记 {shown}"
+    return detail
+
+
 def score_dims(card: Card, text: str) -> tuple[dict[str, int], dict[str, str]]:
     n = len(card.features)
     fp = 1 if n <= 2 else 2 if n <= 4 else 3 if n <= 6 else 4 if n <= 9 else 5
     ds = len(card.data_sources)
     external = bool(re.search(r"现货|第三方|公告|交易所日报|新闻", text))
     realtime = card.frequency in ("实时", "分钟级") or bool(re.search(r"实时|盘中|下单前", text))
-    di = _clip(ds + (1 if external else 0) + (1 if realtime else 0))
-    ui = {"页面": 3, "报表": 2, "提醒": 1, "接口": 1, "数据": 1, "流程": 2}.get(card.req_type, 2) + (1 if "手机端可看" in card.nonfunctional else 0)
-    pm = 1 + (2 if "客户" in card.scope_objects else 0) + (1 if re.search(r"权限|只能看|按人|投资经理", text) else 0) + (1 if "对外" in text else 0)
-    perf = 4 if realtime else 3 if card.frequency == "分钟级" else 2 if re.search(r"\d+\s*分钟内", text) else 1
-    perf += 1 if re.search(r"全品种|所有品种|全部客户|逐客户|五家交易所", text) else 0
-    comp = 1 + (2 if "客户" in card.scope_objects else 0) + (1 if re.search(r"合规|适当性|监管|报送", text) else 0) + (1 if re.search(r"留痕|审计", text) else 0) + (1 if re.search(r"下单|指令|阻断", text) else 0)
-    dims = {"功能点": _clip(fp), "数据接入": di, "界面": _clip(ui), "权限": _clip(pm), "性能": _clip(perf), "合规": _clip(comp)}
+    di_raw = ds + (1 if external else 0) + (1 if realtime else 0)
+    ui_raw = {"页面": 3, "报表": 2, "提醒": 1, "接口": 1, "数据": 1, "流程": 2}.get(card.req_type, 2) + (1 if "手机端可看" in card.nonfunctional else 0)
+    pm_raw = 1 + (2 if "客户" in card.scope_objects else 0) + (1 if re.search(r"权限|只能看|按人|投资经理", text) else 0) + (1 if "对外" in text else 0)
+    perf_raw = 4 if realtime else 3 if card.frequency == "分钟级" else 2 if re.search(r"\d+\s*分钟内", text) else 1
+    perf_raw += 1 if re.search(r"全品种|所有品种|全部客户|逐客户|五家交易所", text) else 0
+    comp_raw = 1 + (2 if "客户" in card.scope_objects else 0) + (1 if re.search(r"合规|适当性|监管|报送", text) else 0) + (1 if re.search(r"留痕|审计", text) else 0) + (1 if re.search(r"下单|指令|阻断", text) else 0)
+    dims = {
+        "功能点": fp, "数据接入": _clip(di_raw), "界面": _clip(ui_raw),
+        "权限": _clip(pm_raw), "性能": _clip(perf_raw), "合规": _clip(comp_raw),
+    }
+    listed = "、".join(card.features) if card.features else "没有抽出功能点"
     reasons = {
-        "功能点": f"{n} 个功能点",
-        "数据接入": f"{ds} 类数据源" + ("，含外部 / 非结构化来源" if external else "") + ("，需实时接入" if realtime else ""),
-        "界面": f"{card.req_type}类" + ("，含手机端" if "手机端可看" in card.nonfunctional else ""),
-        "权限": ("涉及客户数据，" if "客户" in card.scope_objects else "") + ("需按人 / 产品授权" if pm >= 2 else "沿用现有角色权限"),
-        "性能": "实时 / 盘中" if realtime else ("有限时要求" if perf >= 2 else "日终批处理"),
-        "合规": ("客户信息脱敏与审阅；" if "客户" in card.scope_objects else "") + ("触及交易链路；" if re.search(r"下单|指令|阻断", text) else "") + ("留痕 / 审计" if re.search(r"留痕|审计", text) else "常规"),
+        "功能点": f"{n} 个功能点：{listed}",
+        "数据接入": _bounded(di_raw, f"{ds} 类数据源" + ("，含外部 / 非结构化来源" if external else "") + ("，需实时接入" if realtime else "")),
+        "界面": _bounded(ui_raw, f"{card.req_type}类" + ("，含手机端" if "手机端可看" in card.nonfunctional else "")),
+        "权限": _bounded(pm_raw, ("涉及客户数据，" if "客户" in card.scope_objects else "") + ("需按人 / 产品授权" if pm_raw >= 2 else "沿用现有角色权限")),
+        "性能": _bounded(perf_raw, "实时 / 盘中" if realtime else ("有限时要求" if perf_raw >= 2 else "日终批处理")),
+        "合规": _bounded(comp_raw, ("客户信息脱敏与审阅；" if "客户" in card.scope_objects else "") + ("触及交易链路；" if re.search(r"下单|指令|阻断", text) else "") + ("留痕 / 审计" if re.search(r"留痕|审计", text) else "常规")),
     }
     return dims, reasons
 
