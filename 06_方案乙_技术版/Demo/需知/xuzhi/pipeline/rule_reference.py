@@ -29,7 +29,8 @@ def score_dims(card: Card, text: str) -> tuple[dict[str, int], dict[str, str]]:
     fp = 1 if n <= 2 else 2 if n <= 4 else 3 if n <= 6 else 4 if n <= 9 else 5
     ds = len(card.data_sources)
     external = bool(re.search(r"现货|第三方|公告|交易所日报|新闻", text))
-    realtime = card.frequency in ("实时", "分钟级") or bool(re.search(r"实时|盘中|下单前", text))
+    # 「公告发布后 30 分钟内」这类事件后限时同样要实时接入
+    realtime = card.frequency in ("实时", "分钟级", "事件后限时") or bool(re.search(r"实时|盘中|下单前", text))
     di_raw = ds + (1 if external else 0) + (1 if realtime else 0)
     ui_raw = {"页面": 3, "报表": 2, "提醒": 1, "接口": 1, "数据": 1, "流程": 2}.get(card.req_type, 2) + (1 if "手机端可看" in card.nonfunctional else 0)
     pm_raw = 1 + (2 if "客户" in card.scope_objects else 0) + (1 if re.search(r"权限|只能看|按人|投资经理", text) else 0) + (1 if "对外" in text else 0)
