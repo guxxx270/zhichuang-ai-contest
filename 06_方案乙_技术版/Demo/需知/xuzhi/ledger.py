@@ -20,6 +20,9 @@ STATUSES = ["受理", "已确认", "开发中", "已交付", "已对账"]
 JIRA_SOURCE = "Jira"
 JIRA_DEPT = "Jira 工单"
 _NOT_JIRA = f"COALESCE(source,'') != '{JIRA_SOURCE}'"
+# 纪要直通车拆开后的整段那行：保留原文与流水，但看板、催办不再把它算成一条需求（各条已各记一行）
+_NOT_SPLIT = "COALESCE(split_into,'') = ''"
+_SPLIT_IDS = "SELECT id FROM requirements WHERE COALESCE(split_into,'') != ''"
 
 
 def _jira_status(issue: JiraIssue) -> str:
@@ -104,7 +107,8 @@ class Ledger:
         for col, typ in (("ai_days", "REAL"), ("dept", "TEXT"), ("status", "TEXT"), ("actual_days", "REAL"),
                          ("ai_assisted", "INTEGER"), ("ai_share", "REAL"), ("closed_ts", "TEXT"), ("close_note", "TEXT"),
                          ("seconds", "REAL"), ("n_high_open", "INTEGER"),
-                         ("ext_key", "TEXT"), ("coding_trad", "REAL"), ("coding_ai", "REAL")):   # Jira 单号、编码阶段人工 / AI
+                         ("ext_key", "TEXT"), ("coding_trad", "REAL"), ("coding_ai", "REAL"),   # Jira 单号、编码阶段人工 / AI
+                         ("split_into", "TEXT")):   # 纪要直通车：整段那行拆成了哪几条（#12 #13）
             try:
                 self.conn.execute(f"ALTER TABLE requirements ADD COLUMN {col} {typ}")
             except sqlite3.OperationalError:
@@ -225,6 +229,13 @@ class Ledger:
                  analysis.seconds, json.dumps(payload, ensure_ascii=False), req_id),
             )
 
+    def mark_split(self, req_id: int, children: list[int]) -> None:
+        """纪要直通车：整段纪要那行拆成了几条。那行保留原文与流水，看板、催办不再把它算成一条需求。"""
+        ids = " ".join(f"#{int(c)}" for c in children)
+        self.conn.execute("UPDATE requirements SET split_into=? WHERE id=?", (ids, req_id))
+        self.conn.commit()
+        self.event(req_id, "纪要拆分", f"已拆分为 {ids}")
+
     def event(self, req_id: int, action: str, detail: str = "") -> None:
         self.conn.execute("INSERT INTO events(ts,req_id,action,detail) VALUES(?,?,?,?)", (datetime.now().isoformat(timespec="seconds"), req_id, action, detail))
         self.conn.commit()
@@ -313,7 +324,7 @@ class Ledger:
 
     def recent(self, n: int = 20) -> list[dict]:
         cur = self.conn.execute(
-            "SELECT id,ts,title,dept,source,req_type,requester,engine,status,n_questions,n_answered,n_high_open,mid_days,ai_days,coding_ai,actual_days,close_note,ai_share,confidence,redacted,ext_key "
+            "SELECT id,ts,title,dept,source,req_type,requester,engine,status,n_questions,n_answered,n_high_open,mid_days,ai_days,coding_ai,actual_days,close_note,ai_share,confidence,redacted,ext_key,split_into "
             "FROM requirements ORDER BY id DESC LIMIT ?", (n,))
         cols = [c[0] for c in cur.description]
         return [dict(zip(cols, r)) for r in cur.fetchall()]
@@ -326,18 +337,19 @@ class Ledger:
         """审计导出：全部需求行（不含 payload 原文）。"""
         cur = self.conn.execute(
             "SELECT id,ts,title,dept,requester,source,req_type,engine,status,n_questions,n_answered,n_high_open,mid_days,ai_days,coding_trad,coding_ai,"
-            "actual_days,ai_assisted,ai_share,confidence,redacted,seconds,closed_ts,close_note,ext_key FROM requirements ORDER BY id")
+            "actual_days,ai_assisted,ai_share,confidence,redacted,seconds,closed_ts,close_note,ext_key,split_into FROM requirements ORDER BY id")
         cols = [c[0] for c in cur.description]
         return [dict(zip(cols, r)) for r in cur.fetchall()]
 
     def stats(self) -> dict:
-        n, q, ans, red = self.conn.execute("SELECT COUNT(*), COALESCE(SUM(n_questions),0), COALESCE(SUM(n_answered),0), COALESCE(SUM(redacted),0) FROM requirements").fetchone()
+        n, q, ans, red = self.conn.execute("SELECT COUNT(*), COALESCE(SUM(n_questions),0), COALESCE(SUM(n_answered),0), COALESCE(SUM(redacted),0) "
+                                           f"FROM requirements WHERE {_NOT_SPLIT}").fetchone()
         return {"count": n, "questions": q, "answered": ans, "redacted": red, "minutes_saved": n * sum(MINUTES_SAVED.values())}
 
     def dashboard(self) -> dict:
         """经营看板：需求量（部门 / 类型 / 月份 / 状态）、澄清效率、估算偏差、AI 协同省时、反馈。全部由台账算出。"""
         c = self.conn
-        n = c.execute("SELECT COUNT(*) FROM requirements").fetchone()[0]
+        n = c.execute(f"SELECT COUNT(*) FROM requirements WHERE {_NOT_SPLIT}").fetchone()[0]
         out: dict = {"count": n, "by_dept": {}, "by_type": {}, "by_month": {}, "by_status": {s: 0 for s in STATUSES}}
         if not n:
             out.update({"avg_questions": 0.0, "answer_rate": 0.0, "avg_rounds": 0.0, "avg_seconds": 0.0, "high_open_rate": 0.0,
@@ -347,24 +359,24 @@ class Ledger:
                         "closed": 0, "comparable_count": 0, "mape": None, "mape_trad": None, "mape_ai": None, "bias_trad": None, "thumbs_up": 0, "thumbs_down": 0, "depts": 0})
             return out
         # 部门与类型分布只算零散需求：Jira 工单没有提出部门，类型（需求 / 缺陷…）也和业务类型（报表 / 页面…）不是一个口径
-        for dept, k in c.execute(f"SELECT COALESCE(NULLIF(dept,''),'未注明'), COUNT(*) FROM requirements WHERE {_NOT_JIRA} GROUP BY 1 ORDER BY 2 DESC"):
+        for dept, k in c.execute(f"SELECT COALESCE(NULLIF(dept,''),'未注明'), COUNT(*) FROM requirements WHERE {_NOT_JIRA} AND {_NOT_SPLIT} GROUP BY 1 ORDER BY 2 DESC"):
             out["by_dept"][dept] = k
-        for t, k in c.execute(f"SELECT COALESCE(NULLIF(req_type,''),'其他'), COUNT(*) FROM requirements WHERE {_NOT_JIRA} GROUP BY 1 ORDER BY 2 DESC"):
+        for t, k in c.execute(f"SELECT COALESCE(NULLIF(req_type,''),'其他'), COUNT(*) FROM requirements WHERE {_NOT_JIRA} AND {_NOT_SPLIT} GROUP BY 1 ORDER BY 2 DESC"):
             out["by_type"][t] = k
         out["jira_by_kind"] = dict(c.execute(
             f"SELECT COALESCE(NULLIF(req_type,''),'其他'), COUNT(*) FROM requirements WHERE source='{JIRA_SOURCE}' GROUP BY 1 ORDER BY 2 DESC").fetchall())
-        for m, k in c.execute("SELECT substr(ts,1,7), COUNT(*) FROM requirements GROUP BY 1 ORDER BY 1"):
+        for m, k in c.execute(f"SELECT substr(ts,1,7), COUNT(*) FROM requirements WHERE {_NOT_SPLIT} GROUP BY 1 ORDER BY 1"):
             out["by_month"][m] = k
-        for s, k in c.execute("SELECT COALESCE(NULLIF(status,''),'受理'), COUNT(*) FROM requirements GROUP BY 1"):
+        for s, k in c.execute(f"SELECT COALESCE(NULLIF(status,''),'受理'), COUNT(*) FROM requirements WHERE {_NOT_SPLIT} GROUP BY 1"):
             out["by_status"][s] = out["by_status"].get(s, 0) + k
         # 追问 / 澄清 / 出稿用时只算零散需求（Jira 工单已写好，不追问）；工时与省时全算
-        n_free = c.execute(f"SELECT COUNT(*) FROM requirements WHERE {_NOT_JIRA}").fetchone()[0]
+        n_free = c.execute(f"SELECT COUNT(*) FROM requirements WHERE {_NOT_JIRA} AND {_NOT_SPLIT}").fetchone()[0]
         aq, sa, sq, ho, sec = c.execute(
             "SELECT AVG(n_questions), SUM(n_answered), SUM(n_questions), SUM(COALESCE(n_high_open,0)), AVG(COALESCE(seconds,0)) "
-            f"FROM requirements WHERE {_NOT_JIRA}").fetchone()
+            f"FROM requirements WHERE {_NOT_JIRA} AND {_NOT_SPLIT}").fetchone()
         valid_estimates: list[tuple[float, float]] = []
         legacy_count = 0
-        for before, after, payload in c.execute("SELECT mid_days, ai_days, payload FROM requirements"):
+        for before, after, payload in c.execute(f"SELECT mid_days, ai_days, payload FROM requirements WHERE {_NOT_SPLIT}"):
             before, after = _number(before), _number(after)
             if before is None or before <= 0 or after is None or after <= 0:
                 continue
@@ -381,7 +393,7 @@ class Ledger:
         out["unestimated_count"] = n - len(valid_estimates) - legacy_count
         trad = sum(pair[0] for pair in valid_estimates) if valid_estimates else None
         ai = sum(pair[1] for pair in valid_estimates) if valid_estimates else None
-        rounds = c.execute("SELECT COUNT(*) FROM events WHERE action='业务答复重算'").fetchone()[0]
+        rounds = c.execute(f"SELECT COUNT(*) FROM events WHERE action='业务答复重算' AND req_id NOT IN ({_SPLIT_IDS})").fetchone()[0]
         jn, jct, jca = c.execute(
             f"SELECT COUNT(*), SUM(COALESCE(coding_trad,0)), SUM(COALESCE(coding_ai,0)) FROM requirements WHERE source='{JIRA_SOURCE}'").fetchone()
         out["jira_count"], out["jira_coding_trad"], out["jira_coding_ai"] = int(jn or 0), round(jct or 0.0, 1), round(jca or 0.0, 1)
@@ -395,7 +407,8 @@ class Ledger:
         out["saved_days"] = round(trad - ai, 3) if trad is not None and ai is not None else None
         out["saving_pct"] = round(100 * (trad - ai) / trad) if trad is not None and ai is not None else None
         out["depts"] = len(out["by_dept"])
-        closed = c.execute("SELECT mid_days, ai_days, actual_days, ai_assisted FROM requirements WHERE actual_days IS NOT NULL AND actual_days>0").fetchall()
+        closed = c.execute("SELECT mid_days, ai_days, actual_days, ai_assisted FROM requirements "
+                           f"WHERE actual_days IS NOT NULL AND actual_days>0 AND {_NOT_SPLIT}").fetchall()
         out["closed"] = len(closed)
         if closed:
             # 用了 AI 协同的比 AI 轨估算，没用的比传统轨：拿 AI 做完的实际人天去比传统估算，偏差会被夸大

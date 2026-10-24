@@ -1,7 +1,7 @@
 """需知 · 纪要直通车：一段纪要里识别到几条需求时，在结果页签上方提示，可一键拆成几条分别受理。
 
-拆分只用规则（xuzhi.pipeline.split）；每条走规则流水线（不调模型）、在一本账里各记一行，原来整段那行记一条「已拆分为 #…」。
-拆完在这里切换查看任意一条（或回到整段），下方各页签跟着换成那一条。"""
+拆分只用规则（xuzhi.pipeline.split）；每条走规则流水线（不调模型）、在一本账里各记一行，原来整段那行记一条「已拆分为 #…」，
+看板与催办不再把整段那行算成一条需求。拆完在这里切换查看任意一条（或回到整段），下方各页签跟着换成那一条。"""
 from __future__ import annotations
 
 from typing import Callable
@@ -14,14 +14,14 @@ from xuzhi.memory import Memory
 from xuzhi.pipeline import Analysis, analyze
 from xuzhi.pipeline.split import MAX_SEGMENTS, Segment, source_hint, split_requirements
 
-STATE = "minutes_split"   # {"parent": 整段那行编号, "children": [编号…], "rows": {编号: Analysis}}
+STATE = "minutes_split"   # {"parent": 整段那行编号, "children": [编号…], "rows": {编号: Analysis}, "drafts": {编号: 未重算的答复}}
 PICK = "minutes_pick"
 
 
 @st.cache_data(max_entries=64, show_spinner=False)
 def _segments(text: str) -> list[Segment]:
-    # 每次交互都会重跑页面：同一段原话只切一次
-    return split_requirements(text)
+    # 每次交互都会重跑页面：同一段原话只切一次；多切一条只为知道有没有超出上限
+    return split_requirements(text, max_segments=MAX_SEGMENTS + 1)
 
 
 def _rule_hours(a: Analysis) -> str:
@@ -45,8 +45,8 @@ def _split(a: Analysis, parent: int, *, ledger: Ledger, memory: Memory, source: 
         ledger.event(rid, "纪要拆分受理", f"同一段纪要拆出 {len(segments)} 条，第 {seg.index} 条（原纪要 #{parent}）")
         children.append(rid)
         rows[rid] = child
-    ledger.event(parent, "纪要拆分", "已拆分为 " + " ".join(f"#{rid}" for rid in children))
-    return {"parent": parent, "children": children, "rows": rows}
+    ledger.mark_split(parent, children)   # 整段那行留原文与流水，看板、催办不再重复算它
+    return {"parent": parent, "children": children, "rows": rows, "drafts": {}}
 
 
 def _open(on_switch: Callable[[], None] | None) -> None:
@@ -59,12 +59,17 @@ def _open(on_switch: Callable[[], None] | None) -> None:
         return
     if on_switch is not None:
         on_switch()   # 当前这条若还有后台模型任务，换条前先结束，免得结果写错行
-    if current in rows and st.session_state.get("analysis") is not None:
-        rows[current] = st.session_state["analysis"]   # 答复重算、模型增强后的结果也带上
+    drafts = ctx.setdefault("drafts", {})
+    if current in rows:
+        if st.session_state.get("analysis") is not None:
+            rows[current] = st.session_state["analysis"]   # 答复重算、模型增强后的结果也带上
+        # 填了还没点重算的答复也按条留着，切回来接着填（答复框的值比 answers 新：失焦和切换可能在同一轮里到）
+        drafts[current] = {**(st.session_state.get("answers") or {}),
+                           **{str(k)[4:]: v for k, v in st.session_state.items() if str(k).startswith("ans_")}}
     nxt = rows[target]
     st.session_state["analysis"] = nxt
     st.session_state["req_id"] = target
-    st.session_state["answers"] = {q.id: q.answer for q in nxt.questions if q.answer.strip()}
+    st.session_state["answers"] = {**{q.id: q.answer for q in nxt.questions if q.answer.strip()}, **drafts.get(target, {})}
     for key in [k for k in st.session_state if str(k).startswith("ans_")]:
         del st.session_state[key]   # 答复框按目标那条重新填
 
@@ -78,12 +83,15 @@ def _scroll_here() -> None:
 
 
 def _render_offer(a: Analysis, segments: list[Segment], *, ledger: Ledger, memory: Memory, source: str) -> None:
+    more = len(segments) > MAX_SEGMENTS
+    segments = segments[:MAX_SEGMENTS]
     n = len(segments)
     with st.container(border=True, key="minutes_banner"):
-        st.markdown(f"**:material/call_split: 纪要直通车：这段话里识别到 {n} 条需求**")
+        st.markdown(f"**:material/call_split: 纪要直通车：这段话里识别到 {n} 条需求"
+                    + (f"（只列前 {MAX_SEGMENTS} 条）" if more else "") + "**")
         st.caption("按编号条目、提出方切换和「还有一件事」这类连接词识别，不调模型；参会名单、背景和「下周再议」这类决议不算需求。"
                    "拆开后每条单独走问清、写单、估量、定架、出样，在一本账里各记一行。"
-                   + (f"单次最多拆 {MAX_SEGMENTS} 条，超出部分请另贴一次。" if n >= MAX_SEGMENTS else ""))
+                   + (f"单次最多拆 {MAX_SEGMENTS} 条，后面的请另贴一次。" if more else ""))
         st.dataframe(pd.DataFrame([{"序号": s.index, "提出方": s.requester or "未注明", "需求预览": s.title_hint,
                                     "拆分依据": s.reason} for s in segments]),
                      hide_index=True, width="stretch",
@@ -124,7 +132,8 @@ def _render_done(ctx: dict, a: Analysis, current: int, *, busy: bool, on_switch:
                              on_change=_open, args=(on_switch,), wrap=True)
         tip = (f"正在看第 {children.index(current) + 1} 条（共 {len(children)} 条）。" if current in children
                else "正在看整段纪要。")
-        st.caption(tip + f"切换后下方各页签换成那一条，答复与重算记在各自那行账上；整段那行 #{parent} 保留原文，流水里记了拆分去向。"
+        st.caption(tip + f"切换后下方各页签换成那一条，答复与重算记在各自那行账上；整段那行 #{parent} 保留原文，"
+                   "流水里记了拆分去向，看板和催办不再重复算它。"
                    + ("后台模型还在分析当前这条，切换会结束这次分析。" if busy else ""))
 
 
