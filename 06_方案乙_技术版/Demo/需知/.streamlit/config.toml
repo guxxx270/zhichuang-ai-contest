@@ -34,6 +34,11 @@ chartSequentialColors = ["#0B1B3A", "#0E2A55", "#123A70", "#164B8B", "#1B5FA6", 
 dataframeBorderColor = "#22304F"
 dataframeHeaderBackgroundColor = "#141F38"
 
+[server]
+# 只在本机监听：页面没有登录，局域网里谁打开都能看一本账和追问记忆里的答复、对账、清空记忆，还能用本机 .env 的模型。
+# 需要局域网访问时，先放到带鉴权的反向代理后面，再改这里。
+address = "127.0.0.1"
+
 [browser]
 gatherUsageStats = false
 
