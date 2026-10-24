@@ -1,6 +1,7 @@
 """版本对比页面：样例 ① 答两题重算 → 结果顶上「本次变更」、一本账「版本记录（2 版）」；需求变更开关沿用编号与已答口径。"""
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 import pytest
@@ -9,7 +10,7 @@ from streamlit.testing.v1 import AppTest
 
 from test_intake_requirements import EQUITY_REQUIREMENT
 from test_llm_estimate import FakeLLM, _response
-from xuzhi import config
+from xuzhi import config, versions
 from xuzhi.ledger import Ledger
 from xuzhi.llm import LLM
 
@@ -193,6 +194,178 @@ def test_background_model_results_become_versions_and_failures_do_not(ui, monkey
     assert len(ledger.versions_of(rid)) == 3 and not _banner(ui)
     history = next(e for e in _ledger_tab(ui).expander if e.label.startswith("版本记录"))
     assert history.label == "版本记录（3 版）"
+
+
+class RefineLLM(BackgroundLLM):
+    """像真模型那样润色：改写功能点 / 标题 / 一句话、补两道题（一道高影响）。gate 关上时润色卡住，可在模型跑时看页面。"""
+
+    def __init__(self):
+        super().__init__()
+        self.gate = threading.Event()
+        self.gate.set()
+
+    def chat_json(self, system, user):
+        if self.current_purpose != "问清润色":
+            return super().chat_json(system, user)
+        assert self.gate.wait(10), "测试没放行模型润色"
+        return {"title": "权益敞口口径调整", "goal": "按52W_beta市值重算集团报送的权益敞口",
+                "features": ["权益敞口改取52W_beta市值", "母产品按含beta子产品加总", "价格比值口径按说明处理"],
+                "extra_questions": [{"question": "报送截止时间是几点？", "impact": "高", "default": "T+1 上午 10 点"},
+                                    {"question": "历史数据要不要回溯重算？", "impact": "中"}]}
+
+
+def _use_model(app: AppTest, monkeypatch, fake) -> None:
+    monkeypatch.setattr("xuzhi.llm.LLM", lambda *a, **k: fake if k.get("mode") == "api" else LLM(*a, **k))
+    custom = next(o for o in _widget(app.selectbox, "模型来源").options if "自定义" in o)
+    _widget(app.selectbox, "模型来源").select(custom)
+    _run(app)
+    _widget(app.text_input, "API Key").input("ui-test-placeholder")
+    _widget(app.text_input, "API Base URL").input("https://example.invalid/v1")
+    _widget(app.text_input, "模型 ID").input("test-estimator")
+
+
+def test_with_a_model_this_change_compares_like_with_like(ui, monkeypatch):
+    """配了模型：答复重算先存规则初稿、模型补全后再存一版。「本次变更」和上一份同类结果比，
+    不把「模型改写 ↔ 规则抽取」的说法差别当成删了功能点去找业务确认。"""
+    fake = RefineLLM()
+    _use_model(ui, monkeypatch, fake)
+    _widget(ui.text_area, "原话").input(EQUITY_REQUIREMENT)
+    _run(ui)
+    _widget(ui.button, "需知，开工").click()
+    _run(ui)
+    rid = int(ui.session_state["req_id"])
+    _settle(ui)
+    banner = _banner(ui)
+    assert len(banner) == 1 and "v2 · 模型增强" in banner[0] and "需重新确认 1 项" in banner[0], banner
+    detail = next(e for e in ui.expander if e.label.startswith("变更明细（v1 → v2）"))
+    assert any(c.value == versions.MIXED_NOTE for c in detail.caption)
+    assert not any("功能点不见了" in m.value for m in detail.markdown), "模型改写功能点不是业务删了需求"
+
+    qids = [q.id for q in ui.session_state["analysis"].questions if not q.id.startswith("L")][:2]
+    fake.gate.clear()   # 重算后模型补全先卡住：页面上是规则初稿 v3
+    for qid in qids:
+        ui.text_input(key=f"ans_{qid}").input(f"答复 {qid}")
+    _run(ui)
+    _widget(ui.button, RECOMPUTE).click()
+    _run(ui)
+    assert [v["label"] for v in Ledger().versions_of(rid)] == ["受理", "模型增强", "业务答复重算"]
+    banner = _banner(ui)
+    assert len(banner) == 1 and "v3 · 业务答复重算" in banner[0] and "相对 v1：已答 \\+2" in banner[0], banner
+    assert any("这里和上一份规则初稿 v1 比" in c.value for c in ui.caption)
+
+    fake.gate.set()
+    _settle(ui)
+    assert [v["label"] for v in Ledger().versions_of(rid)] == ["受理", "模型增强", "业务答复重算", "模型增强"]
+    banner = _banner(ui)
+    assert len(banner) == 1 and "v4 · 模型增强" in banner[0] and banner[0].endswith("相对 v2：已答 \\+2"), banner
+    assert any("v3（业务答复重算）是模型补全前的规则初稿" in c.value for c in ui.caption)
+    assert next(e for e in ui.expander if e.label.startswith("变更明细（v2 → v4）"))
+    history = next(e for e in _ledger_tab(ui).expander if e.label.startswith("版本记录"))
+    assert history.label == "版本记录（4 版）"   # 中间的规则初稿照样留在版本记录里，可任选两版对比
+    assert list(history.dataframe[0].value["结果"]) == ["规则初稿", "含模型结果", "规则初稿", "含模型结果"]
+    assert any(c.value == versions.MIXED_NOTE for c in history.caption)   # 默认最近两版（v3 → v4）隔类，注明缘由
+
+
+def test_change_toggle_resets_when_another_sample_is_picked(ui):
+    """开关开着时改选了别的样例：多半是另一条需求，开关复位，开工按新需求受理。"""
+    rid = _start_sample1(ui)
+    _widget(ui.toggle, _toggle_label(rid)).set_value(True)
+    _run(ui)
+    other = next(o for o in _widget(ui.selectbox, SAMPLE_LABEL).options if o.startswith("02_"))
+    _widget(ui.selectbox, SAMPLE_LABEL).select(other)
+    _run(ui)
+    assert _widget(ui.toggle, _toggle_label(rid)).value is False
+    _widget(ui.button, "需知，开工").click()
+    _run(ui)
+    assert int(ui.session_state["req_id"]) != rid and [v["label"] for v in Ledger().versions_of(rid)] == ["受理"]
+
+
+def test_change_keeps_answers_recalled_from_memory_as_recalled(ui):
+    """样例 ⑤ 沿用了追问记忆（🧠）：需求变更后照样按记忆沿用，不当成业务新答复，也不算「改答」。"""
+    _start_sample1(ui)
+    _answer_and_recompute(ui, ANSWERS)   # 记进追问记忆
+    sample5 = next(o for o in _widget(ui.selectbox, SAMPLE_LABEL).options if o.startswith("05_"))
+    _widget(ui.selectbox, SAMPLE_LABEL).select(sample5)
+    _run(ui)
+    _widget(ui.button, "需知，开工").click()
+    _run(ui)
+    rid = int(ui.session_state["req_id"])
+    recalled = {q.id: q.answer for q in ui.session_state["analysis"].questions if q.recalled}
+    assert recalled, "样例 ⑤ 应沿用样例 ① 的口径"
+
+    box = _widget(ui.text_area, "原话")
+    box.input(box.value + "另外导出 Excel 时也要这一列。")
+    _run(ui)
+    _widget(ui.toggle, _toggle_label(rid)).set_value(True)
+    _run(ui)
+    _widget(ui.button, "需知，开工").click()
+    _run(ui)
+
+    assert ui.session_state["req_id"] == rid
+    after = ui.session_state["analysis"]
+    assert {q.id: q.answer for q in after.questions if q.recalled} == recalled
+    assert all(ui.text_input(key=f"ans_{qid}").value == answer for qid, answer in recalled.items())
+    found = Ledger().versions_of(rid)
+    assert [v["label"] for v in found] == ["受理", "需求变更"]
+    d = versions.diff(found[0]["snapshot"], found[1]["snapshot"], 1, 2)
+    assert d.text_changed and not d.questions["answered"] and not d.questions["changed"]
+
+
+def test_jira_mode_ledger_shows_versions_for_free_requirements_only(ui):
+    """Jira 模式里打开一本账：零散需求照样有版本记录，Jira 工单走「Jira 重新评估」不出版本记录。"""
+    from test_jira import STORY
+    from xuzhi import service
+    from xuzhi.jira import parse_issue_text
+    from xuzhi.memory import Memory
+    from xuzhi.pipeline.assess import assess, calibrate
+
+    ledger, memory = Ledger(), Memory()
+    text = next(config.SAMPLES_DIR.glob("01_*.md")).read_text(encoding="utf-8")
+    rid = service.run(text, ledger=ledger, memory=memory).req_id
+    service.run(text, answers=ANSWERS, req_id=rid, ledger=ledger, memory=memory)
+    jira_rid, _ = ledger.log_jira(assess(parse_issue_text(STORY), calibrate([])), "粘贴")
+    ui.session_state["app_mode"] = "jira"
+    _run(ui)
+    ui.toggle(key="jira_show_ledger").set_value(True)
+    _run(ui)
+    assert ui.selectbox(key="ledger_pick").value == jira_rid
+    assert not [e for e in ui.expander if e.label.startswith("版本记录")]
+    ui.selectbox(key="ledger_pick").select(rid)
+    _run(ui)
+    history = next(e for e in ui.expander if e.label.startswith("版本记录"))
+    assert history.label == "版本记录（2 版）" and any("相对 v1：已答 \\+2" in m.value for m in history.markdown)
+
+
+def test_version_history_states_for_old_single_and_same_pick(ui):
+    """首页打开一本账：早于版本功能的老需求、只有一版的需求、从 / 到选了同一版，各给一句说明，不报错。"""
+    from xuzhi import service
+    from xuzhi.memory import Memory
+
+    ledger, memory = Ledger(), Memory()
+    text = next(config.SAMPLES_DIR.glob("01_*.md")).read_text(encoding="utf-8")
+    old = service.run(text, ledger=ledger, memory=memory).req_id
+    with ledger.conn:
+        ledger.conn.execute("DELETE FROM versions WHERE req_id=?", (old,))   # 早于版本功能的老需求
+    one = service.run(text, ledger=ledger, memory=memory).req_id
+    two = service.run(text, ledger=ledger, memory=memory).req_id
+    service.run(text, answers=ANSWERS, req_id=two, ledger=ledger, memory=memory)
+    ui.toggle(key="home_ledger").set_value(True)
+    _run(ui)
+
+    def history():
+        return next(e for e in ui.expander if e.label.startswith("版本记录"))
+
+    ui.selectbox(key="ledger_pick").select(old)
+    _run(ui)
+    assert history().label == "版本记录（0 版）" and any("早于版本功能" in c.value for c in history().caption)
+    ui.selectbox(key="ledger_pick").select(one)
+    _run(ui)
+    assert history().label == "版本记录（1 版）" and any("目前只有一版" in c.value for c in history().caption)
+    ui.selectbox(key="ledger_pick").select(two)
+    _run(ui)
+    _widget(history().selectbox, "从版本").select(2)
+    _run(ui)
+    assert any("选的是同一版" in c.value for c in history().caption) and not history().download_button
 
 
 def test_change_of_a_row_gone_from_ledger_is_booked_as_new(ui):

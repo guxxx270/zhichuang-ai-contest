@@ -1348,9 +1348,10 @@ if _mat and (st.session_state.get("drafts") or st.session_state.get("repos")):  
 
 tabs = st.tabs([":material/forum: 问清", ":material/description: 写单", ":material/speed: 估量", ":material/account_tree: 定架",
                 ":material/web: 出样", ":material/menu_book: 一本账", ":material/shield: 隐盾"])
-if st.session_state.pop("scroll_to_results", False):   # 刚开工：把结果滚到眼前，投屏时不用手动往下找
+if st.session_state.pop("scroll_to_results", False):   # 刚开工：把结果滚到眼前，投屏时不用手动往下找；需求变更先看「本次变更」
     components.html(
-        "<script>setTimeout(function(){var t=window.parent.document.querySelector('[data-testid=\"stTabs\"]');"
+        "<script>setTimeout(function(){var d=window.parent.document;"
+        "var t=d.querySelector('.st-key-xz_change_banner')||d.querySelector('[data-testid=\"stTabs\"]');"
         "if(t)t.scrollIntoView({behavior:'smooth',block:'start'});},300);</script>",
         height=0,
     )

@@ -144,6 +144,7 @@ def test_reconfirm_rules_for_questions_features_and_decisions():
                         {"id": "D5", "topic": "权限模型", "recommended": "角色 + 产品"}]
     new["decisions"] = [{"id": "D1", "topic": "新建 vs 复用", "recommended": "新建独立页面"},
                         {"id": "D3", "topic": "时效", "recommended": "分钟级"}]
+    new["text_sig"] = "0" * 16   # 原话改过：删掉的功能点才要找业务确认
     d = versions.diff(old, new, 1, 2)
     assert d.features["reworded"] == [{"old": "净值日报加一列较上一交易日变动", "new": "净值日报加一列较上一交易日变动，放在单位净值旁边"}]
     assert d.features["removed"] == ["新发的两只产品也加上"] and not d.features["added"]
@@ -157,6 +158,48 @@ def test_reconfirm_rules_for_questions_features_and_decisions():
     assert any(t.startswith("决策 D1") and "新建独立页面" in t for t in texts) and any(t.startswith("新增决策 D3") for t in texts)
     assert not any("D5" in t for t in texts), "删掉的决策只列出，不要求拍板"
     assert d.decisions["removed"][0]["id"] == "D5"
+
+    # 原话没改：功能点增删只是抽取 / 模型改写的说法差别，照样列在「功能点」一节，但不拿去问业务
+    same_text = copy.deepcopy(new)
+    same_text["text_sig"] = old["text_sig"]
+    d2 = versions.diff(old, same_text, 1, 2)
+    assert d2.features["removed"] == ["新发的两只产品也加上"] and not d2.text_changed
+    assert not any(r["kind"] == "功能点" for r in d2.reconfirm)
+    # 一版规则初稿、一版含模型结果：即便原话改了，功能点差别也多是说法不同，同样不列；明细和说明里写清缘由
+    mixed = copy.deepcopy(new)
+    mixed["engine"] = "规则 + 模型"
+    d3 = versions.diff(old, mixed, 1, 2)
+    assert d3.mixed and d3.text_changed and not any(r["kind"] == "功能点" for r in d3.reconfirm)
+    assert d3.to_dict()["mixed"] is True and versions.MIXED_NOTE in versions.diff_markdown(d3, "净值日报", 1, 2)
+    assert not d.mixed and versions.MIXED_NOTE not in versions.diff_markdown(d, "净值日报", 1, 2)
+
+
+def test_answered_question_whose_wording_stays_is_not_reconfirmed():
+    """已答的题只是影响档或默认假设变了：原答复照用，不进需重新确认；问法变了才问。"""
+    old, new = _snap(answers=ANSWERS), _snap(answers=ANSWERS)
+    target = next(q for q in new["questions"] if q["id"] == "T01")
+    target.update(impact="中", default="收盘价")
+    d = versions.diff(old, new, 1, 2)
+    assert [x["id"] for x in d.questions["reworded"]] == ["T01"] and d.reconfirm == []
+    target["question"] += "夜盘算哪天？"
+    d = versions.diff(old, new, 1, 2)
+    assert [r["kind"] for r in d.reconfirm] == ["口径"] and ANSWERS["T01"] in d.reconfirm[0]["text"]
+
+
+def test_base_index_compares_like_with_like():
+    """配了模型时每次答复重算 / 需求变更先存规则初稿、模型补全后再存一版：「本次变更」和上一份同类结果比。"""
+    def v(n, label, engine):
+        return {"version": n, "label": label, "ts": "", "snapshot": {"engine": engine}}
+
+    found = [v(1, "受理", "规则"), v(2, "模型增强", "规则 + 模型"), v(3, "业务答复重算", "规则"), v(4, "模型增强", "规则 + 模型")]
+    assert versions.base_index(found) == 1 and versions.base_index(found, 2) == 0
+    assert versions.base_note(found, 1) == "v3（业务答复重算）是模型补全前的规则初稿，这里直接和上一份同样含模型结果的 v2 比。"
+    assert versions.base_note(found[:3], 0) == "v2（模型增强）含模型结果，和本版规则初稿不同类，这里和上一份规则初稿 v1 比。"
+    assert versions.base_index(found[:2]) == 0 and versions.base_note(found[:2], 0) == ""   # 前面没有同类：比上一版
+    rules_only = [v(1, "受理", "规则"), v(2, "业务答复重算", "规则"), v(3, "需求变更", "规则")]
+    assert versions.base_index(rules_only) == 1                                            # 不配模型：就是最近两版
+    assert versions.base_index([v(1, "受理", ""), v(2, "业务答复重算", "")]) == 0          # 早于引擎记录的快照
+    assert versions.kind(_snap()) == "规则" and versions.kind({}) == ""
 
 
 def test_same_means_nothing_visible_changed():
@@ -245,6 +288,13 @@ def test_add_version_numbers_and_skips_unchanged_snapshots(deps):
     assert ledger.add_version(9999, a, "受理") == 0 and ledger.add_version(0, a) == 0
     assert ledger.conn.execute("SELECT COUNT(*) FROM versions").fetchone()[0] == 3
     assert ledger.stats()["count"] == 1 and ledger.dashboard()["count"] == 1   # 版本不算需求条数
+    # Jira 工单走「Jira 重新评估」：即便接口拿它的编号来重算，也不记版本
+    from test_jira import STORY
+    from xuzhi.jira import parse_issue_text
+    from xuzhi.pipeline.assess import assess, calibrate
+
+    jira_rid, _ = ledger.log_jira(assess(parse_issue_text(STORY), calibrate([])), "粘贴")
+    assert ledger.add_version(jira_rid, a, "业务答复重算") == 0 and ledger.versions_of(jira_rid) == []
 
 
 def test_update_analysis_and_record_change_keep_the_same_row(deps):
@@ -265,6 +315,19 @@ def test_update_analysis_and_record_change_keep_the_same_row(deps):
     assert ledger.events_of(rid)[-1]["detail"] == "原话与分析结果同 v2，未另存版本"
     with pytest.raises(ValueError):
         ledger.record_change(9999, changed)
+
+
+def test_record_change_event_compares_with_the_last_version_of_the_same_kind(deps):
+    """模型增强之后再需求变更：变更版是规则初稿，流水里的概要和上一份规则初稿比，不把模型改写的功能点算成删除。"""
+    ledger, _ = deps
+    rid = ledger.log_analysis(_analyze(answers=ANSWERS))               # v1 规则初稿
+    enhanced = _analyze(answers=ANSWERS)
+    enhanced.engine = "规则 + 模型"
+    enhanced.card.features = ["净值日报新增「较上一交易日变动」列", "补充回撤、集中度等风险指标"]
+    assert ledger.update_analysis(rid, enhanced) == 2                  # v2 模型增强
+    assert ledger.record_change(rid, _analyze(SAMPLE1 + ADDED, ANSWERS)) == 3
+    detail = [e for e in ledger.events_of(rid) if e["action"] == "需求变更"][-1]["detail"]
+    assert detail.startswith("记为 v3，相对 v1：原话已改 · 功能点 +1 · ") and "需重新确认 3 项" in detail
 
 
 # ---------------- 服务层 / REST / MCP ----------------
@@ -326,6 +389,19 @@ def test_rest_versions_and_diff(client):
     assert client.get(f"/api/v1/requirements/{rid}/diff", params={"from": -1}).status_code == 422
     assert client.get("/api/v1/requirements/9999/versions").status_code == 404
     assert client.get("/api/v1/requirements/9999/diff").status_code == 404
+
+
+def test_rest_versions_and_diff_need_the_token(client, monkeypatch):
+    """配了 XUZHI_API_TOKEN 时，版本快照与差异和其它台账接口一样要带 Token。"""
+    import api
+
+    rid = client.post("/api/v1/analyze", json={"text": SAMPLE1}).json()["req_id"]
+    client.post("/api/v1/analyze", json={"text": SAMPLE1, "answers": ANSWERS, "req_id": rid})
+    monkeypatch.setattr(api, "API_TOKEN", "s3cret")
+    for path in (f"/api/v1/requirements/{rid}/versions", f"/api/v1/requirements/{rid}/diff"):
+        assert client.get(path).status_code == 401
+        assert client.get(path, headers={"Authorization": "Bearer wrong"}).status_code == 401
+        assert client.get(path, headers={"X-API-Token": "s3cret"}).status_code == 200
 
 
 def test_mcp_diff_tool(deps, monkeypatch):
