@@ -49,10 +49,9 @@ def test_futures_questions_present(results):
 def test_estimate_ranges(results):
     for a in results.values():
         e = a.estimate
-        assert 0 < e.low < e.mid < e.high
-        assert set(e.dims) == {"功能点", "数据接入", "界面", "权限", "性能", "合规"}
-        assert all(1 <= v <= 5 for v in e.dims.values())
-    assert results["04"].estimate.mid > results["01"].estimate.mid    # 大需求估得更多
+        assert e.status == "unavailable" and e.method == "unavailable"
+        assert all(value is None for value in (e.low, e.mid, e.high, e.ai_low, e.ai_mid, e.ai_high))
+        assert not e.tasks and not e.dims
 
 
 def test_answers_change_outputs(results):
@@ -119,21 +118,16 @@ def test_free_text_works():
     from xuzhi.llm import LLM
     a = analyze("能不能做个页面，每天看各产品的保证金占用和风险度，超过 80% 提醒我，手机也要能看", llm=LLM(mode="mock"))
     assert a.card.req_type == "页面" and "保证金占用" in a.card.indicators and "手机端可看" in a.card.nonfunctional
-    assert a.estimate.mid > 0 and len(a.questions) >= 6
+    assert a.estimate.mid is None and a.estimate.status == "unavailable" and len(a.questions) >= 6
 
 
 def test_dual_track(results):
     for a in results.values():
         e = a.estimate
-        assert e.tasks and abs(sum(t.trad_days for t in e.tasks) - e.mid) < 0.6      # 拆分守恒
-        assert 0 < e.ai_mid < e.mid and 10 <= e.saving_pct <= 70
-        assert abs(sum(e.who.values()) - 1.0) < 0.05
-        assert {t.who for t in e.tasks} == {"AI 能做", "AI 做人审", "人必须做"}
-        assert all(t.who != "AI 能做" for t in e.tasks if "验收" in t.name or "口径确认" in t.name)
-    r1 = results["03"]
-    assert any("交易链路" in t.name and t.who == "AI 做人审" for t in r1.estimate.tasks)   # 交易链路只能 AI 做人审
+        assert e.mid is None and e.ai_mid is None and e.saving_pct is None
+        assert not e.tasks and not e.who and not e.phases and not e.ai_phases
     plain = analyze("做个页面，每天看各品种主力合约的持仓量和成交量排名，能导出 Excel")
-    assert "自建" in plain.estimate.delivery                                           # 无客户 / 交易风险的标准页面 → 业务自建路径
+    assert plain.estimate.status == "unavailable"  # 没有模型，不能从需求类型生成两轨工时。
 
 
 def test_rules_only_is_instant():

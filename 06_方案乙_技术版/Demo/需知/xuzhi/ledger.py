@@ -5,7 +5,10 @@ from __future__ import annotations
 import dataclasses
 import json
 import re
+
+import math
 import sqlite3
+from dataclasses import asdict, is_dataclass
 from datetime import datetime
 
 from . import config
@@ -36,6 +39,56 @@ def _dept_of(requester: str) -> str:
     return r.split("·")[0].split("/")[0].strip() or "未注明"
 
 
+def _number(value) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def estimate_snapshot(estimate) -> dict:
+    """保存模型与独立参考；模型失败仅清模型工时，保留各来源的参考快照。"""
+    snapshot = asdict(estimate) if is_dataclass(estimate) else dict(vars(estimate))
+    ready = snapshot.get("status") == "ready"
+    snapshot.update({
+        "method": snapshot.get("method", "unavailable"),
+        "status": snapshot.get("status", "unavailable"),
+        "basis": snapshot.get("basis", "requirements_only"),
+        "model": snapshot.get("model", ""), "code_files": list(snapshot.get("code_files") or []),
+        "summary": snapshot.get("summary", ""), "error": snapshot.get("error", ""),
+        "references": dict(snapshot.get("references") or {}),
+        "assumptions": list(snapshot.get("assumptions") or []), "hours_per_day": 8,
+    })
+    if not ready:
+        for key in ("mid", "low", "high", "ai_mid", "ai_low", "ai_high", "saving_pct", "base_days", "history_days"):
+            snapshot[key] = None
+        snapshot.update(tasks=[], phases={}, ai_phases={}, who={})
+
+    def track(label, low, mid, high):
+        return {"label": label, "unit": "小时", "low": low, "mid": mid, "high": high}
+
+    def hours(value):
+        number = _number(value)
+        return None if number is None else number * 8
+
+    snapshot["before"] = track("以前", hours(snapshot.get("low")), hours(snapshot.get("mid")), hours(snapshot.get("high")))
+    snapshot["after"] = track("现在", hours(snapshot.get("ai_low")), hours(snapshot.get("ai_mid")), hours(snapshot.get("ai_high")))
+    tasks = []
+    for item in snapshot.get("tasks") or []:
+        task = asdict(item) if is_dataclass(item) else (dict(item) if isinstance(item, dict) else dict(vars(item)))
+        task["before_reason"] = task.get("before_reason", "")
+        task["after_reason"] = task.get("after_reason", "")
+        task["evidence"] = list(task.get("evidence") or [])
+        task["before"] = track("以前", task.get("trad_low_hours"), hours(task.get("trad_days")), task.get("trad_high_hours"))
+        task["after"] = track("现在", task.get("ai_low_hours"), hours(task.get("ai_days")), task.get("ai_high_hours"))
+        tasks.append(task)
+    snapshot["tasks"] = tasks
+    return snapshot
+
+
 class Ledger:
     def __init__(self, path=None) -> None:
         self.path = str(path or config.LEDGER_DB)
@@ -60,14 +113,15 @@ class Ledger:
 
     # ---------- 写 ----------
     def log_analysis(self, a) -> int:
+        est = estimate_snapshot(a.estimate)
         cur = self.conn.execute(
             "INSERT INTO requirements(ts,title,source,req_type,requester,engine,n_questions,n_answered,mid_days,confidence,redacted,ai_days,"
             "dept,status,seconds,n_high_open,payload) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (datetime.now().isoformat(timespec="seconds"), a.card.title, a.card.source, a.card.req_type, a.card.requester, a.card.engine,
-             len(a.questions), sum(1 for q in a.questions if q.answer.strip()), a.estimate.mid, a.estimate.confidence, a.redacted, a.estimate.ai_mid,
+             len(a.questions), sum(1 for q in a.questions if q.answer.strip()), est.get("mid"), a.estimate.confidence, a.redacted, est.get("ai_mid"),
              _dept_of(a.card.requester), "受理", float(getattr(a, "seconds", 0.0) or 0.0), int(getattr(a.estimate, "unanswered_high", 0) or 0),
              json.dumps({"card": json.loads(a.card.to_json()), "questions": [q.__dict__ for q in a.questions],
-                         "estimate": {"mid": a.estimate.mid, "low": a.estimate.low, "high": a.estimate.high, "ai_mid": a.estimate.ai_mid, "dims": a.estimate.dims},
+                         "estimate": est,
                          "decisions": [d.recommended for d in a.architecture.decisions],
                          "data_map": [r.__dict__ for r in getattr(a.architecture, "data_map", [])]}, ensure_ascii=False)))
         self.conn.commit()
@@ -134,6 +188,43 @@ class Ledger:
             out.append(it)
         return out
 
+    def update_estimate(self, req_id: int, estimate) -> None:
+        row = self.get(req_id)
+        if not row:
+            raise ValueError(f"台账里没有编号 {req_id}")
+        payload = json.loads(row.get("payload") or "{}")
+        previous = payload.get("estimate")
+        current = estimate_snapshot(estimate)
+        payload["estimate"] = current
+        # 当前结果与事件历史一起提交，既清掉失败后的旧数字，也保留重算前快照。
+        with self.conn:
+            self.conn.execute(
+                "UPDATE requirements SET mid_days=?, ai_days=?, confidence=?, payload=? WHERE id=?",
+                (current.get("mid"), current.get("ai_mid"), current.get("confidence", ""),
+                 json.dumps(payload, ensure_ascii=False), req_id),
+            )
+            self.conn.execute(
+                "INSERT INTO events(ts,req_id,action,detail) VALUES(?,?,?,?)",
+                (datetime.now().isoformat(timespec="seconds"), req_id, "估量重算",
+                 json.dumps({"previous": previous, "current": current}, ensure_ascii=False)),
+            )
+
+    def update_analysis(self, req_id: int, analysis) -> None:
+        """把后台增强结果更新到同一条需求，保留其状态和审计记录。"""
+        self.update_estimate(req_id, analysis.estimate)
+        row = self.get(req_id)
+        payload = json.loads(row.get("payload") or "{}")
+        payload.update(card=json.loads(analysis.card.to_json()), questions=[q.__dict__ for q in analysis.questions],
+                       decisions=[d.recommended for d in analysis.architecture.decisions],
+                       data_map=[r.__dict__ for r in getattr(analysis.architecture, "data_map", [])])
+        with self.conn:
+            self.conn.execute(
+                "UPDATE requirements SET title=?,engine=?,n_questions=?,n_answered=?,n_high_open=?,seconds=?,payload=? WHERE id=?",
+                (analysis.card.title, analysis.engine, len(analysis.questions),
+                 sum(bool(q.answer.strip()) for q in analysis.questions), analysis.estimate.unanswered_high,
+                 analysis.seconds, json.dumps(payload, ensure_ascii=False), req_id),
+            )
+
     def event(self, req_id: int, action: str, detail: str = "") -> None:
         self.conn.execute("INSERT INTO events(ts,req_id,action,detail) VALUES(?,?,?,?)", (datetime.now().isoformat(timespec="seconds"), req_id, action, detail))
         self.conn.commit()
@@ -162,15 +253,21 @@ class Ledger:
         if not row:
             raise ValueError(f"台账里没有编号 {req_id}")
         actual = float(actual_days)
+        if not math.isfinite(actual) or actual <= 0:
+            raise ValueError("实际工时必须是大于 0 的有限数值")
         self.conn.execute(
             "UPDATE requirements SET actual_days=?, ai_assisted=?, ai_share=?, closed_ts=?, close_note=?, status='已对账' WHERE id=?",
             (actual, 1 if ai_assisted else 0, float(ai_share or 0.0), datetime.now().isoformat(timespec="seconds"), note or "", req_id))
         self.conn.commit()
-        est = float(row.get("ai_days") if ai_assisted and row.get("ai_days") else (row.get("mid_days") or 0.0))
-        dev = (est - actual) / actual if actual else 0.0
-        self.event(req_id, "对账", f"实际 {actual} 人天，估 {est}，偏差 {dev:+.0%}" + ("，AI 协同" if ai_assisted else ""))
+        trad, ai = _number(row.get("mid_days")), _number(row.get("ai_days"))
+        valid = trad is not None and trad > 0 and ai is not None and ai > 0
+        est = (ai if ai_assisted else trad) if valid else None
+        dev = (est - actual) / actual if est is not None else None
+        detail = (f"实际 {actual} 人天，估 {est}，偏差 {dev:+.0%}" if est is not None
+                  else f"实际 {actual} 人天；尚无有效两轨估量，未计算偏差或回写估算历史")
+        self.event(req_id, "对账", detail + ("，AI 协同" if ai_assisted else ""))
         hist_id = ""
-        if write_history and row.get("source") != JIRA_SOURCE:   # Jira 工单走自己的校准样本（jira_done_issues），不写零散需求的历史库
+        if write_history and valid and row.get("source") != JIRA_SOURCE:   # Jira 工单走自己的校准样本（jira_done_issues），不写零散需求的历史库
             hist_id = self._append_history(row, actual, ai_assisted, ai_share, note)
         return {"estimate": est, "actual": actual, "deviation": dev, "history_id": hist_id}
 
@@ -244,9 +341,10 @@ class Ledger:
         out: dict = {"count": n, "by_dept": {}, "by_type": {}, "by_month": {}, "by_status": {s: 0 for s in STATUSES}}
         if not n:
             out.update({"avg_questions": 0.0, "answer_rate": 0.0, "avg_rounds": 0.0, "avg_seconds": 0.0, "high_open_rate": 0.0,
-                        "trad_days": 0.0, "ai_days": 0.0, "saved_days": 0.0, "saving_pct": 0.0,
-                        "closed": 0, "mape": None, "mape_trad": None, "mape_ai": None, "bias_trad": None,
-                        "jira_count": 0, "jira_coding_trad": 0.0, "jira_coding_ai": 0.0, "jira_by_kind": {}, "thumbs_up": 0, "thumbs_down": 0, "depts": 0})
+                        "trad_days": None, "ai_days": None, "saved_days": None, "saving_pct": None,
+                        "estimated_count": 0, "unestimated_count": 0, "legacy_count": 0,
+                        "jira_count": 0, "jira_coding_trad": 0.0, "jira_coding_ai": 0.0, "jira_by_kind": {},
+                        "closed": 0, "comparable_count": 0, "mape": None, "mape_trad": None, "mape_ai": None, "bias_trad": None, "thumbs_up": 0, "thumbs_down": 0, "depts": 0})
             return out
         # 部门与类型分布只算零散需求：Jira 工单没有提出部门，类型（需求 / 缺陷…）也和业务类型（报表 / 页面…）不是一个口径
         for dept, k in c.execute(f"SELECT COALESCE(NULLIF(dept,''),'未注明'), COUNT(*) FROM requirements WHERE {_NOT_JIRA} GROUP BY 1 ORDER BY 2 DESC"):
@@ -264,7 +362,25 @@ class Ledger:
         aq, sa, sq, ho, sec = c.execute(
             "SELECT AVG(n_questions), SUM(n_answered), SUM(n_questions), SUM(COALESCE(n_high_open,0)), AVG(COALESCE(seconds,0)) "
             f"FROM requirements WHERE {_NOT_JIRA}").fetchone()
-        trad, ai = c.execute("SELECT SUM(COALESCE(mid_days,0)), SUM(COALESCE(ai_days, mid_days, 0)) FROM requirements").fetchone()
+        valid_estimates: list[tuple[float, float]] = []
+        legacy_count = 0
+        for before, after, payload in c.execute("SELECT mid_days, ai_days, payload FROM requirements"):
+            before, after = _number(before), _number(after)
+            if before is None or before <= 0 or after is None or after <= 0:
+                continue
+            try:
+                snapshot = json.loads(payload or "{}").get("estimate") or {}
+            except (ValueError, TypeError):
+                snapshot = {}
+            if snapshot.get("method") == "llm" and snapshot.get("status") == "ready":
+                valid_estimates.append((before, after))
+            elif snapshot.get("method") not in ("llm", "unavailable"):
+                legacy_count += 1
+        out["estimated_count"] = len(valid_estimates)
+        out["legacy_count"] = legacy_count
+        out["unestimated_count"] = n - len(valid_estimates) - legacy_count
+        trad = sum(pair[0] for pair in valid_estimates) if valid_estimates else None
+        ai = sum(pair[1] for pair in valid_estimates) if valid_estimates else None
         rounds = c.execute("SELECT COUNT(*) FROM events WHERE action='业务答复重算'").fetchone()[0]
         jn, jct, jca = c.execute(
             f"SELECT COUNT(*), SUM(COALESCE(coding_trad,0)), SUM(COALESCE(coding_ai,0)) FROM requirements WHERE source='{JIRA_SOURCE}'").fetchone()
@@ -274,24 +390,27 @@ class Ledger:
         out["avg_rounds"] = round(1 + rounds / n_free, 1) if n_free else 0.0   # 开工一轮 + 每次答复重算算一轮
         out["avg_seconds"] = round(sec or 0.0, 1)
         out["high_open_rate"] = round((ho or 0) / sq, 2) if sq else 0.0
-        out["trad_days"] = round(trad or 0.0, 1)
-        out["ai_days"] = round(ai or 0.0, 1)
-        out["saved_days"] = round((trad or 0.0) - (ai or 0.0), 1)
-        out["saving_pct"] = round(100 * out["saved_days"] / trad) if trad else 0.0
+        out["trad_days"] = round(trad, 3) if trad is not None else None
+        out["ai_days"] = round(ai, 3) if ai is not None else None
+        out["saved_days"] = round(trad - ai, 3) if trad is not None and ai is not None else None
+        out["saving_pct"] = round(100 * (trad - ai) / trad) if trad is not None and ai is not None else None
         out["depts"] = len(out["by_dept"])
         closed = c.execute("SELECT mid_days, ai_days, actual_days, ai_assisted FROM requirements WHERE actual_days IS NOT NULL AND actual_days>0").fetchall()
         out["closed"] = len(closed)
         if closed:
             # 用了 AI 协同的比 AI 轨估算，没用的比传统轨：拿 AI 做完的实际人天去比传统估算，偏差会被夸大
-            errs_t = [abs(m - a) / a for m, _, a, used in closed if m and not used]
-            errs_a = [abs(ai - a) / a for _, ai, a, used in closed if used and ai]
-            bias = [(m - a) / a for m, _, a, used in closed if m and not used]
+            comparable = [(m, ai, a, used) for m, ai, a, used in closed if m is not None and m > 0 and ai is not None and ai > 0]
+            out["comparable_count"] = len(comparable)
+            errs_t = [abs(m - a) / a for m, _, a, used in comparable if not used]
+            errs_a = [abs(ai - a) / a for _, ai, a, used in comparable if used]
+            bias = [(m - a) / a for m, _, a, used in comparable if not used]
             both = errs_t + errs_a
             out["mape"] = round(100 * sum(both) / len(both)) if both else None
             out["mape_trad"] = round(100 * sum(errs_t) / len(errs_t)) if errs_t else None
             out["mape_ai"] = round(100 * sum(errs_a) / len(errs_a)) if errs_a else None
             out["bias_trad"] = round(100 * sum(bias) / len(bias)) if bias else None
         else:
+            out["comparable_count"] = 0
             out["mape"] = out["mape_trad"] = out["mape_ai"] = out["bias_trad"] = None
         up, down = c.execute("SELECT SUM(CASE WHEN score>0 THEN 1 ELSE 0 END), SUM(CASE WHEN score<0 THEN 1 ELSE 0 END) FROM feedback").fetchone()
         out["thumbs_up"], out["thumbs_down"] = int(up or 0), int(down or 0)

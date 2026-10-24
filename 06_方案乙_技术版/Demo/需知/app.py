@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import html
+import json
 import re
+from hashlib import sha256
+from uuid import uuid4
 
 import altair as alt
 import pandas as pd
@@ -11,9 +14,10 @@ import streamlit.components.v1 as components
 
 from app_jira import SRC_OPTIONS, calib_pool, jira_text_from_analysis, render_jira_mode
 
-from xuzhi import config, knowledge, sandbox
+from xuzhi import config, knowledge, sandbox, textutil
 from xuzhi.asr import correct_domain_speech
 from xuzhi.audit import Audit
+from xuzhi.background import start_analysis_job, start_estimate_job
 from xuzhi.drafts import (
     Draft,
     RepoBundle,
@@ -27,6 +31,7 @@ from xuzhi.ledger import STATUSES, Ledger
 from xuzhi.llm import LLM
 from xuzhi.memory import Memory
 from xuzhi.pipeline import analyze
+from xuzhi.pipeline.estimate import Estimate, estimate
 from xuzhi.pipeline.prototype import apply_prototype_view, render as render_proto
 from xuzhi.speech import append_dictation, dictation_bar
 
@@ -96,13 +101,19 @@ header[data-testid="stHeader"] { background: transparent; }
 .xz-hero .slogan { font-size:15px; color:#C7D2E8; margin:12px 0 2px; }
 .xz-status { display:inline-flex; align-items:center; gap:8px; padding:6px 12px; border-radius:999px; font-size:12.5px;
   background:rgba(15,23,42,.7); border:1px solid var(--xz-line); color:#C7D2E8; white-space:nowrap; }
-.xz-status .dot { width:8px; height:8px; border-radius:50%; background:var(--xz-cyan); box-shadow:0 0 10px var(--xz-cyan); animation:xzpulse 1.8s infinite; }
+.xz-status .dot { width:8px; height:8px; border-radius:50%; background:var(--xz-cyan); box-shadow:0 0 10px var(--xz-cyan); }
 .xz-status.model .dot { background:var(--xz-green); box-shadow:0 0 10px var(--xz-green); }
-@keyframes xzpulse { 0%,100% { opacity:1; } 50% { opacity:.35; } }
+.xz-loading { display:inline-block; width:16px; height:16px; border:2px solid #22304F; border-top-color:#22D3EE;
+  border-radius:50%; animation:xzspin .8s linear infinite; margin-right:8px; vertical-align:middle; }
+@keyframes xzspin { to { transform:rotate(360deg); } }
 .xz-skills { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
 .xz-skill { --c:#22D3EE; display:inline-flex; align-items:center; gap:6px; padding:4px 11px; border-radius:999px; font-size:12.5px;
   color:#DCE4F5; background:color-mix(in srgb, var(--c) 12%, transparent); border:1px solid color-mix(in srgb, var(--c) 45%, transparent); }
 .xz-skill b { color:var(--c); font-weight:700; }
+.xz-dims { width:100%; border-collapse:collapse; margin:4px 0 8px; }
+.xz-dims th, .xz-dims td { text-align:left; padding:8px 10px; border-bottom:1px solid #22304F; vertical-align:top; color:#E6ECF8; font-size:14px; white-space:normal; line-height:1.45; }
+.xz-dims th { color:#8A97B4; font-weight:600; }
+.xz-dims td.num { white-space:nowrap; width:4.5em; }
 /* 指标卡：每张一种强调色 */
 .xz-kpi { --c:#22D3EE; position:relative; overflow:hidden; background:var(--xz-panel); border:1px solid var(--xz-line); border-radius:14px; padding:13px 16px;
   backdrop-filter: blur(6px); }
@@ -138,7 +149,7 @@ header[data-testid="stHeader"] { background: transparent; }
 /* 结果页签 */
 div[data-testid="stTabs"] [role="tab"] p { font-size:15.5px; font-weight:600; }
 div[data-testid="stTabs"] [role="tab"][aria-selected="true"] p { color:#9BE7F7; }
-[data-testid="stForm"], [data-testid="stExpander"] details { background:rgba(13,20,38,.55); }
+[data-testid="stForm"], .st-key-xuzhi_intake, [data-testid="stExpander"] details { background:rgba(13,20,38,.55); }
 [data-testid="stMetric"] { background:var(--xz-panel); border:1px solid var(--xz-line); border-radius:12px; padding:10px 14px; }
 [data-testid="stMetricValue"] { color:#9BE7F7; }
 iframe[title="xuzhi_dictation"] { border: none !important; }
@@ -150,7 +161,8 @@ iframe[title="xuzhi_dictation"] { border: none !important; }
 
 
 @st.cache_resource
-def get_ledger() -> Ledger:
+def get_ledger(api_version: str = "progressive-analysis-v2") -> Ledger:
+    """API 版本参与缓存，升级后不复用缺少模型估时接口的旧实例。"""
     return Ledger()
 
 
@@ -183,14 +195,14 @@ def _refresh_ledger_grid() -> None:
 CHART_COLORS = ["#22D3EE", "#A78BFA", "#34D399", "#FBBF24", "#F472B6", "#FB923C", "#60A5FA", "#2DD4BF"]
 
 
-def _color_bars(data: dict, value_name: str, height: int = 220, colors: list[str] | None = None) -> None:
+def _color_bars(data: dict, value_name: str, height: int = 220, colors: list[str] | None = None, label_angle: int = -30) -> None:
     """一类一色的柱状图：暗底上比同色柱子好认；类别名就在横轴上，不再出图例。"""
     df = pd.DataFrame({"类别": list(data.keys()), value_name: list(data.values())})
     chart = (
         alt.Chart(df)
         .mark_bar(cornerRadiusTopLeft=5, cornerRadiusTopRight=5)
         .encode(
-            x=alt.X("类别:N", sort=None, title=None, axis=alt.Axis(labelAngle=-30)),
+            x=alt.X("类别:N", sort=None, title=None, axis=alt.Axis(labelAngle=label_angle, labelLimit=80)),
             y=alt.Y(f"{value_name}:Q", title=None),
             color=alt.Color("类别:N", sort=None, legend=None, scale=alt.Scale(range=colors or CHART_COLORS)),
             tooltip=["类别", f"{value_name}:Q"],
@@ -198,6 +210,63 @@ def _color_bars(data: dict, value_name: str, height: int = 220, colors: list[str
         .properties(height=height)
     )
     st.altair_chart(chart, width="stretch")
+
+
+def _radar_dims(dims: dict, reasons: dict | None = None) -> None:
+    """六维雷达：每维 1～5，轴从中心 0 画到外圈 5。"""
+    import math
+
+    order = [name for name in ("功能点", "数据接入", "界面", "权限", "性能", "合规") if name in dims]
+    order += [name for name in dims if name not in order]
+    why = reasons or {}
+    n = len(order)
+    if n < 3:
+        return
+    cx, cy, rmax = 280, 198, 108
+
+    def at(index: int, score: float, turn: float = 0.0, *, beyond: bool = False) -> tuple[float, float]:
+        angle = -math.pi / 2 + index * 2 * math.pi / n + turn
+        raw = max(0.0, score)
+        if not beyond:
+            raw = min(5.0, raw)
+        radius = rmax * raw / 5
+        return cx + radius * math.cos(angle), cy + radius * math.sin(angle)
+
+    rings = []
+    spokes = []
+    for level in (1, 2, 3, 4, 5):
+        points = " ".join(f"{at(i, level)[0]:.1f},{at(i, level)[1]:.1f}" for i in range(n))
+        rings.append(f'<polygon points="{points}" fill="none" stroke="#334155" stroke-width="1"/>')
+    for index in range(n):
+        x, y = at(index, 5)
+        spokes.append(f'<line x1="{cx}" y1="{cy}" x2="{x:.1f}" y2="{y:.1f}" stroke="#334155" stroke-width="1"/>')
+    shape = " ".join(f"{at(i, int(dims[name]))[0]:.1f},{at(i, int(dims[name]))[1]:.1f}" for i, name in enumerate(order))
+    labels = []
+    dots = []
+    ticks = []
+    for level in (1, 5):
+        tx, ty = at(0, level)
+        ticks.append(
+            f'<text x="{tx - 8:.1f}" y="{ty:.1f}" fill="#E5E7EB" font-size="12" text-anchor="end" dominant-baseline="middle" '
+            f'stroke="#070B16" stroke-width="3" paint-order="stroke">{level}</text>'
+        )
+    for index, name in enumerate(order):
+        score = int(dims[name])
+        lx, ly = at(index, 6.35, beyond=True)
+        labels.append(
+            f'<text x="{lx:.1f}" y="{ly:.1f}" fill="#E5E7EB" font-size="13" text-anchor="middle" dominant-baseline="middle">{html.escape(name)} {score}</text>'
+        )
+        dx, dy = at(index, score)
+        title = html.escape(f"{name} {score} 分 {why.get(name, '')}")
+        dots.append(f'<g><title>{title}</title><circle cx="{dx:.1f}" cy="{dy:.1f}" r="4" fill="#22D3EE"/></g>')
+    svg = (
+        '<svg viewBox="0 0 560 400" width="100%" height="380" role="img" aria-label="六维复杂度">'
+        + "".join(rings) + "".join(spokes) + "".join(ticks)
+        + f'<polygon points="{shape}" fill="rgba(34,211,238,0.28)" stroke="#22D3EE" stroke-width="2"/>'
+        + "".join(dots) + "".join(labels)
+        + "</svg>"
+    )
+    st.markdown(svg, unsafe_allow_html=True)
 
 
 def render_ledger(ledger: Ledger, memory: Memory, audit: Audit, *, req_id: int = 0, mid: float | None = None) -> None:
@@ -258,17 +327,36 @@ def render_ledger(ledger: Ledger, memory: Memory, audit: Audit, *, req_id: int =
                     key=f"rec_note_{picked}", placeholder="例：范围比估时多了客户版",
                 )
                 if st.button("对账并回写", key=f"rec_submit_{picked}", icon=":material/task_alt:"):
-                    res = ledger.reconcile(picked, actual_days, ai_used, ai_share if ai_used else 0.0, rec_note)
-                    _refresh_ledger_grid()
-                    st.success(f"#{picked} 已对账：估 {res['estimate']} 人天，实际 {res['actual']} 人天，偏差 {res['deviation']:+.0%}；"
-                               + ("已记作 Jira 校准样本，下次评估即用。" if is_jira else f"已写入历史需求库（{res['history_id']}），下次估量即用。"))
-                    st.rerun()
+                    try:
+                        res = ledger.reconcile(picked, actual_days, ai_used, ai_share if ai_used else 0.0, rec_note)
+                    except ValueError as error:
+                        st.warning(str(error))
+                    else:
+                        _refresh_ledger_grid()
+                        if res.get("deviation") is None:
+                            st.success(f"#{picked} 已记录实际 {res['actual']} 人天；本条没有有效估算，未计算偏差或校准历史。")
+                        else:
+                            st.success(f"#{picked} 已对账：估 {res['estimate']} 人天，实际 {res['actual']} 人天，偏差 {res['deviation']:+.0%}；"
+                                       + ("已记作 Jira 校准样本，下次评估即用。" if is_jira else f"已写入历史需求库（{res['history_id']}）。"))
+                        st.rerun()
             with c3:
                 st.markdown("**本条流水**")
                 events = ledger.events_of(picked)[-8:]
                 if events:
                     for ev in events:
-                        st.caption(f"{ev['ts'][5:16]}　{ev['action']}　{ev['detail']}")
+                        event_detail = ev["detail"]
+                        if ev["action"] == "估量重算":
+                            try:
+                                current = json.loads(event_detail).get("current") or {}
+                                before_hours = (current.get("before") or {}).get("mid")
+                                after_hours = (current.get("after") or {}).get("mid")
+                                if current.get("status") == "ready" and before_hours is not None and after_hours is not None:
+                                    event_detail = f"已更新：以前 {before_hours:g} 小时，现在 {after_hours:g} 小时（参考值）"
+                                else:
+                                    event_detail = "模型估时未成功，当前未估时" if current.get("status") == "failed" else "当前未估时"
+                            except (ValueError, TypeError, AttributeError):
+                                event_detail = "估量结果已更新"
+                        st.caption(f"{ev['ts'][5:16]}　{ev['action']}　{event_detail}")
                 else:
                     st.caption("还没有流水。")
 
@@ -283,13 +371,16 @@ def render_ledger(ledger: Ledger, memory: Memory, audit: Audit, *, req_id: int =
         k2.metric("平均追问", f"{dash['avg_questions']} 条", help=f"业务答复率 {dash['answer_rate']:.0%}；只算零散需求（Jira 工单不追问）")
         k7.metric("记忆省问", f"{_mem['hits']} 条", help=f"追问记忆：记住 {_mem['requesters']} 个提出方的 {_mem['entries']} 条口径；命中即不再问")
         k3.metric("平均澄清轮次", f"{dash['avg_rounds']}", help="开工一轮 + 每次按业务答复重算算一轮；人工通常三四轮")
-        k4.metric("AI 协同省时", f"{dash['saved_days']} 人天", delta=f"-{dash['saving_pct']}%", delta_color="inverse",
-                  help=f"传统估 {dash['trad_days']} → AI 协同估 {dash['ai_days']}")
+        saving_value = f"{dash['saved_days']} 人天" if dash.get("saved_days") is not None else "暂无模型统计"
+        saving_delta = f"{-dash['saving_pct']:+g}%" if dash.get("saving_pct") is not None else None
+        k4.metric("全部台账预计省时", saving_value, delta=saving_delta, delta_color="inverse",
+                  help="仅汇总有有效双轨估算的记录；包含测试及重复录入，不是本条估时，也不是已实现省时。本条工作量见「估量」。")
         k5.metric("估算偏差", "—" if dash["mape"] is None else f"{dash['mape']}%",
                   help=("已对账 " + str(dash["closed"]) + " 条；平均绝对偏差（估 vs 实际；用了 AI 协同的比 AI 轨估算）"
                         + "".join(f"，{n} {v}%" for n, v in (("传统轨", dash["mape_trad"]), ("AI 轨", dash["mape_ai"])) if v is not None))
                   if dash["closed"] else "还没有对账记录：交付后在上方回写实际人天")
-        k6.metric("出稿用时", ("<1 s" if dash["avg_seconds"] < 1 else f"{dash['avg_seconds']} s"), help=f"规则引擎毫秒级，模型润色另计；👍 {dash['thumbs_up']} / 👎 {dash['thumbs_down']}")
+        k6.metric("出稿用时", ("<1 s" if dash["avg_seconds"] < 1 else f"{dash['avg_seconds']} s"), help=f"需求分析用时；单独重新估时不计入原出稿时间。👍 {dash['thumbs_up']} / 👎 {dash['thumbs_down']}")
+        st.caption(f"有效模型估算 {dash.get('estimated_count', '—')} 条，待估算 {dash.get('unestimated_count', '—')} 条，旧版规则记录 {dash.get('legacy_count', '—')} 条（不计入汇总）；预计省时含测试及重复录入，不代表已实现省时。本条工作量见「估量」。")
         if dash["jira_count"]:
             _jt, _ja = dash["jira_coding_trad"], dash["jira_coding_ai"]
             _kinds = " · ".join(f"{k} {v}" for k, v in dash["jira_by_kind"].items())
@@ -480,8 +571,105 @@ def build_llm(mode: str, model: str, api_base: str, api_key: str, backend: str =
             channel="Web",
         )
     except Exception as e:
-        st.warning(f"模型初始化失败，已回退规则引擎：{e}")
+        st.warning(f"模型初始化失败，模型估时暂不可用；需求初稿、规则模板和历史参考仍可查看：{e}")
         return LLM(mode="mock")
+
+
+def _cancel_model_job() -> None:
+    previous = st.session_state.pop("_model_job", None)
+    if previous is not None:
+        previous.discard()
+    st.session_state.pop("_model_job_meta", None)
+    st.session_state.pop("_model_last_status", None)
+    st.session_state["_analysis_revision"] = uuid4().hex
+
+
+def _model_running() -> bool:
+    # 未归并完成结果前也保持忙碌，避免快速点击重复提交。
+    return st.session_state.get("_model_job") is not None
+
+
+def _begin_model_job(seed, client, *, kind: str) -> None:
+    _cancel_model_job()
+    if client.mode != "api":
+        return
+    if kind == "estimate":
+        seed.estimate = Estimate(unanswered_high=seed.estimate.unanswered_high,
+                                 references=getattr(seed.estimate, "references", {}) or {})
+        ledger.update_estimate(st.session_state.req_id, seed.estimate)
+    client.req_id = st.session_state.get("req_id", 0)
+    # 每项后台任务使用独立审计连接，结束后由任务释放。
+    if isinstance(getattr(client, "audit", None), Audit):
+        client.audit = Audit()
+        client._job_owned_audit = True
+    factory = start_estimate_job if kind == "estimate" else start_analysis_job
+    job = factory(seed, client)
+    st.session_state["_model_job"] = job
+    st.session_state["_model_job_meta"] = {
+        "req_id": client.req_id, "revision": st.session_state["_analysis_revision"], "kind": kind,
+    }
+    st.session_state["analysis"] = seed
+
+
+def _settle_model_job(ledger: Ledger) -> bool:
+    job = st.session_state.get("_model_job")
+    if job is None:
+        return False
+    meta = st.session_state.get("_model_job_meta") or {}
+    if (meta.get("req_id") != st.session_state.get("req_id")
+            or meta.get("revision") != st.session_state.get("_analysis_revision")):
+        _cancel_model_job()
+        return True
+    snapshot = job.snapshot()
+    if snapshot["status"] == "running":
+        return False
+    st.session_state.pop("_model_job", None)
+    st.session_state.pop("_model_job_meta", None)
+    if snapshot.get("discarded"):
+        return True
+    current = st.session_state.get("analysis")
+    if current is None:
+        return True
+    result = snapshot.get("result")
+    failed = snapshot["status"] == "failed"
+    if result is not None:
+        if meta["kind"] == "estimate":
+            current.estimate = result
+        else:
+            current = result
+            current.prototype_html = apply_prototype_view(
+                current.prototype_source_html, mobile=bool(st.session_state.get("mobile")),
+                client_view=bool(st.session_state.get("client")),
+            )
+        failed = failed or current.estimate.status != "ready"
+        st.session_state.analysis = current
+        if meta["kind"] == "estimate":
+            ledger.update_estimate(meta["req_id"], current.estimate)
+        else:
+            ledger.update_analysis(meta["req_id"], current)
+    else:
+        # 后台异常不能让旧模型数字冒充本轮结果；初稿及参考仍然保留。
+        current.estimate = Estimate(status="failed", error=snapshot.get("error") or "模型分析失败，请重试。",
+                                    references=getattr(current.estimate, "references", {}) or {})
+        ledger.update_estimate(meta["req_id"], current.estimate)
+    st.session_state["_model_last_status"] = {
+        "status": "failed" if failed else "completed", "elapsed": snapshot["elapsed"],
+        "kind": meta["kind"], "error": snapshot.get("error") or current.estimate.error,
+    }
+    ledger.event(meta["req_id"], "后台模型分析", "失败或部分未成功" if failed else "已完成")
+    return True
+
+
+@st.fragment(run_every=1.0)
+def _render_model_progress() -> None:
+    if _settle_model_job(ledger):
+        st.rerun()
+    job = st.session_state.get("_model_job")
+    if job is not None:
+        progress = job.snapshot()
+        box = st.status(f"模型正在分析 · {progress['stage']} · 已等待 {progress['elapsed']:.0f} 秒",
+                        state="running", expanded=True)
+        box.write("规则初稿、规则模板、历史参考和原型已可查看；你可以先切换下方页签。模型结果完成后会自动更新。")
 
 
 def _preset_row(p: tuple) -> tuple[str, str, str, str, str]:
@@ -599,6 +787,60 @@ def _render_live_model_pick(
     return chosen
 
 
+def _custom_model_binding(api_base: str, api_key: str) -> str:
+    """目录只属于当前网关与账号；缓存标识不再复制明文 Key。"""
+    return sha256(json.dumps([api_base.strip().rstrip("/"), api_key.strip()]).encode("utf-8")).hexdigest()
+
+
+def _apply_custom_catalog_selection(fallback_base: str) -> None:
+    # 回调在下一轮控件渲染前运行，才能同步手填框而不覆盖用户后续的手动修改。
+    current_base = (st.session_state.get("custom_api_base_custom") or "").strip() or fallback_base
+    current_key = (st.session_state.get("api_key_input_custom") or "").strip()
+    if st.session_state.get("custom_catalog_binding") != _custom_model_binding(current_base, current_key):
+        return
+    selected = st.session_state.get("custom_catalog_pick")
+    if selected in (st.session_state.get("custom_catalog_models") or {}):
+        st.session_state["custom_model_custom"] = selected
+
+
+def _render_custom_model_catalog(api_base: str, api_key: str, *, fallback_base: str) -> None:
+    """自定义网关仅在明确点击时读目录；读取本身不改变当前模型。"""
+    binding = _custom_model_binding(api_base, api_key)
+    if st.session_state.get("custom_catalog_binding") != binding:
+        st.session_state["custom_catalog_binding"] = binding
+        st.session_state["custom_catalog_models"] = {}
+        st.session_state["custom_catalog_note"] = ""
+        st.session_state["custom_catalog_pick"] = None
+    if st.button("读取可用模型", key="custom_read_models", disabled=not api_key or not api_base,
+                 help="使用当前网关和 API Key 读取目录；仅在你选择模型后修改模型 ID。"):
+        from xuzhi.llm import list_openai_models
+
+        with st.spinner("正在读取当前网关的模型目录……"):
+            try:
+                rows, note = list_openai_models(api_base, api_key)
+                catalog = {
+                    mid.strip(): str(label or mid)
+                    for mid, label in rows if isinstance(mid, str) and mid.strip()
+                }
+            except Exception:
+                catalog, note = {}, "读取模型目录失败，请检查网关配置后重试。"
+        st.session_state["custom_catalog_models"] = catalog
+        st.session_state["custom_catalog_note"] = str(note or ("当前账号的模型目录为空。" if not catalog else "")).replace(api_key, "[已隐藏]")
+        st.session_state["custom_catalog_pick"] = None
+    catalog = st.session_state.get("custom_catalog_models") or {}
+    note = st.session_state.get("custom_catalog_note") or ""
+    if catalog:
+        selected = st.session_state.get("custom_catalog_pick")
+        if selected not in catalog or selected != st.session_state.get("custom_model_custom"):
+            st.session_state["custom_catalog_pick"] = None
+        st.selectbox("网关可用模型", list(catalog), index=None, key="custom_catalog_pick",
+                     placeholder="选择后填入模型 ID", format_func=lambda mid: catalog.get(mid, mid),
+                     on_change=_apply_custom_catalog_selection, args=(fallback_base,))
+        st.caption((note + "；" if note else "") + "读取目录不会切换模型，选择后才填入上方模型 ID。")
+    elif note:
+        st.warning(note + " 当前模型 ID 保持不变。")
+
+
 def _render_model_secrets(
     mode_sel: str, provider_id: str, api_base_sel: str, model_sel: str, key_slot=None,
 ) -> tuple[str, str, str, str, dict[str, str]]:
@@ -618,7 +860,8 @@ def _render_model_secrets(
             type="password",
             key=f"api_key_input_{provider_id}",
             placeholder="PAT（pt-…）" if provider_id.startswith("qoder") else "sk-…（不填 = 规则引擎）",
-            help="只在本次会话内使用，不写入仓库。填了会实时拉取网关当前可用的模型。",
+            help=("只在本次会话内使用，不写入仓库。点击「读取可用模型」才请求当前网关的目录。" if provider_id == "custom"
+                  else "只在本次会话内使用，不写入仓库。填了会实时拉取网关当前可用的模型。"),
         ).strip()
     st.session_state.api_keys[provider_id] = api_key_sel
 
@@ -643,8 +886,10 @@ def _render_model_secrets(
             model_sel = c_model.text_input(
                 "模型 ID",
                 key=f"custom_model_{provider_id}",
-                placeholder="可先填 Key，在上方网关用 /models 核对 id",
+                placeholder="手填模型 ID，或点击下方「读取可用模型」" if provider_id == "custom" else "可先填 Key，在上方网关用 /models 核对 id",
             ).strip()
+        if provider_id == "custom":
+            _render_custom_model_catalog(api_base_sel, api_key_sel, fallback_base=default_base)
     elif not live_openai and not live_qoder:
         st.caption(f"网关：`{api_base_sel}`　·　模型：`{model_sel}`")
 
@@ -718,6 +963,7 @@ def _commit_dictation(chunk: str, box: str | None = None) -> None:
     prev = box if box is not None else st.session_state.get("raw_composed", "")
     composed = append_dictation(prev, chunk)
     st.session_state.raw_composed = composed
+    st.session_state.setdefault("intake_drafts", {})["（粘贴自己的）"] = composed
     st.session_state.speech_rev = st.session_state.get("speech_rev", 0) + 1
     st.session_state.sample = "（粘贴自己的）"
     st.session_state.src = "口述"
@@ -822,6 +1068,7 @@ def _render_draft_link_rows() -> None:
 ledger = get_ledger()
 memory = get_memory()
 audit = get_audit()
+_settle_model_job(ledger)
 samples = sorted(config.SAMPLES_DIR.glob("*.md"))
 stats = ledger.stats()
 dash0 = ledger.dashboard()
@@ -866,8 +1113,9 @@ if app_mode == "jira":
 k = st.columns(4)
 for col, n, l, c in ((k[0], f"{stats['count']} 份", "已分析需求", "#22D3EE"), (k[1], f"{len(knowledge.probes())} 条", "期货追问知识库", "#A78BFA"),
                      (k[2], f"{len(knowledge.history())} / {len(knowledge.systems())} / {knowledge.data_domains()}", "历史需求 · 系统目录 · 数据域", "#34D399"),
-                     (k[3], f"{dash0['saved_days']} 人天" + (f" · 偏差 {dash0['mape']}%" if dash0.get("mape") is not None else ""), "AI 协同累计省时（估）· 已对账估算偏差", "#FBBF24")):
+                     (k[3], f"{dash0['saved_days']} 人天" if dash0.get("saved_days") is not None else "暂无模型统计", "全部台账预计省时", "#FBBF24")):
     col.markdown(f'<div class="xz-kpi" style="--c:{c}"><div class="n">{n}</div><div class="l">{l}</div></div>', unsafe_allow_html=True)
+k[3].caption("这是台账汇总，不表示模型正在运行。仅汇总有效模型估算，含测试及重复录入；本条进度和结果见下方。")
 st.write("")
 
 st.markdown('<div class="xz-sec"><span class="no">01</span><span class="t">收需求</span>'
@@ -885,7 +1133,7 @@ with settings_area:
     with col_model:
         with st.container(border=True):
             st.markdown("**:material/smart_toy: 模型**")
-            st.caption("不填 Key 也能开工（规则引擎，1～2 秒出全套）；填了 Key，开工时由模型补追问、润色需求单。")
+            st.caption("不填 Key 可整理需求、出原型，并查看规则模板和历史参考；填好后可增加独立模型估时，也可在「估量」单独重估。")
             m1, m2 = st.columns(2)
             with m1:
                 preset_label, mode_sel, provider_id, api_base_sel, model_sel = _render_model_preset()
@@ -895,7 +1143,7 @@ with settings_area:
     with col_mat:
         with st.container(border=True):
             st.markdown("**:material/upload_file: 参考材料**")
-            st.caption("给一张现有页面，出样就在原页上改；给代码仓库，问清和定架会参考源码。")
+            st.caption("给一张现有页面，出样就在原页上改；给代码仓库，问清、估时和定架会参考已读取的代码摘录。")
             mat_mode = st.segmented_control("参考材料", MAT_OPTIONS, default="不用", required=True, key="mat_mode",
                                             label_visibility="collapsed") or "不用"
             if mat_mode == "示例底稿":
@@ -910,8 +1158,8 @@ with settings_area:
     use_sample_draft = mat_mode == "示例底稿"
 
 _has_key = mode_sel == "api" and bool((api_key_sel or "").strip())
-_render_hero(f'<span class="xz-status model"><span class="dot"></span>开工调用模型 · {html.escape(preset_label)}</span>' if _has_key
-             else '<span class="xz-status"><span class="dot"></span>规则引擎 · 离线秒出（未填 Key）</span>')
+_render_hero(f'<span class="xz-status model"><span class="dot"></span>模型已配置 · {html.escape(preset_label)}</span>' if _has_key
+             else '<span class="xz-status"><span class="dot"></span>规则初稿与参考可用 · 模型未配置</span>')
 
 def _to_jira(analysis) -> None:
     from xuzhi.jira import parse_issue_text
@@ -935,6 +1183,14 @@ def _sample_body(choice: str) -> str:
     return next((p.read_text(encoding="utf-8") for p in samples if p.stem == choice), "")
 
 
+def _save_intake_draft(choice: str, text_key: str) -> None:
+    """失焦时保存当前原话；切换样例不会覆盖各自尚未提交的修改。"""
+    text = st.session_state.get(text_key, "")
+    st.session_state.setdefault("intake_drafts", {})[choice] = text
+    if choice == "（粘贴自己的）":
+        st.session_state.raw_composed = text
+
+
 with intake_area:
     pick_l, pick_r = st.columns([2, 3])
     with pick_r:
@@ -954,32 +1210,35 @@ with intake_area:
         st.session_state["sample_shown"] = choice
         st.session_state["speech_rev"] = int(st.session_state.get("speech_rev", 0) or 0) + 1
 
-    with st.form("xuzhi_go"):
+    # 原话需在失焦时同步到会话；form 会等到开工才提交，切样例时会丢掉未提交文字。
+    with st.container(border=True, key="xuzhi_intake"):
         c1, c2 = st.columns([2, 3])
         with c1:
             src = st.selectbox("来源（可不选）", ["自动识别", "企业微信", "会议纪要", "邮件", "需求单", "口述"], key="src")
             mobile = st.toggle("原型按手机版出", value=False, key="mobile")
             client = st.toggle("原型出客户版（脱敏）", value=False, key="client")
         with c2:
-            default_text = st.session_state.get("raw_composed", "") if choice == "（粘贴自己的）" else _sample_body(choice)
+            defaults = st.session_state.get("raw_composed", "") if choice == "（粘贴自己的）" else _sample_body(choice)
+            default_text = st.session_state.get("intake_drafts", {}).get(choice, defaults)
+            text_key = f"raw_text_{st.session_state.get('speech_rev', 0)}"
             text = st.text_area(
                 "原话",
                 value=default_text,
                 height=190,
                 placeholder="例如：净值日报能不能加一列……也可点上方「开始口述」",
-                key=f"raw_text_{st.session_state.get('speech_rev', 0)}",
+                key=text_key,
+                on_change=_save_intake_draft,
+                args=(choice, text_key),
             )
-            go = st.form_submit_button("需知，开工", type="primary", icon=":material/bolt:")
+            go = st.button("需知，开工", type="primary", icon=":material/bolt:")
 
 llm = None
 if go:
-    if choice == "（粘贴自己的）":
-        st.session_state.raw_composed = text
-    elif not text.strip():
-        text = _sample_body(choice)
+    _save_intake_draft(choice, text_key)
     if not text.strip():
         st.warning("请粘贴原话，或选一个样例后再点开工。")
     else:
+        _cancel_model_job()
         run_mode, run_model, run_base, run_key = mode_sel, model_sel, api_base_sel, api_key_sel
         if run_mode == "api" and (not run_model or run_model in ("__custom__", "__custom_qoder_model__")):
             st.info("未填模型 ID，本次按规则引擎运行。")
@@ -988,7 +1247,7 @@ if go:
             st.info("未填 API Base URL，本次按规则引擎运行。")
             run_mode = "mock"
         if run_mode == "api" and not run_key:
-            st.info("未填 Key → 本次按规则引擎出初稿（可稍后在「问清」补 Key 再润色）。")
+            st.info("未填 Key → 本次先出需求初稿、规则模板和历史参考；补 Key 后可在「问清」润色，或在「估量」增加模型分析。")
             run_mode = "mock"
         llm = build_llm(run_mode, run_model, run_base, run_key, backend=backend_sel, extra=extra)
         do_polish = llm.mode == "api"
@@ -1015,17 +1274,11 @@ if go:
                     st.warning(h)
                 if drafts and not visual_drafts(drafts) and not repos:
                     st.info("没有可复刻的静态界面，出样将按需求原话生成。")
-        if do_polish and (drafts or repos):
-            spin = "模型正在读现有材料并出结果……"
-        elif do_polish:
-            spin = "模型正在理解需求并出结果……"
-        else:
-            spin = "规则引擎正在拆需求、估工、出原型……"
         try:
-            with st.spinner(spin):
+            with st.spinner("正在生成快速初稿、规则模板、历史参考和原型……"):
                 a = analyze(
                     text, "" if src == "自动识别" else src, llm, answers=None,
-                    mobile=mobile, client_view=client, llm_polish=do_polish,
+                    mobile=mobile, client_view=client, llm_polish=False,
                     drafts=drafts, repos=repos, memory=memory,
                 )
         except Exception as e:
@@ -1041,18 +1294,17 @@ if go:
             "provider_id": provider_id,
         }
         if do_polish:
-            st.session_state.just_polished = a.engine != "规则"
+            _begin_model_job(a, llm, kind="analysis")
         st.session_state.scroll_to_results = True
         st.rerun()
 
 _last = st.session_state.get("last_llm") or {}
+page_mode = mode_sel
+if not api_key_sel.strip() or not api_base_sel.strip() or not model_sel.strip() or model_sel in ("__custom__", "__custom_qoder_model__"):
+    page_mode = "mock"
 llm = llm or build_llm(
-    _last.get("mode", "mock"),
-    _last.get("model", ""),
-    _last.get("api_base", api_base_sel),
-    st.session_state.api_keys.get(_last.get("provider_id", provider_id), ""),
-    backend=_last.get("backend", "openai"),
-    extra=extra if provider_id in ("qoder-cloud", "qoder-cloud-intl") else {},
+    page_mode, model_sel, api_base_sel, api_key_sel,
+    backend=backend_sel, extra=extra,
 )
 
 a = st.session_state.get("analysis")
@@ -1064,6 +1316,16 @@ if not a:
     st.stop()
 
 card, est, arch = a.card, a.estimate, a.architecture
+if _model_running():
+    _render_model_progress()
+else:
+    last_status = st.session_state.get("_model_last_status") or {}
+    if last_status.get("status") == "completed":
+        st.success(f"模型分析已完成 · 用时 {last_status['elapsed']:.0f} 秒。结果已自动更新到本条需求。")
+    elif last_status.get("status") == "failed":
+        st.warning("模型分析未完全成功；已保留快速初稿、规则模板和历史参考，可在对应页签重试。")
+    else:
+        st.info("快速结果已生成 · 尚未调用模型。规则初稿、模板和历史参考均可查看。")
 _mat = st.session_state.get("materials_report") or materials_report(
     getattr(a, "drafts", None) or st.session_state.get("drafts"),
     getattr(a, "repos", None) or st.session_state.get("repos"),
@@ -1096,38 +1358,41 @@ with tabs[0]:
             polish_clicked = False
             with st.container(border=True):
                 p1, p2 = st.columns([3.2, 1], vertical_alignment="center")
-                if _last.get("mode") == "api":   # 开工时调了模型但没用上（超时 / 网关不通 / 返回不可用）
+                if _model_running():
+                    p1.caption("模型正在后台分析，当前先展示规则初稿；你可以先查看和填写待确认项。")
+                elif (st.session_state.get("_model_last_status") or {}).get("status") == "failed":
                     p1.caption(":material/error: 这次开工调模型没成功，已用规则引擎出稿；可在上方「模型与参考材料」换个模型再润色。")
                 else:
                     p1.caption(":material/bolt: 规则引擎初稿（毫秒级、不调模型）。想让措辞更顺、多补几条追问，填好模型 Key 后点右边润色。")
                 with p2:
                     with st.form("xuzhi_polish", border=False):
-                        polish_clicked = st.form_submit_button("模型润色", icon=":material/auto_awesome:", width="stretch")
+                        polish_clicked = st.form_submit_button("模型润色", icon=":material/auto_awesome:", width="stretch", disabled=_model_running())
             if polish_clicked:
                 polish_key = (api_key_sel or st.session_state.api_keys.get(provider_id, "")).strip()
                 polish_llm = build_llm(mode_sel, model_sel, api_base_sel, polish_key, backend=backend_sel, extra=extra)
                 if polish_llm.mode != "api":
                     st.warning("请先在上方「模型与参考材料」里选用模型并填写 API Key，再点润色。")
                 else:
-                    with st.spinner(f"{polish_llm.model or '模型'} 正在读……"):
-                        a2 = analyze(
-                            a.raw_text, "" if src == "自动识别" else src, polish_llm,
-                            answers={k: v for k, v in st.session_state.get("answers", {}).items() if v.strip()},
-                            mobile=mobile, client_view=client, llm_polish=True,
-                            drafts=getattr(a, "drafts", None) or st.session_state.get("drafts") or [],
-                            repos=getattr(a, "repos", None) or st.session_state.get("repos") or [],
-                            memory=memory,
-                        )
+                    a2 = analyze(
+                        a.raw_text, "" if src == "自动识别" else src, polish_llm,
+                        answers={k: v for k, v in st.session_state.get("answers", {}).items() if v.strip()},
+                        mobile=mobile, client_view=client, llm_polish=False,
+                        drafts=getattr(a, "drafts", None) or st.session_state.get("drafts") or [],
+                        repos=getattr(a, "repos", None) or st.session_state.get("repos") or [], memory=memory,
+                    )
                     st.session_state.analysis = a2
                     st.session_state.last_llm = {
                         "mode": polish_llm.mode, "model": polish_llm.model, "api_base": api_base_sel,
                         "backend": backend_sel, "provider_id": provider_id,
                     }
-                    ledger.event(st.session_state.get("req_id", 0), "模型润色", f"{a2.seconds}s")
-                    if a2.engine != "规则":
-                        st.session_state.just_polished = True
-                        st.rerun()
-                    st.warning("已调用模型，但润色未改写初稿（仍是规则引擎结果）。按钮还在，可换模型或再试一次。")
+                    _rid = st.session_state.get("req_id", 0)
+                    ledger.event(_rid, "模型润色", "后台启动；规则初稿已显示")
+                    if _rid:
+                        ledger.update_estimate(_rid, a2.estimate)
+                    _begin_model_job(a2, polish_llm, kind="analysis")
+                    st.rerun()
+            if st.session_state.pop("polish_unchanged", False):
+                st.warning("模型未改写需求初稿；估时结果已单独更新，可在「估量」查看。")
         elif a.engine != "规则":
             model_hint = (getattr(llm, "last_model", "") or (_last.get("model") or "")).strip()
             if st.session_state.pop("just_polished", False):
@@ -1143,7 +1408,7 @@ with tabs[0]:
                 )
         st.markdown(f"**一句话理解**：{card.goal}。")
         cc = st.columns(2)
-        cc[0].markdown("**功能点（原话清洗）**\n" + "\n".join(f"{i}. {f}" for i, f in enumerate(card.features, 1)))
+        cc[0].markdown("**功能点（原话清洗）**\n" + "\n".join(f"{i}. {textutil.markdown_literal(f)}" for i, f in enumerate(card.features, 1)))
         cc[1].markdown("**抽到的要素**\n" + "\n".join(f"- {k}：{'、'.join(v) if isinstance(v, list) else v}" for k, v in (
             ("使用者", card.users), ("品种", card.symbols or ["—"]), ("指标", card.indicators or ["—"]), ("对象", card.scope_objects or ["—"]),
             ("数据来源", card.data_sources or ["待确认"]), ("渠道", card.channels or ["未提"]), ("非功能", card.nonfunctional or ["—"]))))
@@ -1166,24 +1431,33 @@ with tabs[0]:
             answers[q.id] = st.text_input("业务答复", value=_prefill, key=f"ans_{q.id}", label_visibility="collapsed",
                                           placeholder="业务答复（留空 = 按默认假设）")
         st.session_state.answers = answers
-        if st.button("🔁 按业务答复重算（写单 / 估量 / 定架同步更新）", type="primary"):
+        if st.button("🔁 按业务答复重算（写单 / 估量 / 定架同步更新）", type="primary", disabled=_model_running()):
+            _cancel_model_job()
             with st.spinner("重算中……"):
                 a2 = analyze(
                     a.raw_text, "" if src == "自动识别" else src, llm,
                     answers={k: v for k, v in answers.items() if v.strip()},
                     mobile=mobile, client_view=client,
-                    llm_polish=(a.engine != "规则"),
+                    llm_polish=False,
                     drafts=getattr(a, "drafts", None) or st.session_state.get("drafts") or [],
                     repos=getattr(a, "repos", None) or st.session_state.get("repos") or [],
                     memory=memory,
                 )
             st.session_state.analysis = a2
+            st.session_state.last_llm = {
+                "mode": llm.mode, "model": llm.model, "api_base": api_base_sel,
+                "backend": backend_sel, "provider_id": provider_id,
+            }
             _rid = st.session_state.get("req_id", 0)
             ledger.event(_rid, "业务答复重算", f"{sum(1 for v in answers.values() if v.strip())} 条")
             ledger.update_answers(_rid, sum(1 for q in a2.questions if q.answer.strip()), int(getattr(a2.estimate, "unanswered_high", 0) or 0))
+            if _rid:
+                ledger.update_estimate(_rid, a2.estimate)
             _learned = memory.learn(a2.card, a2.questions, _rid)
             if _learned:
                 ledger.event(_rid, "追问记忆", f"记住 {_learned} 条口径（{a2.card.requester or '未注明'}）")
+            if llm.mode == "api":
+                _begin_model_job(a2, llm, kind="analysis")
             st.rerun()
     with right:
         st.markdown("**发给业务的确认消息**（一键复制到企业微信）")
@@ -1206,38 +1480,261 @@ with tabs[1]:
 
 # ---------- 估量 ----------
 with tabs[2]:
-    m = st.columns(5)
-    m[0].metric("传统开发", f"{est.mid} 人天", help=f"区间 {est.low} ～ {est.high}；六维加权 + 历史需求类比")
-    m[1].metric("AI 协同", f"{est.ai_mid} 人天", delta=f"-{est.saving_pct}%", delta_color="inverse", help=f"区间 {est.ai_low} ～ {est.ai_high}；按任务性质分别乘 AI 协同系数")
-    m[2].metric("置信度", est.confidence)
-    m[3].metric("未答复的高影响问题", f"{est.unanswered_high} 个")
-    m[4].metric("AI 能做的活占", f"{est.who.get('AI 能做', 0):.0%}", help="按传统人天口径统计")
-    st.caption(est.confidence_reason)
-    st.markdown(f"**建议交付方式**：{est.delivery}")
-    st.markdown("#### 双轨拆分：先拆活，再分工")
-    who_cls = {"AI 能做": "lo", "AI 做人审": "md", "人必须做": "hi"}
-    st.markdown("".join(f'<span class="xz-chip {who_cls[k]}">{k} {v:.0%}</span>' for k, v in est.who.items()), unsafe_allow_html=True)
-    tdf = pd.DataFrame([{"任务": t.name, "阶段": t.phase, "分工": t.who, "传统人天": t.trad_days, "AI 协同人天": t.ai_days, "系数": t.coef, "为什么": t.note} for t in est.tasks])
-    st.dataframe(tdf, hide_index=True, width="stretch", height=min(60 + 36 * len(tdf), 620))
-    l, r = st.columns([1, 1])
-    with l:
-        st.markdown("**按阶段对比（人天）**")
-        pdf = pd.DataFrame({"传统开发": est.phases, "AI 协同": est.ai_phases})
+    estimate_method = getattr(est, "method", "")
+    estimate_status = getattr(est, "status", "unavailable")
+    estimate_ready = estimate_method == "llm" and estimate_status == "ready" and all(
+        getattr(est, field, None) is not None
+        for field in ("mid", "low", "high", "ai_mid", "ai_low", "ai_high")
+    )
+    references = getattr(est, "references", {}) or {}
+    if not references:
+        # 兼容热更新前的会话：只补充展示参考，不改变已有模型结果或台账。
         try:
-            st.bar_chart(pdf, height=220, stack=False)
-        except TypeError:
-            st.bar_chart(pdf, height=220)
-        st.markdown(f"基础估算 **{est.base_days} 人天**（六维加权）" + (f"；类比校准 **{est.history_days} 人天**（相似历史需求实际值加权）" if est.history_days else "；无相似历史需求，未校准"))
-        st.markdown("**六维复杂度**（1～5）")
-        st.dataframe(pd.DataFrame({"维度": list(est.dims.keys()), "分": list(est.dims.values()), "依据": [est.reasons[d] for d in est.dims]}), hide_index=True, width="stretch")
-    with r:
-        st.markdown("**类比估算：相似历史需求**")
-        if est.similar:
-            st.dataframe(pd.DataFrame([{"相似度": f"{s.score:.0%}", "需求": s.title, "类型": s.type, "部门": s.dept, "年份": s.year, "当时估": s.estimate_days, "实际": s.actual_days, "备注": s.note} for s in est.similar]),
-                         hide_index=True, width="stretch")
+            from xuzhi.pipeline.estimate_references import build_references
+            references = build_references(a.card, a.redacted_text, a.questions)
+        except Exception:
+            references = {}
+    rule_reference = references.get("rule") or {}
+    history_reference = references.get("history") or {}
+    rule_ready = rule_reference.get("status") == "ready"
+    history_items = history_reference.get("items") or []
+    history_ready = history_reference.get("status") == "ready" and bool(history_items)
+
+    def reference_hours(value) -> str:
+        if isinstance(value, dict):
+            low, mid, high = (value.get(key) for key in ("low", "mid", "high"))
+            if all(isinstance(number, (int, float)) and not isinstance(number, bool) for number in (low, mid, high)):
+                return f"{low:g}～{high:g} 小时（参考 {mid:g}）"
+            return "暂无数值"
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return f"{value:g} 小时"
+        return "暂无数值"
+
+    st.markdown("模型分析、规则模板、历史记录分开提供依据，便于核对范围和差异。")
+    st.caption("三路结果不自动加权混合；只有成功的模型估时进入模型工时汇总。未配置模型时，仍可查看规则与历史参考。")
+    source_model, source_rule, source_history = st.columns(3)
+    with source_model, st.container(border=True):
+        st.markdown("**独立模型估时**")
+        if _model_running():
+            st.markdown('<div role="status" aria-live="polite"><span class="xz-loading"></span>模型正在分析</div>', unsafe_allow_html=True)
+            st.caption("完成后自动更新；规则模板和历史参考已先展示。")
+        elif estimate_ready:
+            st.markdown(f"以前 **{est.mid * 8:g} 小时** · 现在 **{est.ai_mid * 8:g} 小时**")
+            st.caption("模型按本次材料逐项分析；下方展开区间、理由与证据。")
         else:
-            st.info("历史需求库里没有相似需求；上线后把实际工时回写，下次就有了。")
-    st.markdown('<div class="xz-foot">数字全由程序算：六维复杂度 + 相似历史需求 → 传统轨；逐个任务乘 AI 协同系数 → AI 轨。涉及资金数字、交易链路、对客内容的任务，验证成本不打折。</div>', unsafe_allow_html=True)
+            st.markdown("本次未成功" if estimate_status == "failed" else "尚未调用模型")
+            st.caption("使用页面选择的模型，需要配置 Key。")
+    with source_rule, st.container(border=True):
+        st.markdown("**规则模板参考**")
+        if rule_ready:
+            st.markdown("以前：" + reference_hours(rule_reference.get("before")))
+            st.markdown("现在：" + reference_hours(rule_reference.get("after")))
+            st.caption(rule_reference.get("label") or "固定规则计算，独立于模型判断。")
+        else:
+            st.markdown("暂无规则参考")
+            st.caption(rule_reference.get("summary") or "当前没有可用的规则模板结果。")
+    with source_history, st.container(border=True):
+        st.markdown("**历史记录参考**")
+        if history_ready:
+            st.markdown(f"找到 **{len(history_items)} 条**相关记录")
+            st.caption("来源：" + "；".join(dict.fromkeys(item.get("source") or "来源未确认" for item in history_items)))
+            st.caption("对照当时估算、实际工时与开发方式；历史范围可能不同。")
+        else:
+            st.markdown("暂无匹配记录")
+            st.caption(history_reference.get("summary") or "尚无可比的历史记录。")
+
+    st.markdown("#### 独立模型分析")
+    st.caption("模型根据本条需求和已提供的材料拆分工作，分别判断人工开发与 AI 协同的投入；程序校验并汇总模型的逐项数字。")
+    estimate_label = "模型分析中……" if _model_running() else "重新分析估时" if estimate_ready or estimate_status == "failed" else "大模型分析估时"
+    if st.button(estimate_label, type="primary", key="estimate_with_model", disabled=_model_running()):
+        estimate_llm = build_llm(page_mode, model_sel, api_base_sel, api_key_sel,
+                                 backend=backend_sel, extra=extra)
+        estimate_llm.req_id = st.session_state.get("req_id", 0)
+        if estimate_llm.mode != "api":
+            _cancel_model_job()
+            next_estimate = estimate(
+                a.card, a.redacted_text, a.questions, llm=estimate_llm,
+                repos=getattr(a, "repos", None) or [],
+                drafts=getattr(a, "drafts", None) or [],
+            )
+            a.estimate = next_estimate
+            st.session_state.analysis = a
+            _rid = st.session_state.get("req_id", 0)
+            if _rid:
+                ledger.update_estimate(_rid, next_estimate)
+        else:
+            _begin_model_job(a, estimate_llm, kind="estimate")
+        st.session_state.last_llm = {
+            "mode": estimate_llm.mode, "model": estimate_llm.model, "api_base": api_base_sel,
+            "backend": backend_sel, "provider_id": provider_id,
+        }
+        st.rerun()
+
+    if _model_running():
+        st.info("模型正在分析；下方规则模板与历史参考已可查看，模型结果会自动补充。")
+    elif not estimate_ready:
+        if estimate_method not in ("llm", "unavailable"):
+            st.info("当前会话尚无独立模型结果；规则模板已在参考区单独列出，可配置模型后增加分析。")
+        elif estimate_status == "failed":
+            st.error("本次模型估时未成功。请检查模型设置后重试；规则与历史参考仍独立保留。")
+            if getattr(est, "error", ""):
+                st.caption(est.error)
+        else:
+            st.info("尚未调用模型，尚无模型估时。规则模板和历史记录可在下方查看；如需模型分析，请在上方选择模型、填写 Key，再点击「大模型分析估时」。")
+        st.caption("未提供代码时可根据需求粗估；估时仅使用本条需求已经读取的材料。")
+    else:
+        requirements_only = getattr(est, "basis", "requirements_only") != "code_excerpt"
+        if requirements_only:
+            st.warning("粗估：本次尚未用实现代码核实改动，仅依据需求和补充材料判断；字段复用、影响范围与改动位置仍待确认。")
+        else:
+            st.info("已参考所提供的代码摘录；估算覆盖范围以实际读取的文件为准，尚未验证运行环境与完整调用链。")
+        if getattr(est, "summary", ""):
+            st.markdown(est.summary)
+        before, after = st.columns(2)
+        before.metric("以前（人工开发）", f"{est.low * 8:g}～{est.high * 8:g} 小时")
+        before.caption(f"参考投入：{est.mid * 8:g} 小时")
+        after.metric("现在（AI协同）", f"{est.ai_low * 8:g}～{est.ai_high * 8:g} 小时")
+        after.caption(f"参考投入：{est.ai_mid * 8:g} 小时")
+        st.caption("均为投入工时，8 小时 = 1 人天，不是日历工期；AI 协同包含人工审核、数字核对与验收。")
+        if est.saving_pct is not None:
+            st.caption(f"按参考投入计算，预计人时减少 {est.saving_pct:g}%；两边均为估计，不是实测提效。")
+        code_files = getattr(est, "code_files", []) or []
+        st.caption(f"估时模型：{getattr(est, 'model', '') or '未记录'} · 材料范围："
+                   + (f"需求与 {len(code_files)} 份已读取代码摘录" if code_files else "需求与补充材料（未读取实现代码）"))
+        with st.expander("估算前提与材料范围", expanded=requirements_only):
+            comparison = getattr(est, "comparison", {}) or {}
+            if comparison:
+                st.markdown("**本次比较口径**")
+                for key in ("before", "after", "unit", "environment"):
+                    if comparison.get(key):
+                        st.markdown(f"- {textutil.markdown_literal(comparison[key])}")
+                st.caption(f"口径版本：{comparison.get('version', '未记录')}")
+            assumptions = getattr(est, "assumptions", []) or []
+            if assumptions:
+                for assumption in assumptions:
+                    st.markdown(f"- {textutil.markdown_literal(assumption)}")
+            else:
+                st.caption("模型未单独列出前提，请结合任务依据核对。")
+            if code_files:
+                st.markdown("**本次读取的代码文件**")
+                st.code("\n".join(code_files), language=None)
+            else:
+                st.caption("本次未读取实现代码。")
+        st.markdown("#### 工作项与估算依据")
+        task_rows = []
+        for task in est.tasks:
+            task_rows.append({
+                "工作项": task.name,
+                "阶段": task.phase,
+                "以前（小时）": f"{task.trad_low_hours:g}～{task.trad_high_hours:g}（参考 {task.trad_days * 8:g}）",
+                "现在（小时）": f"{task.ai_low_hours:g}～{task.ai_high_hours:g}（参考 {task.ai_days * 8:g}）",
+                "以前的依据": task.before_reason,
+                "现在的依据": task.after_reason,
+            })
+        st.dataframe(pd.DataFrame(task_rows), hide_index=True, width="stretch", height=min(60 + 52 * len(task_rows), 620))
+        for index, task in enumerate(est.tasks, 1):
+            with st.expander(f"{index}. {task.name} · 查看依据与证据"):
+                st.markdown(f"**以前（人工开发）**：{textutil.markdown_literal(task.before_reason)}")
+                st.markdown(f"**现在（AI协同）**：{textutil.markdown_literal(task.after_reason)}")
+                if task.note:
+                    st.caption(task.note)
+                evidence = getattr(task, "evidence", []) or []
+                if not evidence:
+                    st.caption("未提供可回查的证据片段；此项判断需要复核。")
+                for item in evidence:
+                    location = " · ".join(str(item.get(key, "")) for key in ("source", "file") if item.get(key))
+                    st.caption(location or "依据片段")
+                    if item.get("quote"):
+                        st.code(str(item["quote"]), language=None)
+        if est.phases or est.ai_phases:
+            st.markdown("**按阶段对比（小时）**")
+            phase_frame = pd.DataFrame({
+                "以前（人工开发）": {phase: round(days * 8, 2) for phase, days in est.phases.items()},
+                "现在（AI协同）": {phase: round(days * 8, 2) for phase, days in est.ai_phases.items()},
+            })
+            try:
+                st.bar_chart(phase_frame, height=220, stack=False)
+            except TypeError:
+                st.bar_chart(phase_frame, height=220)
+        if est.delivery:
+            st.markdown(f"**建议交付方式**：{est.delivery}")
+
+    with st.expander("规则模板参考 · 六维复杂度、公式与任务", expanded=True):
+        if rule_ready:
+            if rule_reference.get("summary"):
+                st.markdown(rule_reference["summary"])
+            rule_before, rule_after = st.columns(2)
+            rule_before.markdown("**以前（规则模板）**\n\n" + reference_hours(rule_reference.get("before")))
+            rule_after.markdown("**现在（规则模板）**\n\n" + reference_hours(rule_reference.get("after")))
+            dims = rule_reference.get("dims")
+            if isinstance(dims, dict) and dims:
+                reasons = rule_reference.get("reasons") or {}
+                weights = rule_reference.get("weights") or {}
+                st.markdown("**六维复杂度**")
+                _radar_dims(dims, reasons)
+                weight_line = "，".join(
+                    f"{name} {weights[name]:g}" for name in ("功能点", "数据接入", "界面", "权限", "性能", "合规") if name in weights
+                )
+                st.caption("图形只表示 1～5 分，六条轴一样长。工时还要乘权重"
+                           + (f"：{weight_line}" if weight_line else "")
+                           + "。这些权重是手写示例，没有用实际工时校准。")
+                parts = rule_reference.get("hour_parts")
+                if isinstance(parts, dict) and parts:
+                    st.markdown("**各维加进参考工时（小时）**")
+                    _color_bars({str(name): float(value) for name, value in parts.items()}, "小时", label_angle=0)
+                    st.caption("底数是 1.5 人天换成的 12 小时。其余每柱是 (分数 − 1) × 权重 × 8，1 分的维是 0。"
+                               "加总等于上面「以前（规则模板）」的参考小时。这些是手写权重算出的模板小时，不是实测工时。")
+                head = "<tr><th>规则维度</th><th>分值</th>" + ("<th>评分依据</th>" if reasons else "") + ("<th>规则权重</th>" if weights else "") + "</tr>"
+                body = []
+                for name, score in dims.items():
+                    cells = f"<td>{html.escape(str(name))}</td><td class='num'>{html.escape(str(score))}</td>"
+                    if reasons:
+                        cells += f"<td>{html.escape(str(reasons.get(name, '')))}</td>"
+                    if weights:
+                        weight = weights.get(name, "")
+                        cells += f"<td class='num'>{html.escape(f'{weight:g}' if isinstance(weight, float) else str(weight))}</td>"
+                    body.append(f"<tr>{cells}</tr>")
+                st.markdown(f"<table class='xz-dims'><thead>{head}</thead><tbody>{''.join(body)}</tbody></table>", unsafe_allow_html=True)
+            elif rule_reference.get("method") == "incremental":
+                st.markdown("**六维复杂度**")
+                st.caption("这条匹配的是已有计算口径小改模板，按固定工作项加总，不打功能点、数据接入、界面、权限、性能、合规这六分。")
+            if rule_reference.get("formula"):
+                st.markdown("**计算公式**")
+                st.code(rule_reference["formula"], language=None)
+            rule_tasks = rule_reference.get("tasks") or []
+            if rule_tasks:
+                st.dataframe(pd.DataFrame([{
+                    "模板工作项": task.get("name", ""), "阶段": task.get("phase", ""),
+                    "以前（小时）": reference_hours(task.get("before")),
+                    "现在（小时）": reference_hours(task.get("after")),
+                    "模板系数（现在/以前）": task.get("coefficient"),
+                    "规则说明": task.get("note", ""),
+                } for task in rule_tasks]), hide_index=True, width="stretch")
+            if rule_reference.get("assumptions"):
+                st.markdown("**适用前提与局限**")
+                for assumption in rule_reference["assumptions"]:
+                    st.markdown(f"- {textutil.markdown_literal(assumption)}")
+            st.caption("这是规则模板参考，不是模型输出；它不会替换模型结果，也不与模型工时自动加权。")
+        else:
+            st.info(rule_reference.get("summary") or "当前没有可用规则模板参考；模型结果和历史记录不受影响。")
+
+    with st.expander("历史记录参考 · 当时估算与实际工时", expanded=not estimate_ready):
+        if history_reference.get("summary"):
+            st.markdown(history_reference["summary"])
+        if history_ready:
+            st.dataframe(pd.DataFrame([{
+                "编号": item.get("id", ""), "历史需求": item.get("title", ""), "类型": item.get("type", ""),
+                "相关度": f"{item['score']:.0%}" if isinstance(item.get("score"), (int, float)) else "—",
+                "当时估算": reference_hours(item.get("estimated_hours")),
+                "实际工时": reference_hours(item.get("actual_hours")),
+                "实际开发方式": "AI 协同" if item.get("ai_assisted") is True else "人工开发" if item.get("ai_assisted") is False else "未注明",
+                "来源": item.get("source", ""), "备注": item.get("note", ""),
+            } for item in history_items]), hide_index=True, width="stretch")
+        else:
+            st.info("暂无匹配的历史记录；这不影响模型或规则模板各自提供结果。")
+        for limitation in history_reference.get("limitations") or []:
+            st.caption(limitation)
+        st.caption("历史实际工时属于当时的需求范围和开发条件，仅供对照，不直接套入本条需求，也不计入本条模型工时。")
 
 # ---------- 定架 ----------
 with tabs[3]:

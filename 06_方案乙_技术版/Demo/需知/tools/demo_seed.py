@@ -8,7 +8,7 @@
 
 刻意不做的：
   - 不预置"模型调用审计"：那张表只记真实调用。现场点一次「模型润色」就会出现一行。
-  - 不写 history_learned.json：对账用 write_history=False，样例 ① 的估算（8.5 → 5.4 人天）保持与 PPT 一致。
+  - 不写 history_learned.json：对账用 write_history=False；未调用模型的需求保持未估时，不补造预测数字。
   - 不预置资管运营的需求与追问记忆、不收录四个演示样例：现场开工的样例 ① 是全新一条，第二条同提出方需求才出现 🧠。
 
 所有数据均为虚构，看板数字只用于演示界面，不是试运行成绩。
@@ -53,15 +53,16 @@ EXTRA = {
     "X6": "来源：企业微信 · 投资部 投资经理 钱经理 → 技术部\n\n套利组合的每日盈亏归因能不能自动算？按品种和腿拆开，日终出结果，Excel 和页面都要。",
 }
 
-# (需求, 几天前受理, 最终状态, 业务答了几条, 实际/估算 系数, 是否用了 AI 协同, AI 参与度) —— 由旧到新
+# (需求, 几天前受理, 最终状态, 业务答了几条, 演示实际人天, 是否用了 AI 协同, AI 参与度) —— 由旧到新
+# 实际人天是独立的虚构记录，不从未生成的估量推算，也不用于模型校准。
 PLAN = [
-    ("E10", 55, "已对账", 2, 1.15, False, 0.0),
-    ("E05", 52, "已对账", 3, 0.90, True, 0.4),
-    ("E09", 49, "已对账", 3, 1.20, False, 0.0),
-    ("X1", 46, "已对账", 2, 1.05, True, 0.5),
-    ("E06", 42, "已对账", 3, 0.95, True, 0.35),
-    ("E11", 38, "已对账", 2, 0.85, True, 0.6),
-    ("X4", 35, "已对账", 2, 1.10, True, 0.3),
+    ("E10", 55, "已对账", 2, 6.5, False, 0.0),
+    ("E05", 52, "已对账", 3, 4.0, True, 0.4),
+    ("E09", 49, "已对账", 3, 8.0, False, 0.0),
+    ("X1", 46, "已对账", 2, 3.0, True, 0.5),
+    ("E06", 42, "已对账", 3, 5.5, True, 0.35),
+    ("E11", 38, "已对账", 2, 4.5, True, 0.6),
+    ("X4", 35, "已对账", 2, 6.0, True, 0.3),
     ("E13", 31, "已交付", 2, 0, False, 0.0),
     ("E07", 28, "开发中", 3, 0, False, 0.0),
     ("X3", 24, "开发中", 3, 0, False, 0.0),
@@ -126,7 +127,7 @@ def seed(now: datetime | None = None) -> dict:
     texts = _texts()
     ledger, memory = Ledger(), Memory()
     llm = LLM(mode="mock", audit=False)
-    for i, (key, days_ago, status, n_ans, factor, ai, share) in enumerate(PLAN):
+    for i, (key, days_ago, status, n_ans, actual_days, ai, share) in enumerate(PLAN):
         text = texts[key]
         a = analyze(text, llm=llm, memory=memory)
         rid = ledger.log_analysis(a)
@@ -136,6 +137,7 @@ def seed(now: datetime | None = None) -> dict:
             a = analyze(text, llm=llm, answers=answers, memory=memory)
             ledger.event(rid, "业务答复重算", f"{len(answers)} 条")
             ledger.update_answers(rid, sum(1 for q in a.questions if q.answer.strip()), int(getattr(a.estimate, "unanswered_high", 0) or 0))
+            ledger.update_estimate(rid, a.estimate)
             learned = memory.learn(a.card, a.questions, rid)
             if learned:
                 ledger.event(rid, "追问记忆", f"记住 {learned} 条口径（{a.card.requester or '未注明'}）")
@@ -145,9 +147,7 @@ def seed(now: datetime | None = None) -> dict:
                 continue
             ledger.set_status(rid, s)
         if status == "已对账":
-            row = ledger.get(rid) or {}
-            est = float(row.get("ai_days") if ai and row.get("ai_days") else row.get("mid_days") or 0.0)
-            ledger.reconcile(rid, round(est * factor, 1), ai_assisted=ai, ai_share=share, note=NOTE, write_history=False)
+            ledger.reconcile(rid, actual_days, ai_assisted=ai, ai_share=share, note=NOTE, write_history=False)
         _backdate(ledger, memory, rid, _at(now, days_ago, i), days_ago, now)
     return {"count": len(PLAN), "dashboard": ledger.dashboard(), "memory": memory.stats()}
 
@@ -180,8 +180,8 @@ def main(argv: list[str] | None = None) -> int:
     out = seed()
     d, m = out["dashboard"], out["memory"]
     print(f"已预置 {out['count']} 条虚构需求：{d['depts']} 个部门；状态 " + " / ".join(f"{k} {v}" for k, v in d["by_status"].items()))
-    print(f"看板：平均追问 {d['avg_questions']} 条，平均澄清 {d['avg_rounds']} 轮，已对账 {d['closed']} 条（估算偏差 {d['mape']}%），"
-          f"AI 协同省时（估）{d['saved_days']} 人天；追问记忆 {m['entries']} 条口径、省问 {m['hits']} 次")
+    print(f"看板：平均追问 {d['avg_questions']} 条，平均澄清 {d['avg_rounds']} 轮，已记录实际工时 {d['closed']} 条；"
+          f"未调用模型，工时预测与偏差均未生成；追问记忆 {m['entries']} 条口径、省问 {m['hits']} 次")
     print("模型调用审计为空（只记真实调用）；样例 ① 与资管运营的追问记忆保持全新。需知页面开着的话，刷新一下即可。")
     print("提醒：以上均为虚构演示数据，不要当作试运行成绩讲。")
     return 0

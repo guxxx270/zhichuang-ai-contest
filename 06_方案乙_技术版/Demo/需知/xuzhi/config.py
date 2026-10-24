@@ -61,10 +61,6 @@ SKILLS = [("问清", "先问清，再开工"), ("写单", "业务版 · 技术�
           ("定架", "拍板什么 · 数据从哪取"), ("出样", "看得见的需求"), ("对账", "一本账 · 估了多少实际多少")]
 BRAND = {"navy": "#14367A", "accent": "#E07A1F", "paper": "#F6F4EF", "ink": "#1F2937", "mist": "#E5E7EB", "teal": "#0F766E"}
 
-DAYS_PER_COMPLEXITY_POINT = 1.6
-ESTIMATE_BLEND_HISTORY = 0.6
-
-
 def resolved_mode() -> str:
     """没有 key 就自动退到 mock，保证 Demo 任何时候都能跑。"""
     if LLM_MODE in ("api", "mock"):

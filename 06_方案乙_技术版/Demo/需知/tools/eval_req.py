@@ -48,7 +48,10 @@ def score_case(case: dict, llm: LLM) -> dict:
     qids = {q.id for q in a.questions}
     dids = {d.id for d in arch.decisions}
     r: dict = {"id": case["id"], "dept": case.get("dept", ""), "title": card.title, "type": card.req_type,
-               "n_questions": len(a.questions), "mid": est.mid, "ai_mid": est.ai_mid, "seconds": secs, "notes": []}
+               "n_questions": len(a.questions), "mid": est.mid, "ai_mid": est.ai_mid, "seconds": secs, "notes": [],
+               "estimate_status": est.status,
+               "estimate_state_ok": est.status == "unavailable" and all(
+                   value is None for value in (est.mid, est.low, est.high, est.ai_mid, est.ai_low, est.ai_high))}
     if exp.get("type"):
         r["type_ok"] = card.req_type in exp["type"]
         if not r["type_ok"]:
@@ -90,10 +93,14 @@ def score_case(case: dict, llm: LLM) -> dict:
             r["notes"].append("缺决策：" + "/".join(miss))
     if exp.get("days"):
         lo, hi = exp["days"]
-        r["days_ok"] = lo <= est.mid <= hi
         r["days_expert"] = f"{lo}～{hi}"
-        if not r["days_ok"]:
-            r["notes"].append(f"估算 {est.mid} 不在 {lo}～{hi}")
+        if est.status == "ready" and est.mid is not None:
+            r["days_ok"] = lo <= est.mid <= hi
+            if not r["days_ok"]:
+                r["notes"].append(f"估算 {est.mid} 不在 {lo}～{hi}")
+        else:
+            r["days_ok"] = None
+            r["notes"].append("未调用模型，跳过工时数值评分")
     if "realtime" in exp:
         d2 = next((d for d in arch.decisions if d.id == "D2"), None)
         want_rt = bool(exp["realtime"])
@@ -114,6 +121,7 @@ def score_case(case: dict, llm: LLM) -> dict:
 def summarize(rows: list[dict]) -> dict:
     def col(k):
         return [float(r[k]) for r in rows if k in r and r[k] is not None]
+    saving_ratios = [r["ai_mid"] / r["mid"] for r in rows if r.get("mid") is not None and r["mid"] > 0 and r.get("ai_mid") is not None]
     s = {
         "cases": len(rows),
         "type_acc": _rate(col("type_ok")),
@@ -125,12 +133,14 @@ def summarize(rows: list[dict]) -> dict:
         "probe_false": _rate(col("probe_false")),
         "decision_cov": _rate(col("decision_cov")),
         "days_in_range": _rate(col("days_ok")),
+        "estimate_state_acc": _rate(col("estimate_state_ok")),
+        "unestimated_cases": sum(r.get("estimate_status") != "ready" for r in rows),
         "realtime_acc": _rate(col("realtime_ok")),
         "redact": _rate(col("redact_ok")),
         "map_located": _rate(col("map_located")),
         "avg_questions": round(statistics.mean([r["n_questions"] for r in rows]), 1) if rows else 0,
         "avg_seconds": round(statistics.mean([r["seconds"] for r in rows]), 3) if rows else 0,
-        "avg_saving_pct": round(100 * (1 - statistics.mean([r["ai_mid"] / r["mid"] for r in rows if r["mid"]])), 0) if rows else 0,
+        "avg_saving_pct": round(100 * (1 - statistics.mean(saving_ratios)), 0) if saving_ratios else None,
     }
     s["pass"] = all(
         (s[k] is None) or (s[k] <= v if k == "probe_false" else s[k] >= v) for k, v in THRESHOLDS.items()
@@ -141,6 +151,7 @@ def summarize(rows: list[dict]) -> dict:
 LABELS = {"type_acc": "类型识别准确率", "title_acc": "标题命中率", "data_cov": "数据来源覆盖率", "indicator_acc": "指标抽取命中率",
           "symbol_acc": "品种抽取命中率", "probe_cov": "追问覆盖率（专家必问）", "probe_false": "误问率（专家不该问）",
           "decision_cov": "IT 决策覆盖率", "days_in_range": "估算落在专家区间", "realtime_acc": "时效判断准确率",
+          "estimate_state_acc": "规则模式正确标记未估时",
           "redact": "脱敏无漏检", "map_located": "数据地图定位率"}
 
 
@@ -156,12 +167,13 @@ def render_report(rows: list[dict], s: dict, src: Path) -> str:
         th_s = "" if th is None else (f"≤ {100 * th:.0f}%" if k == "probe_false" else f"≥ {100 * th:.0f}%")
         md.append(f"| {label} | {_pct(s[k])} | {th_s} |")
     md += [f"| 平均追问条数 | {s['avg_questions']} | |", f"| 平均出稿用时 | {s['avg_seconds']} s | |",
-           f"| AI 协同平均省时 | {s['avg_saving_pct']:.0f}% | |", f"| **总体** | {'通过' if s['pass'] else '未达阈值'} | |", "",
+           f"| AI 协同平均省时 | {'未估时' if s['avg_saving_pct'] is None else str(s['avg_saving_pct']) + '%'} | |", f"| **总体** | {'通过' if s['pass'] else '未达阈值'} | |", "",
            "## 逐条", "| 编号 | 部门 | 识别标题 | 类型 | 问题数 | 传统 / AI 人天 | 专家区间 | 备注 |", "|---|---|---|---|---|---|---|---|"]
     for r in rows:
-        md.append(f"| {r['id']} | {r['dept']} | {r['title']} | {r['type']} | {r['n_questions']} | {r['mid']} / {r['ai_mid']} | {r.get('days_expert', '—')} | {'；'.join(r['notes']) or '✅'} |")
+        effort = "未估时" if r["mid"] is None or r["ai_mid"] is None else f"{r['mid']} / {r['ai_mid']}"
+        md.append(f"| {r['id']} | {r['dept']} | {r['title']} | {r['type']} | {r['n_questions']} | {effort} | {r.get('days_expert', '—')} | {'；'.join(r['notes']) or '✅'} |")
     md += ["", "口径：类型 / 标题 / 指标 / 品种按抽取结果对照专家期望；追问覆盖率 = 专家必问的追问被问到的比例，误问率 = 专家标注不该问的追问却问了的比例；",
-           "估算落区间 = 规则估算中位数落在专家区间内的比例（专家区间为虚构样例的人工标注，真实数据接入后以实际人天为准）；脱敏无漏检 = 隐盾后文本不含标注的敏感内容。"]
+           "规则评测不调用模型，不生成工时或省时数字，跳过专家工时区间评分；只检查未估时状态。脱敏无漏检 = 隐盾后文本不含标注的敏感内容。"]
     return "\n".join(md)
 
 

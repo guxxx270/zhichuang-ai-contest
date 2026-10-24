@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass, is_dataclass
 from typing import Any
 
 from . import config
-from .ledger import Ledger
+from .ledger import Ledger, estimate_snapshot
 from .llm import LLM
 from .memory import Memory
 from .pipeline import Analysis, analyze
@@ -73,6 +73,7 @@ def run(
         n_ans = sum(1 for q in a.questions if q.answer.strip())
         ledger.event(res.req_id, "业务答复重算", f"{len(answers)} 条（{channel}）")
         ledger.update_answers(res.req_id, n_ans, int(getattr(a.estimate, "unanswered_high", 0) or 0))
+        ledger.update_estimate(res.req_id, a.estimate)
         if answers:
             res.learned = memory.learn(a.card, a.questions, res.req_id)
             if res.learned:
@@ -89,6 +90,7 @@ def run(
 def to_dict(a: Analysis, *, req_id: int = 0, include_spec: bool = True, include_prototype: bool = False,
             include_tasks: bool = True, include_adr: bool = True) -> dict[str, Any]:
     est, arch = a.estimate, a.architecture
+    snapshot = estimate_snapshot(est)
     out: dict[str, Any] = {
         "req_id": int(req_id or 0),
         "engine": a.engine,
@@ -104,16 +106,19 @@ def to_dict(a: Analysis, *, req_id: int = 0, include_spec: bool = True, include_
         ],
         "confirm_message": a.message,
         "estimate": {
-            "trad_days": {"mid": est.mid, "low": est.low, "high": est.high},
-            "ai_days": {"mid": est.ai_mid, "low": est.ai_low, "high": est.ai_high},
-            "saving_pct": est.saving_pct,
+            **{key: snapshot[key] for key in ("method", "status", "basis", "model", "code_files", "summary", "error", "assumptions", "before", "after", "references")},
+            "hours_per_day": 8,
+            "trad_days": {key: snapshot.get(key) for key in ("mid", "low", "high")},
+            "ai_days": {key: snapshot.get("ai_" + key) for key in ("mid", "low", "high")},
+            "saving_pct": snapshot.get("saving_pct"),
             "confidence": est.confidence,
             "confidence_reason": est.confidence_reason,
             "unanswered_high": est.unanswered_high,
             "delivery": est.delivery,
             "dims": dict(est.dims),
-            "who": dict(est.who),
-            "phases": dict(est.phases),
+            "who": dict(snapshot.get("who") or {}),
+            "phases": dict(snapshot.get("phases") or {}),
+            "ai_phases": dict(snapshot.get("ai_phases") or {}),
             "similar": [{"id": s.id, "title": s.title, "score": s.score, "estimate_days": s.estimate_days, "actual_days": s.actual_days} for s in est.similar],
         },
         "architecture": {
@@ -128,7 +133,7 @@ def to_dict(a: Analysis, *, req_id: int = 0, include_spec: bool = True, include_
         },
     }
     if include_tasks:
-        out["estimate"]["tasks"] = [{"id": t.id, "name": t.name, "phase": t.phase, "who": t.who, "trad_days": t.trad_days, "ai_days": t.ai_days} for t in est.tasks]
+        out["estimate"]["tasks"] = snapshot["tasks"]
     if include_adr:
         out["architecture"]["adr_md"] = arch.adr_md
     if include_spec:

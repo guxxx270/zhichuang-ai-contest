@@ -31,13 +31,24 @@ def main() -> None:
     print("\n" + a.message)
     print("=" * 70); print("【写单】业务版前 30 行："); print("\n".join(a.spec.business_md.splitlines()[:30]))
     print("=" * 70); e = a.estimate
-    print(f"【估量】传统 {e.mid} 人天（{e.low}～{e.high}）｜AI 协同 {e.ai_mid} 人天（{e.ai_low}～{e.ai_high}，省 {e.saving_pct}%）｜置信度 {e.confidence}：{e.confidence_reason}")
-    print("  分工：" + "，".join(f"{k} {v:.0%}" for k, v in e.who.items()) + f"｜建议：{e.delivery}")
-    for t in e.tasks:
-        print(f"   {t.id:3} {t.phase} · {t.who:5} {t.trad_days:>5} → {t.ai_days:>5}  {t.name}")
-    print("  六维：" + "，".join(f"{k} {v}" for k, v in e.dims.items()))
-    for s in e.similar:
-        print(f"  相似：{s.title}（{s.score:.0%}，实际 {s.actual_days} 人天）")
+    if e.status == "ready":
+        print(f"【估量】以前 {e.mid * 8:g} 小时（{e.low * 8:g}～{e.high * 8:g}）｜现在 {e.ai_mid * 8:g} 小时（{e.ai_low * 8:g}～{e.ai_high * 8:g}）｜模型 {e.model}｜置信度 {e.confidence}")
+        print(f"  {e.summary}")
+        for task in e.tasks:
+            print(f"   {task.id:3} {task.phase} · {task.name}：以前 {task.trad_days * 8:g} → 现在 {task.ai_days * 8:g} 小时")
+            print(f"     以前：{task.before_reason}\n     现在：{task.after_reason}")
+    else:
+        print(f"【模型估量】{'估算失败' if e.status == 'failed' else '未估时'}：{e.error or e.summary or e.confidence_reason}")
+    rule = e.references.get("rule", {})
+    if rule.get("status") == "ready":
+        b, now = rule["before"], rule["after"]
+        print(f"【规则模板参考（未校准）】以前 {b['mid']:g} 小时（{b['low']:g}～{b['high']:g}）｜现在 {now['mid']:g} 小时（{now['low']:g}～{now['high']:g}）")
+        print(f"  {rule['formula']}")
+    history = e.references.get("history", {})
+    print(f"【历史记录参考】{history.get('summary', '暂无记录')}；不与模型或规则工时加权合并。")
+    for item in history.get("items", []):
+        actual = f"{item['actual_hours']:g} 小时" if item.get("actual_hours") is not None else "未记录"
+        print(f"  {item['title']}｜{item['source']}｜记录实际投入 {actual}")
     print("=" * 70); print(f"【定架】{a.architecture.coverage_line}")
     for d in a.architecture.decisions:
         print(f"  {d.id} {d.topic} → {d.recommended}（{d.impact}）")

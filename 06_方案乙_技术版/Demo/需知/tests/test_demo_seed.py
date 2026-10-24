@@ -30,11 +30,13 @@ def test_seed_fills_dashboard_without_touching_demo(tmp_db):
     assert list((tmp_db / "backup").glob("*/ledger.sqlite3"))
     d = Ledger().dashboard()
     assert d["count"] == len(demo_seed.PLAN) and d["depts"] >= 8 and all(d["by_status"].values())
-    assert d["closed"] >= 5 and d["mape"] is not None and d["mape"] < 30 and d["avg_rounds"] > 1
+    assert d["closed"] >= 5 and d["mape"] is None and d["avg_rounds"] > 1
+    assert d["saved_days"] is None and d["estimated_count"] == 0
+    assert d["unestimated_count"] == len(demo_seed.PLAN)
     assert "未注明" not in d["by_dept"]
     assert Audit().stats()["calls"] == 0                 # 审计只记真实调用
     assert not config.HISTORY_LEARNED_PATH.exists()      # 对账不写回历史库
-    assert analyze(sample1, llm=LLM(mode="mock")).estimate.mid == before
+    assert analyze(sample1, llm=LLM(mode="mock")).estimate.mid is before is None
     mem = Memory()
     assert mem.stats()["entries"] > 0 and not [r for r in mem.rows() if r["scope_key"].startswith("资管运营")]
     a = analyze(sample1, llm=LLM(mode="mock"), memory=mem)

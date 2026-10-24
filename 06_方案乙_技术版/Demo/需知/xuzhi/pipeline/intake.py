@@ -116,6 +116,9 @@ def _first(rules: list[tuple[str, str]], text: str) -> str:
 
 
 def _title(text: str, req_type: str, card: Card) -> str:
+    changed = textutil.find_changed_indicators(text)
+    if changed:
+        return f"{'、'.join(changed)}计算口径调整"
     for pat, title in TITLE_TEMPLATES:
         if re.search(pat, text):
             card.title_from_template = True
@@ -177,7 +180,10 @@ def extract_card(text: str, source_hint: str = "") -> Card:
     card.trigger = _first(TRIGGER_RULES, body)
     card.frequency = _first(FREQ_RULES, body)
     card.symbols = textutil.find_symbols(body)
-    card.indicators = textutil.find_indicators(body)
+    changed_indicators = textutil.find_changed_indicators(body)
+    card.indicators = list(changed_indicators)
+    for indicator in textutil.find_indicators(body):
+        textutil.merge_label(card.indicators, indicator)
     for col in textutil.find_added_columns(body):
         textutil.merge_label(card.indicators, col)
     card.scope_objects = _scope_objects(body)
@@ -192,13 +198,16 @@ def extract_card(text: str, source_hint: str = "") -> Card:
     for s in textutil.sentences(body):
         if textutil.FEATURE_CUES.search(s) and not textutil.BACKGROUND.search(s) and not re.match(r"^(领导|王总|谢谢|技术部同事|小李|在吗)", s):
             f = textutil.clean_feature(s)
-            if 4 <= len(f) <= 80 and f not in card.features:
+            # 长度影响展示，不应决定是否丢弃事实；长句常含公式、适用范围和否定约束。
+            if len(f) >= 4 and f not in card.features:
                 card.features.append(f)
                 card.raw_features.append(s)
     card.features, card.raw_features = card.features[:12], card.raw_features[:12]
     card.title = _title(body, card.req_type, card)
     futures = looks_futures_domain(body, card.title, " ".join(card.features), " ".join(card.indicators))
     card.goal = _futures_goal(card) if futures else _neutral_goal(card)
+    if changed_indicators:
+        card.goal = f"按需求原话调整{'、'.join(changed_indicators)}的计算口径"
     card.assumptions = _assumptions(card, body)
     return card
 

@@ -18,7 +18,7 @@ HELP_TEXT = (
     "**① 需求分析**（默认）：把一堆话（需求、诉求、会议里的原话）直接发给我 →\n"
     "- 🛡 隐盾：先脱敏，再进模型\n"
     "- ❓ 要和业务确认什么（可直接在聊天里按编号回答）\n"
-    "- ⏱ 复杂度与工时（传统人天 ｜ AI 协同人天）\n"
+    "- ⏱ 模型估时（以前 ｜ 现在），并列规则模板与历史参考；未接入模型时只展示参考\n"
     "- 🧭 需要 IT 拍板的技术选择\n\n"
     "**② 问码**：问关于需知这个项目本身的问题，我去翻代码回答 →\n"
     "- 单条：`/问 隐盾的脱敏规则在哪实现的`\n"
@@ -125,13 +125,18 @@ def render_analysis(analysis: Any, *, answered: int = 0, max_questions: int = 4)
     out.append("")
 
     # ---- 估量（双轨）----
-    if est is not None:
-        mid, low, high = _num(getattr(est, "mid", 0)), _num(getattr(est, "low", 0)), _num(getattr(est, "high", 0))
-        line = f"**工时**：传统 {mid} 人天（{low}~{high}）"
-        ai_mid = getattr(est, "ai_mid", 0) or 0
+    if est is not None and getattr(est, "status", "unavailable") != "ready":
+        state = "估算失败" if getattr(est, "status", "") == "failed" else "未估时"
+        reason = getattr(est, "error", "") or getattr(est, "summary", "") or "请接入模型后估算，以前和现在均无工时结果。"
+        out.append(f"**工时**：模型{state}。{reason}")
+        out.append("")
+    elif est is not None:
+        mid, low, high = (_num(getattr(est, field) * 8) for field in ("mid", "low", "high"))
+        line = f"**工时**：模型估算，以前 {mid} 小时（{low}~{high}）"
+        ai_mid = getattr(est, "ai_mid", None)
         if ai_mid:
             saving = getattr(est, "saving_pct", 0) or 0
-            line += f" ｜ AI 协同 **{_num(ai_mid)} 人天**"
+            line += f" ｜ 现在 **{_num(ai_mid * 8)} 小时**"
             if saving:
                 line += f"，省 {_num(saving)}%"
         out.append(line)
@@ -145,6 +150,19 @@ def render_analysis(analysis: Any, *, answered: int = 0, max_questions: int = 4)
             if delivery:
                 bits.append(str(delivery))
             out.append("　" + "；".join(bits))
+        out.append("")
+
+    references = getattr(est, "references", {}) or {}
+    rule = references.get("rule", {})
+    if rule.get("status") == "ready":
+        before, after = rule["before"], rule["after"]
+        out.append(f"**规则模板参考（未校准）**：以前 {_num(before['low'])}～{_num(before['high'])} 小时"
+                   f" ｜ 现在 {_num(after['low'])}～{_num(after['high'])} 小时；固定模板、未核对代码，详情见 Web。")
+    history = references.get("history", {})
+    if history:
+        out.append(f"**历史记录参考**：{_clip(history.get('summary', '暂无记录'), 120)}")
+    if references:
+        out.append("_各来源独立展示，不合并成一个总工时；历史样本来源与匹配范围见 Web。_")
         out.append("")
 
     # ---- 定架：需要 IT 拍板 ----
