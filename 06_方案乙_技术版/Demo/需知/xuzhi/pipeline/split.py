@@ -4,6 +4,7 @@
 1. 头部元信息（来源 / 时间 / 记录 / 主题 / 标题 / 日期）每条都带上，来源识别照常；参会名单不带——名单里的部门会被认成提出方；
 2. 切分点按优先级：行首编号条目 → 部门开头（「风控部提出：」「研究所：」「资管部希望」）→ 句首连接词（还有一件事 / 第二件事 / 另外…）；
    编号只在像纪要、开头说了「几件事」或至少两条编号各带提出方时才切：需求单里的 1. 2. 3. 是同一条需求的功能点；
+   低一级或缩进更深的编号、紧跟在「谁要做什么」那句后面的列表、「××部补充：」都算上一条的要点，不另起一条；
 3. 一段像需求才算一条：有需求动词、不少于 12 字、不是背景 / 参会 / 「下周再议」这类决议；太短的并回上一条；最多 8 条；
 4. 不足 2 条返回 []，照常按一条需求处理。
 """
@@ -31,15 +32,23 @@ _NUM = re.compile(r"^\s*(?:\d{1,2}\s*[.．、)）](?!\d)|[（(]\d{1,2}[)）]|[�
 _HEADING = re.compile(r"^\s*(?:[一二三四五六七八九十]{1,3}\s*[、.．]|[（(][一二三四五六七八九十]{1,3}[)）])"
                       r"\s*[^。；;！!？?，,：:]{0,16}[：:]?\s*$")
 _INTRO = re.compile(r"(?:[：:]|如下)\s*$")   # 「要求如下：」后面不带提出方的编号是这一条的要点
+# 「经会上讨论，需求如下：」这类引出要点的行本身没有需求动词，也照样收要点；「各部门需求如下：」是好几条，不收
+_POINTS_INTRO = re.compile(r"(?:要求|需求|功能|要点|明细|细节|口径)(?:如下|包括|有)?\s*[：:]\s*$")
+_PLURAL = re.compile(r"各(?:部门|方|位|组|条线)|大家|几(?:个|件|项|条|点)|多(?:个|项|条)|[部所]和[^，,。：:]{1,6}[部所]")
 
 _DEPT_OF = dict(textutil.DEPARTMENTS)
 _DEPT_KEYS = "|".join(sorted((re.escape(k) for k in _DEPT_OF), key=len, reverse=True))
-# 部门（+ 人）+ 提出 / 希望 / 冒号；「补充」不算换人，「提醒 / 提示」不是「提」
-_SAYS = r"[^，,。；;！!？?：:]{0,12}?\s*(?:提出|希望|反馈|反映|要求|表示|建议|想要|想|需要|提(?![醒示供交前高升])|说|问|(?=[：:]))"
+# 部门（+ 人）+ 提出 / 希望 / 冒号；「补充：」「附议：」不算换人，「提醒 / 提示」不是「提」
+_SAYS = (r"[^，,。；;！!？?：:]{0,12}?\s*(?:提出|希望|反馈|反映|要求|表示|建议|想要|想|需要|提(?![醒示供交前高升])|说|问"
+         r"|(?<!补充)(?<!附议)(?=[：:]))")
 _LEAD = re.compile(rf"^(?P<dept>{_DEPT_KEYS}){_SAYS}")
 # 词典外的部门开头（「结算部需要」「上海营业部提出：」）：本条自己点了提出方，不再借上一条 / 小节 / 头部的。
-# 部门名前至少两个字（「全部 / 内部」不算），「业务部门 / 相关部门」这类泛称也不算
-_UNIT_LEAD = re.compile(rf"^(?!我们|你们|他们|咱们)(?P<unit>[\u4e00-\u9fff]{{2,6}}?部)(?![门分]){_SAYS}")
+# 部门名前至少两个字（「全部 / 内部」不算），「业务部门 / 相关部门」「部长 / 部署 / 部分」这类也不算
+_UNIT_LEAD = re.compile(rf"^(?!我们|你们|他们|咱们)(?P<unit>[\u4e00-\u9fff]{{2,6}}?部)(?![门分长署件位]){_SAYS}")
+_NOT_UNIT = re.compile(r"[内外全局底顶头尾东西南北中上下前后本细大小]部$")   # 「公司内部需要…」不是部门
+# 「营业部补充：…」「风控部李经理补充…」接着上一条说，不另起一条；「补充一个需求」才是新的，「需要补充一份模板」也不算
+_ADDON = re.compile(rf"^(?:{_DEPT_KEYS}|[\u4e00-\u9fff]{{2,6}}?部)[^，,。；;！!？?：:]{{0,6}}?(?:补充|附议)"
+                    r"(?!一?(?:个|条|项|件|点)?新?的?需求)")
 _KNOWN = set(_DEPT_OF.values())   # extract_card 认得出的提出方
 _FILLER = re.compile(r"^(?:对了|然后|同时|其次|最后|另外|此外|还有|再就是|顺便)[，,、\s]*")
 
@@ -83,6 +92,10 @@ class _Chunk:
     pieces: list[_Piece] = field(default_factory=list)
     has_req: bool = False   # 已经有像需求的句子（逐句累计，长文不必反复重扫）
     multi: bool = False     # 说了「两件事 / 以下三个需求」
+    level: int = 0          # 开头编号的层级（见 _level）；没有编号为 0
+    indent: int = 0         # 开头那行的缩进
+    item: bool = False      # 小标题本身就是一条需求（「一、风控部提出希望做一个追保提醒」）
+    concrete: bool = False  # 明确要做个什么 / 问了「能不能」：后面紧跟的列表多半是它的要点
 
 
 def _dept_in(text: str) -> str:
@@ -107,7 +120,18 @@ def _lead(s: str) -> str:
 def _unit(s: str) -> str:
     """句首点了词典外的部门 → 该部门（名字里带词典部门的按词典口径：上海营业部 → 营业部）；没有返回空。"""
     m = _UNIT_LEAD.match(_FILLER.sub("", s.strip(), count=1))
-    return (_dept_in(m.group("unit")) or m.group("unit")) if m else ""
+    if not m or _NOT_UNIT.search(m.group("unit")):
+        return ""
+    return _dept_in(m.group("unit")) or m.group("unit")
+
+
+_LEVELS = [re.compile(p) for p in (r"[一二三四五六七八九十]", r"[（(][一二三四五六七八九十]", r"\d", r"[（(]\d", r"[①-⑳]")]
+
+
+def _level(marker: str) -> int:
+    """编号层级：一、→（一）→ 1. →（1）→ ① → - •，数越大越低一级。"""
+    m = marker.strip()
+    return next((i for i, pat in enumerate(_LEVELS, 1) if pat.match(m)), len(_LEVELS) + 1)
 
 
 def _size(s: str) -> int:
@@ -192,10 +216,23 @@ def _chunks(body_lines: list[str], gated: bool, head_dept: str) -> list[_Chunk]:
         num = _NUM.match(s) if p.first else None
         core = s[num.end():] if num else s
         lead = _lead(core)
+        level = _level(num.group(0)) if num else 0
+        indent = len(p.text.expandtabs(4)) - len(p.text.expandtabs(4).lstrip()) if p.first else 0
+        # 要点不另起一条：比所在条目低一级的编号；同级但缩进更深、又没另提新东西的；
+        # 紧跟在「谁要做什么」那句后面、自己不点名也不另提新东西的列表
+        # （那句得点了提出方或明确要做个什么：「本次讨论了各线需求，需要技术部评估」后面的编号照常各算一条）
+        asks = bool(_NEW_THING.search(core) or _ASK.search(core))
+        sub = bool(num) and not lead and cur is not None and (
+            (cur.level > 0 and (cur.kind == "编号条目" or cur.item)
+             and (level > cur.level or (indent > cur.indent and not asks)))
+            or (cur.kind in ("首段", "提出方切换", "连接词") and cur.has_req and not cur.multi
+                and (cur.lead or cur.unit or cur.concrete) and not asks))
         if p.first and (not num or lead):
             intro = False   # 编号段落结束，或换了人
         kind = ""
-        if p.first and gated and _HEADING.match(s):
+        if sub or (cur is not None and not lead and _ADDON.match(core)):
+            pass   # 要点、「营业部补充：」：并进当前这条
+        elif p.first and gated and _HEADING.match(s):
             kind, lead, intro = "小标题", "", False
         elif num and gated and not (intro and not lead):
             kind = "编号条目"
@@ -210,15 +247,20 @@ def _chunks(body_lines: list[str], gated: bool, head_dept: str) -> list[_Chunk]:
                 if weak and (lead or (_NEW_THING.search(core) and _NEW_DELIVERABLE.search(core))):
                     kind, lead = "连接词", lead or _lead(core[weak.end():])
         if kind or cur is None:
-            cur = _Chunk(kind or "首段", lead if kind != "小标题" else "")
+            cur = _Chunk(kind or "首段", lead if kind != "小标题" else "", level=level, indent=indent)
             if kind != "小标题" and not cur.lead:
                 cur.unit = _unit(_CUE_WEAK.sub("", _CUE_STRONG.sub("", core, count=1), count=1))
             chunks.append(cur)
         cur.pieces.append(p)
         cur.has_req = cur.has_req or bool(_req_sentences(s))
         cur.multi = cur.multi or bool(_MULTI.search(s))
-        # 先说了要做什么、再「要求如下：」才收要点；「会议决定：」「风控部提出两件事：」后面的编号照常各算一条
-        if kind != "小标题" and _INTRO.search(s) and cur.has_req and not cur.multi:
+        cur.concrete = cur.concrete or bool(_NEW_THING.search(s) or _ASK.search(s))
+        if kind == "小标题":
+            cur.item = cur.has_req and _size(core) >= MIN_CHARS
+        # 先说了要做什么、再「要求如下：」才收要点（「需求如下：」本身就是在引出要点）；
+        # 「会议决定：」「风控部提出两件事：」「各部门需求如下：」后面的编号照常各算一条
+        if kind != "小标题" and _INTRO.search(s) and not cur.multi and (
+                cur.has_req or (_POINTS_INTRO.search(s) and not _PLURAL.search(s))):
             intro = True
     return chunks
 
@@ -236,6 +278,7 @@ def _strip_start(chunk: _Chunk, body: str) -> str:
 def split_requirements(text: str, *, min_segments: int = 2, max_segments: int = MAX_SEGMENTS) -> list[Segment]:
     """识别到不少于 min_segments 条需求时返回各条；否则返回 []（按一条需求照常处理）。"""
     raw = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    raw = re.sub("[\u200b-\u200d\u2060\ufeff]", "", raw)   # 网页 / 微信复制来的零宽字符会挡住行首编号和部门
     header, body_lines = _head(raw.split("\n"))
     head_text = "\n".join(header)
     head_dept = _dept_in(head_text)
@@ -254,8 +297,9 @@ def split_requirements(text: str, *, min_segments: int = 2, max_segments: int = 
         body = _strip_start(chunk, body)
         if not body:
             continue
-        if chunk.kind in ("编号条目", "小标题", "连接词") and not chunk.lead and _DECISION.search(body):
-            continue   # 「下周再议」这类决议不算需求
+        if (chunk.kind in ("编号条目", "小标题", "连接词") and not chunk.lead and _DECISION.search(body)
+                and not (_ASK.search(body) or _NEW_THING.search(body))):
+            continue   # 「下周再议」这类决议不算需求；「能不能做个…，具体字段下周再议」仍是一条
         is_req = bool(_req_sentences(body)) and _size(body) >= MIN_CHARS
         if is_req and (chunk.kind in ("首段", "连接词") or not found or _standalone(body)):
             # 段内别处出现的部门多是收件人（「提醒客户经理」），排在头部之后

@@ -64,6 +64,8 @@ def build_digest(ledger, now: datetime | None = None) -> Digest:
     rows = ledger.export_rows()
     week_start = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
     for r in rows:
+        if r.get("split_into"):
+            continue   # 纪要直通车拆开后的整段那行：各条已各记一行，不再催它
         ts = _parse_ts(r.get("ts") or "")
         status = (r.get("status") or "受理").strip()
         title = (r.get("title") or "未命名需求")[:40]

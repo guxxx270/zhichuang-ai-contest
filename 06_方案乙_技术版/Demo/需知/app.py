@@ -281,6 +281,7 @@ def render_ledger(ledger: Ledger, memory: Memory, audit: Audit, *, req_id: int =
     else:
         labels = {
             int(r["id"]): f"#{int(r['id'])} {r.get('title') or '未命名'} · {r.get('status') or '受理'}"
+            + (f" · 整段纪要，已拆为 {r['split_into']}" if r.get("split_into") else "")   # 纪要直通车拆过的那行
             for r in catalog
         }
         ids = list(labels)
@@ -460,7 +461,8 @@ def render_ledger(ledger: Ledger, memory: Memory, audit: Audit, *, req_id: int =
 
         def _cell(row: dict, field: str | None) -> str:
             if field == "title":
-                return _txt(row.get("title")) or "未命名"
+                split_into = row.get("split_into")   # 纪要直通车拆过的整段那行：看板不再算它
+                return (_txt(row.get("title")) or "未命名") + (f"（整段纪要，已拆为 {split_into}）" if split_into else "")
             if field == "ai_share":
                 value = row.get("ai_share")
                 if value is None or value == "":
