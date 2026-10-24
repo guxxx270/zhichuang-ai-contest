@@ -51,6 +51,8 @@ def render_diff(d: versions.Diff) -> None:
     if not d.changed:
         st.caption("两版分析结果一致。")
         return
+    if d.mixed:
+        st.caption(versions.MIXED_NOTE)
     old_col, new_col = f"旧（v{d.v_old}）", f"新（v{d.v_new}）"
     _section(f"需重新确认（{len(d.reconfirm)} 项）",
              (f"{WHO.get(r['who'], ':gray-badge')}[{r['who']}] {_md(r['text'])}" for r in d.reconfirm))
@@ -116,35 +118,50 @@ def _note_md(d: versions.Diff, title: str, old: dict, new: dict) -> tuple[str, s
 
 
 # ---------------------------------------------------------------- 结果顶上：本次变更
-def render_change_banner(ledger: Ledger, req_id: int, analysis=None) -> None:
-    """屏上这份结果就是本条最新一版、且前面还有版本时，在结果顶上一句话说清这次改了什么；展开看明细、下载说明。"""
-    lost = st.session_state.pop("_xz_change_lost", None)
-    if lost:
-        st.warning(f"#{lost} 已不在一本账里（可能重置过演示数据），这次按新需求受理为 #{req_id}。")
-    same = st.session_state.pop("_xz_change_same", None)
-    if same:
-        st.info(f"原话和分析结果与 v{same} 相同，没有另存版本。")
-    found = _versions(ledger, req_id)
+def _latest_on_screen(found: list[dict], analysis) -> bool:
     if len(found) < 2:
+        return False
+    if analysis is None:
+        return True
+    try:
+        on_screen = json.loads(json.dumps(versions.snapshot(analysis), ensure_ascii=False))
+        return versions.same(found[-1]["snapshot"], on_screen)
+    except Exception:
+        return False
+
+
+def render_change_banner(ledger: Ledger, req_id: int, analysis=None) -> None:
+    """屏上这份结果就是本条最新一版、且前面还有版本时，在结果顶上一句话说清这次改了什么；展开看明细、下载说明。
+    和上一份同类结果比（versions.base_index）：配了模型时，跳过模型补全前的规则初稿，不把说法差别当变更。"""
+    lost = st.session_state.pop("_xz_change_lost", None)
+    same = st.session_state.pop("_xz_change_same", None)
+    found = _versions(ledger, req_id)
+    # 模型还在跑或刚失败：屏上不是存过的那一版，先不说「本次变更」，免得和页面对不上
+    show = _latest_on_screen(found, analysis)
+    if not (lost or same or show):
         return
-    if analysis is not None:
-        try:
-            on_screen = json.loads(json.dumps(versions.snapshot(analysis), ensure_ascii=False))
-            latest_on_screen = versions.same(found[-1]["snapshot"], on_screen)
-        except Exception:
+    # 带键的容器：需求变更开工后页面滚到这里（app.py 的 scroll_to_results），一眼看到改了什么
+    with st.container(key="xz_change_banner"):
+        if lost:
+            st.warning(f"#{lost} 已不在一本账里（可能重置过演示数据），这次按新需求受理为 #{req_id}。")
+        if same:
+            st.info(f"原话和分析结果与 v{same} 相同，没有另存版本。")
+        if not show:
             return
-        if not latest_on_screen:
-            return   # 模型还在跑或刚失败：屏上不是存过的那一版，先不说「本次变更」，免得和页面对不上
-    old, new = found[-2], found[-1]
-    d = versions.diff(old["snapshot"], new["snapshot"], old["version"], new["version"])
-    with st.container(border=True):
-        st.markdown(f"{CHG}[:material/difference: 本次变更] **v{new['version']} · {_md(new['label'] or '更新')}**"
-                    f"　{_md(d.summary)}")
-        with st.expander(f"变更明细（v{old['version']} → v{new['version']}）：需重新确认、增删改、工时与架构影响"):
-            render_diff(d)
-            body, name = _note_md(d, new["snapshot"].get("title") or "", old, new)
-            st.download_button("下载本次变更说明 .md", body, file_name=name, mime="text/markdown", on_click="ignore",
-                               icon=":material/download:", key=f"chg_note_{req_id}_{new['version']}")
+        j = versions.base_index(found)
+        old, new = found[j], found[-1]
+        d = versions.diff(old["snapshot"], new["snapshot"], old["version"], new["version"])
+        with st.container(border=True):
+            st.markdown(f"{CHG}[:material/difference: 本次变更] **v{new['version']} · {_md(new['label'] or '更新')}**"
+                        f"　{_md(d.summary)}")
+            note = versions.base_note(found, j)
+            if note:
+                st.caption(note + "逐版对比见「一本账 → 版本记录」。")
+            with st.expander(f"变更明细（v{old['version']} → v{new['version']}）：需重新确认、增删改、工时与架构影响"):
+                render_diff(d)
+                body, name = _note_md(d, new["snapshot"].get("title") or "", old, new)
+                st.download_button("下载本次变更说明 .md", body, file_name=name, mime="text/markdown", on_click="ignore",
+                                   icon=":material/download:", key=f"chg_note_{req_id}_{old['version']}_{new['version']}")
 
 
 # ---------------------------------------------------------------- 开工：需求变更
@@ -153,8 +170,9 @@ def change_toggle() -> int:
     rid = int(st.session_state.get("req_id", 0) or 0)
     if not rid or st.session_state.get("analysis") is None:
         return 0
-    # 键里带编号与轮次：换了需求或变更落账后开关复位，避免把下一条新需求误记成变更
-    on = st.toggle(f"作为当前需求 #{rid} 的新版本（需求变更）", key=f"as_change_{rid}_{st.session_state.get('as_change_rev', 0)}",
+    # 键里带编号、轮次与所选样例：换了需求、变更落账或改选样例后开关复位，避免把另一条需求误记成变更
+    key = f"as_change_{rid}_{st.session_state.get('as_change_rev', 0)}_{st.session_state.get('sample', '')}"
+    on = st.toggle(f"作为当前需求 #{rid} 的新版本（需求变更）", key=key,
                    help="原话改了时打开：沿用这个编号和已答口径重新分析，存为新版本并标出改了什么、要重新确认什么；关着就作为一条新需求受理。")
     return rid if on else 0
 
@@ -198,7 +216,9 @@ def _row(v: dict) -> dict:
     model, rule = e.get("model"), e.get("rule")
     qs = s.get("questions") or []
     return {
-        "版本": f"v{v['version']}", "时间": _ts(v.get("ts", "")), "动作": v.get("label") or "—", "标题": s.get("title") or "—",
+        "版本": f"v{v['version']}", "时间": _ts(v.get("ts", "")), "动作": v.get("label") or "—",
+        # 规则初稿还是含模型结果：配了模型时两类交替出现，「本次变更」只拿同类比
+        "结果": {"规则": "规则初稿", "模型": "含模型结果"}.get(versions.kind(s), "—"), "标题": s.get("title") or "—",
         "功能点": len(s.get("features") or []), "待确认（已答）": f"{len(qs)}（{sum(1 for q in qs if q.get('answer'))}）",
         "模型估时 以前/现在（小时）": (f"{versions.fmt_num(model['before']['mid'])} / {versions.fmt_num(model['after']['mid'])}"
                                 if model else "—"),

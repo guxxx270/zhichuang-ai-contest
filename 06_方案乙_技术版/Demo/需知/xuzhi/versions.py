@@ -2,7 +2,9 @@
 任选两版看改了什么（功能点、要素、待确认、工时、数据地图、IT 决策）、哪些要重新确认，并出一页变更说明（Markdown）。
 
 快照只存分析结果和原话指纹（去空白后的哈希，不存原话）；对比纯程序、不调模型。
-工时：模型估时只和模型估时比，规则参考只和规则参考比，两路数字绝不互相加减。"""
+工时：模型估时只和模型估时比，规则参考只和规则参考比，两路数字绝不互相加减。
+快照另记引擎（规则初稿 / 含模型结果），不算差异，只用来挑可比的版本：配了模型时一次答复重算或需求变更会先存规则初稿、
+模型补全后再存一版，隔类相比会把「模型改写 ↔ 规则抽取」的说法差别当成需求变更。"""
 from __future__ import annotations
 
 import hashlib
@@ -29,6 +31,7 @@ ATTENTION = {
 }
 _MODEL_STATUS = {"ready": "已出结果", "failed": "调用未成功", "unavailable": "未调用模型"}
 _REWORD_RATIO = 0.5   # 两条功能点相似度过半，算同一条改了说法，不算一删一增
+MIXED_NOTE = "两版一份是规则初稿、一份含模型结果：功能点、标题、一句话的差别多是模型改写的说法，删掉的功能点不列入需重新确认。"
 
 
 def _num(value) -> float | None:
@@ -86,6 +89,7 @@ def snapshot(analysis) -> dict:
         value = getattr(card, key, "")
         snap[key] = [str(x) for x in value] if isinstance(value, (list, tuple)) else str(value or "")
     snap["text_sig"] = text_sig(getattr(analysis, "redacted_text", "") or "")
+    snap["engine"] = str(getattr(analysis, "engine", "") or "")
     snap["questions"] = [
         {"id": str(q.id), "question": str(q.question), "impact": str(q.impact),
          "answer": str(q.answer or "").strip(), "default": str(q.default or "")}
@@ -100,6 +104,12 @@ def snapshot(analysis) -> dict:
     return snap
 
 
+def kind(snap: dict | None) -> str:
+    """这一版是「规则」初稿还是含「模型」结果；早于引擎记录的快照为空。"""
+    engine = str((snap or {}).get("engine") or "")
+    return "模型" if "模型" in engine else ("规则" if engine else "")
+
+
 # ---------------------------------------------------------------- 对比
 @dataclass
 class Diff:
@@ -107,6 +117,7 @@ class Diff:
     v_old: int = 0
     v_new: int = 0
     text_changed: bool = False
+    mixed: bool = False   # 一版是规则初稿、一版含模型结果：功能点、标题、一句话的差别多是说法不同
     features: dict = field(default_factory=lambda: {"added": [], "removed": [], "reworded": []})
     fields: list = field(default_factory=list)
     questions: dict = field(default_factory=lambda: {"new": [], "dropped": [], "answered": [], "changed": [], "reworded": []})
@@ -279,15 +290,18 @@ def _short(need: str) -> str:
 
 
 def _reconfirm(d: Diff) -> list[dict]:
-    """需重新确认：新冒出的高影响未答问题、说法变了的已答问题、删掉的功能点、改了或新增的 IT 决策、新落到需申请 / 需新建 / 时效不符的数据项。"""
+    """需重新确认：新冒出的高影响未答问题、问法变了的已答问题、原话改后不见了的功能点、改了或新增的 IT 决策、
+    新落到需申请 / 需新建 / 时效不符的数据项。"""
     items = []
     for q in d.questions["new"]:
         if q.get("impact") == "高" and not (q.get("answer") or "").strip():
             items.append({"who": "业务", "kind": "新问题", "text": f"新增高影响问题：{q.get('question', '')}（不答按默认：{q.get('default') or '待定'}）"})
     for q in d.questions["reworded"]:
-        if q.get("answer"):
+        # 只有问法本身变了，原答复才可能不再适用；只是影响档或默认假设变了，已答的口径照用
+        if q.get("answer") and q.get("old") != q.get("new"):
             items.append({"who": "业务", "kind": "口径", "text": f"问题范围变了，原答复是否仍适用：{q['new']}（原答复：{q['answer']}）"})
-    for feature in d.features["removed"]:
+    # 原话没改、或一版规则初稿一版模型结果时，功能点增删只是抽取 / 模型改写的说法差别，不拿去问业务
+    for feature in d.features["removed"] if d.text_changed and not d.mixed else []:
         items.append({"who": "业务", "kind": "功能点", "text": f"功能点不见了，确认业务确实不要：{feature}"})
     for x in d.decisions["changed"]:
         items.append({"who": "IT", "kind": "决策", "text": f"决策 {x['id']} {x['topic']}：建议由「{x['old']}」改为「{x['new']}」，需重新拍板"})
@@ -380,6 +394,7 @@ def diff(old: dict, new: dict, v_old: int = 0, v_new: int = 0) -> Diff:
     d = Diff(v_old=int(v_old or 0), v_new=int(v_new or 0))
     sig_old, sig_new = old.get("text_sig", ""), new.get("text_sig", "")
     d.text_changed = bool(sig_old and sig_new and sig_old != sig_new)
+    d.mixed = bool(kind(old) and kind(new) and kind(old) != kind(new))
     d.features = _feature_diff(list(old.get("features") or []), list(new.get("features") or []))
     d.fields = _field_diff(old, new)
     d.questions = _question_diff(list(old.get("questions") or []), list(new.get("questions") or []))
@@ -394,6 +409,29 @@ def diff(old: dict, new: dict, v_old: int = 0, v_new: int = 0) -> Diff:
 def same(old: dict, new: dict) -> bool:
     """两版看不出差别（只是顺序变了也算一样）：存版本时据此去重，页面据此判断屏上是不是最新一版。"""
     return not diff(old, new).changed
+
+
+def base_index(found: list[dict], i: int | None = None) -> int:
+    """第 i 版（默认最新一版，下标从 0 起）的「本次变更」拿哪一版比：往前找最近一份同类结果
+    （同为规则初稿或同为含模型结果），找不到就用上一版。found 为 Ledger.versions_of() 的结果，至少两版。"""
+    i = len(found) - 1 if i is None else i
+    want = kind(found[i].get("snapshot"))
+    for j in range(i - 1, -1, -1):
+        if kind(found[j].get("snapshot")) == want:
+            return j
+    return i - 1
+
+
+def base_note(found: list[dict], j: int, i: int | None = None) -> str:
+    """base_index 跳过了中间版本时说一句为什么；没跳过返回空。"""
+    i = len(found) - 1 if i is None else i
+    skipped = found[j + 1:i]
+    if not skipped:
+        return ""
+    names = "、".join(f"v{v['version']}（{v.get('label') or '—'}）" for v in skipped)
+    if kind(found[i].get("snapshot")) == "模型":
+        return f"{names}是模型补全前的规则初稿，这里直接和上一份同样含模型结果的 v{found[j]['version']} 比。"
+    return f"{names}含模型结果，和本版规则初稿不同类，这里和上一份规则初稿 v{found[j]['version']} 比。"
 
 
 def reworded_note(x: dict) -> str:
@@ -443,6 +481,8 @@ def diff_markdown(d: Diff, title: str, v_old, v_new) -> str:
     """变更说明（给业务 / 开发）：先列需重新确认，再分节写增删改；v_old / v_new 可传版本号或 versions_of() 的一项。"""
     lines = [f"# 需求变更说明：{title or '未命名需求'}", "",
              f"- 版本：{_vtag(v_old)} → {_vtag(v_new)}", f"- 概要：{d.summary}", ""]
+    if d.mixed:
+        lines += [f"> {MIXED_NOTE}", ""]
     if not d.changed:
         lines += ["两版分析结果一致，没有需要重新确认的事项。", ""]
     if d.reconfirm:

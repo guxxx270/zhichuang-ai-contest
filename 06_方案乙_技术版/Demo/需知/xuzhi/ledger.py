@@ -246,7 +246,9 @@ class Ledger:
                               (analysis.card.req_type, int(getattr(analysis, "redacted", 0) or 0), req_id))
         n = self.update_analysis(req_id, analysis, label="需求变更")
         if before and n > before["version"]:
-            d = versions.diff(before["snapshot"], self.latest_version(req_id)["snapshot"], before["version"], n)
+            found = self.versions_of(req_id)
+            old = found[versions.base_index(found)]   # 和上一份同类结果比，不拿模型改写的说法当变更
+            d = versions.diff(old["snapshot"], found[-1]["snapshot"], old["version"], n)
             detail = f"记为 v{n}，{d.summary}"
         elif before:
             detail = f"原话与分析结果同 v{n}，未另存版本"
@@ -257,9 +259,10 @@ class Ledger:
 
     def add_version(self, req_id: int, analysis, label: str = "") -> int:
         """存一版分析快照（analysis 也可直接给快照 dict）。和最新一版比不出差别（顺序变化不算）就不另存。
-        返回本条最新的版本号（从 1 起）；台账里没有这条需求返回 0。"""
+        返回本条最新的版本号（从 1 起）；台账里没有这条需求、或它是 Jira 工单（走「Jira 重新评估」）返回 0。"""
         req_id = int(req_id or 0)
-        if not req_id or not self.conn.execute("SELECT 1 FROM requirements WHERE id=?", (req_id,)).fetchone():
+        row = self.conn.execute("SELECT source FROM requirements WHERE id=?", (req_id,)).fetchone() if req_id else None
+        if not row or row[0] == JIRA_SOURCE:
             return 0
         body = json.dumps(analysis if isinstance(analysis, dict) else versions.snapshot(analysis), ensure_ascii=False)
         count, last = self.conn.execute(
