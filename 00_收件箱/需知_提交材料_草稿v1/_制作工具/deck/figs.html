@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>需知 · 文档插图</title>
+<style>
+  :root { --ink:#0F172A; --mute:#64748B; --line:#CBD5E1; --soft:#F1F5F9;
+          --cyan:#0891B2; --blue:#2563EB; --violet:#7C3AED; --pink:#DB2777; --amber:#D97706; --green:#059669; --teal:#0D9488; --sky:#0284C7; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:#fff; color:var(--ink); font-family:-apple-system,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif; }
+  section { display:none; width:1500px; padding:36px 40px 40px; }
+  section.on { display:block; }
+  h1 { font-size:28px; font-weight:800; letter-spacing:1px; margin-bottom:6px; }
+  .sub { font-size:16px; color:var(--mute); margin-bottom:24px; }
+  /* ---------- 架构 ---------- */
+  .arch { display:grid; grid-template-columns: 1fr 190px; gap:16px; }
+  .layers { display:flex; flex-direction:column; gap:12px; }
+  .layer { display:grid; grid-template-columns: 150px 1fr; border:1.5px solid var(--line); border-radius:14px; overflow:hidden; }
+  .layer .name { display:flex; flex-direction:column; justify-content:center; padding:0 18px; color:#fff; font-weight:800; font-size:19px; }
+  .layer .name small { font-weight:500; font-size:12.5px; opacity:.9; margin-top:4px; }
+  .layer .parts { display:flex; flex-wrap:wrap; gap:10px; padding:14px; background:var(--soft); }
+  .chip { background:#fff; border:1.5px solid var(--line); border-radius:10px; padding:10px 14px; font-size:15.5px; font-weight:600; }
+  .chip small { display:block; font-weight:500; color:var(--mute); font-size:12.5px; margin-top:3px; }
+  .chip.wide { flex:1 1 100%; }
+  .flowline { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  .flowline .step { border-radius:999px; padding:7px 14px; color:#fff; font-weight:700; font-size:15px; }
+  .flowline .arr { color:var(--mute); font-weight:800; }
+  .sec { border:2px dashed #34D399; background:#ECFDF5; border-radius:14px; padding:16px 14px; display:flex; flex-direction:column; gap:10px; }
+  .sec .t { font-weight:800; color:var(--green); font-size:19px; }
+  .sec .c { background:#fff; border:1.5px solid #A7F3D0; border-radius:10px; padding:9px 11px; font-size:14px; font-weight:600; }
+  .sec .c small { display:block; color:var(--mute); font-weight:500; font-size:12px; margin-top:2px; }
+  .store { margin-top:12px; border:1.5px solid var(--line); border-radius:14px; padding:14px 18px; display:flex; gap:12px; align-items:center; background:#FFFBEB; }
+  .store .t { font-weight:800; color:var(--amber); font-size:18px; white-space:nowrap; }
+  .note { margin-top:14px; font-size:14px; color:var(--mute); }
+  /* ---------- 六步法 ---------- */
+  .six { display:grid; grid-template-columns: repeat(6, 1fr); gap:14px; }
+  .card { border:1.5px solid var(--line); border-radius:16px; padding:18px 16px 16px; background:#fff; position:relative; }
+  .card .no { width:38px; height:38px; border-radius:11px; color:#fff; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:18px; }
+  .card .n { font-size:23px; font-weight:800; margin:12px 0 8px; }
+  .card .d { font-size:14.5px; color:#334155; line-height:1.55; min-height:92px; }
+  .card .o { margin-top:12px; font-size:13px; color:var(--mute); border-top:1px dashed var(--line); padding-top:10px; line-height:1.5; }
+  .card .o b { color:var(--ink); }
+  .card:not(:last-child)::after { content:"›"; position:absolute; right:-14px; top:42%; font-size:28px; color:#94A3B8; font-weight:800; }
+  .shield { margin-top:16px; border:2px dashed #34D399; background:#ECFDF5; border-radius:14px; padding:12px 18px; font-size:16px; font-weight:700; color:var(--green); }
+  .shield span { font-weight:500; color:#065F46; }
+  .two { margin-top:14px; display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+  .two .x { border:1.5px solid var(--line); border-radius:14px; padding:12px 16px; font-size:15px; background:var(--soft); }
+  .two .x b { color:var(--blue); }
+</style>
+</head>
+<body>
+
+<section id="arch">
+  <h1>需知 · 分层架构</h1>
+  <div class="sub">四个入口共用一条流水线、一本账；规则出初稿与参考，模型做理解与估时，程序校验汇总；安全边界贯穿各层</div>
+  <div class="arch">
+    <div class="layers">
+      <div class="layer"><div class="name" style="background:#0891B2">入口层<small>人和系统怎么进来</small></div>
+        <div class="parts">
+          <div class="chip">网页工作台<small>Streamlit · 投屏演示</small></div>
+          <div class="chip">企业微信 @需知<small>长连接 · 内网免公网回调</small></div>
+          <div class="chip">REST API<small>/api/v1 · 工单系统接入</small></div>
+          <div class="chip">MCP 服务<small>AI 平台智能体 · IDE</small></div>
+        </div></div>
+      <div class="layer"><div class="name" style="background:#2563EB">编排层<small>一条流水线</small></div>
+        <div class="parts">
+          <div class="chip wide"><div class="flowline">
+            <span class="step" style="background:#059669">隐盾</span><span class="arr">→</span>
+            <span class="step" style="background:#0891B2">问清</span><span class="arr">→</span>
+            <span class="step" style="background:#0284C7">写单</span><span class="arr">→</span>
+            <span class="step" style="background:#7C3AED">估量</span><span class="arr">→</span>
+            <span class="step" style="background:#0D9488">定架</span><span class="arr">→</span>
+            <span class="step" style="background:#DB2777">出样</span>
+            <span style="margin-left:12px;color:#64748B;font-size:14px;font-weight:500">规则毫秒出初稿 → 配了模型后台增强，完成后自动刷新同一条</span></div></div>
+          <div class="chip">服务层<small>跑流水线 · 记账 · 序列化</small></div>
+          <div class="chip">后台任务<small>模型增强 · 单独估时</small></div>
+          <div class="chip">纪要直通车<small>一段纪要拆成多条</small></div>
+          <div class="chip">需求版本对比<small>每次变化存一版</small></div>
+          <div class="chip">Jira 需求评估<small>技术六维 · AI 编码工时</small></div>
+        </div></div>
+      <div class="layer"><div class="name" style="background:#7C3AED">知识层<small>三张表可换</small></div>
+        <div class="parts">
+          <div class="chip">期货追问规则<small>36 条（示例）</small></div>
+          <div class="chip">系统目录<small>13 系统 · 16 数据域 · 23 接口</small></div>
+          <div class="chip">历史需求<small>30 条 · 对账回写持续累积</small></div>
+          <div class="chip">Jira 校准样本<small>已完成工单的实际耗时</small></div>
+          <div class="chip">领域词典 · 提示词<small>品种、部门、指标…</small></div>
+        </div></div>
+      <div class="layer"><div class="name" style="background:#D97706">模型层<small>可选</small></div>
+        <div class="parts">
+          <div class="chip">公司 AI 平台<small>或任意 OpenAI 兼容网关</small></div>
+          <div class="chip">独立模型估时<small>以前 / 现在 · 逐项证据</small></div>
+          <div class="chip">问清润色 · 写单润色 · 按底稿出样</div>
+          <div class="chip">无 Key 或失败<small>规则初稿与两路参考照常可用</small></div>
+        </div></div>
+    </div>
+    <div class="sec">
+      <div class="t">安全边界</div>
+      <div class="c">隐盾<small>原话、底稿、代码摘录出站前本地脱敏，回来再还原</small></div>
+      <div class="c">sandbox.yaml<small>所有访问边界一页写清，标执行位置</small></div>
+      <div class="c">模型调用审计<small>每次调用一行，不记正文；明文敏感项应为 0</small></div>
+      <div class="c">接口默认只听本机<small>对外必须配 Token；请求体不收 Key</small></div>
+      <div class="c">不接生产库<small>代码仓库仅在主动给链接时浅读</small></div>
+    </div>
+  </div>
+  <div class="store"><span class="t">本机存储</span><span>SQLite 一个文件：一本账 · 流水 · 版本快照 · 追问记忆 · 模型调用审计；对账回写的历史样本另存 JSON。全部在本机，可导出 CSV 备查。</span></div>
+</section>
+
+<section id="flow">
+  <h1>需求分析六步法</h1>
+  <div class="sub">每一步都有可交付的产出；方法本身不依赖工具，「需知」是它的数字化载体</div>
+  <div class="six">
+    <div class="card"><div class="no" style="background:#0891B2">1</div><div class="n">问清</div>
+      <div class="d">抽出需求要素；对照期货追问规则列出待确认清单，按影响排序，附「不问会怎样」与默认假设</div>
+      <div class="o"><b>产出</b>：待确认清单 · 一键发给业务的确认消息</div></div>
+    <div class="card"><div class="no" style="background:#0284C7">2</div><div class="n">写单</div>
+      <div class="d">业务版一页纸给业务签字；技术版写用户故事、验收标准、数据字典、接口草案，条目回链原话</div>
+      <div class="o"><b>产出</b>：双版需求单（Markdown）</div></div>
+    <div class="card"><div class="no" style="background:#7C3AED">3</div><div class="n">估量</div>
+      <div class="d">模型逐项估以前 / 现在并给证据；规则模板公式公开；历史记录只作对照。三路并列不混算</div>
+      <div class="o"><b>产出</b>：工作项与小时数 · 依据与前提</div></div>
+    <div class="card"><div class="no" style="background:#0D9488">4</div><div class="n">定架</div>
+      <div class="d">数据地图把每个数据项定位到系统、数据域、接口、时效；列出要 IT 拍板的决策、选项与影响</div>
+      <div class="o"><b>产出</b>：数据地图 · 决策清单 · ADR</div></div>
+    <div class="card"><div class="no" style="background:#DB2777">5</div><div class="n">出样</div>
+      <div class="d">按需求生成可点的原型；有现成页面或代码时在原页上改；内部版、客户版、手机版一键切</div>
+      <div class="o"><b>产出</b>：可点 HTML 原型</div></div>
+    <div class="card"><div class="no" style="background:#D97706">6</div><div class="n">对账</div>
+      <div class="d">受理到交付全程记一本账，每次变化存一版；交付后回写实际工时，成为下次估算的校准样本</div>
+      <div class="o"><b>产出</b>：一本账 · 版本对比 · 经营看板</div></div>
+  </div>
+  <div class="shield">隐盾贯穿六步：<span>原话、页面底稿、代码摘录进模型前都在本地脱敏，每次模型调用留审计</span></div>
+  <div class="two">
+    <div class="x"><b>用法①</b> 零散需求 → 完整需求：微信、纪要、邮件、Word 原话进来，走完六步；一段纪要里有多条需求时先拆开</div>
+    <div class="x"><b>用法②</b> Jira 需求评估：已写好的工单给出技术六维、传统工时、AI 编码工时，并与原估对比；写单页可一键转入</div>
+  </div>
+</section>
+
+<script>
+  const id = (location.hash || '#arch').slice(1);
+  document.getElementById(id).classList.add('on');
+</script>
+</body>
+</html>

@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>需知 · 视频卡片</title>
+<style>
+  :root { --bg:#070B16; --panel:rgba(17,26,46,.78); --line:#22304F; --text:#E6ECF8; --mute:#8A97B4;
+          --cyan:#22D3EE; --blue:#4361EE; --violet:#A78BFA; --pink:#F472B6; --amber:#FBBF24; --green:#34D399; --teal:#2DD4BF; --sky:#60A5FA; --red:#F87171; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  html, body { width:1920px; height:1080px; overflow:hidden; background:var(--bg); color:var(--text);
+    font-family:-apple-system, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif; }
+  body { background:
+    radial-gradient(1200px 620px at 6% -10%, rgba(34,211,238,.16), transparent 62%),
+    radial-gradient(1000px 620px at 98% -6%, rgba(167,139,250,.18), transparent 60%),
+    radial-gradient(1100px 600px at 60% 118%, rgba(67,97,238,.16), transparent 60%),
+    linear-gradient(rgba(96,165,250,.05) 1px, transparent 1px) 0 0 / 40px 40px,
+    linear-gradient(90deg, rgba(96,165,250,.05) 1px, transparent 1px) 0 0 / 40px 40px, var(--bg); }
+  .card { position:absolute; inset:0; display:none; }
+  .card.on { display:block; }
+  @keyframes up { from { opacity:0; transform:translateY(28px); } to { opacity:1; transform:none; } }
+  @keyframes fade { from { opacity:0; } to { opacity:1; } }
+  @keyframes pop { 0% { opacity:0; transform:scale(.86); } 70% { opacity:1; transform:scale(1.03); } 100% { opacity:1; transform:scale(1); } }
+  @keyframes glow { 0%,100% { box-shadow:0 0 30px rgba(34,211,238,.35); } 50% { box-shadow:0 0 60px rgba(34,211,238,.6); } }
+  @keyframes flow { from { stroke-dashoffset: 40; } to { stroke-dashoffset: 0; } }
+  .a { opacity:0; animation:up .9s cubic-bezier(.2,.7,.2,1) forwards; }
+  .f { opacity:0; animation:fade 1s ease forwards; }
+  .p { opacity:0; animation:pop .7s cubic-bezier(.2,.7,.2,1) forwards; }
+
+  /* ---------- title ---------- */
+  #title .wrap { position:absolute; left:0; right:0; top:230px; display:flex; flex-direction:column; align-items:center; text-align:center; }
+  #title .chips { justify-content:center; max-width:1500px; }
+  #title .foot { left:0; right:0; text-align:center; }
+  .logo { width:120px; height:120px; border-radius:30px; display:flex; align-items:center; justify-content:center;
+    font-size:62px; font-weight:800; color:#fff; background:linear-gradient(135deg,#22D3EE,#4361EE 55%,#A78BFA); }
+  .logo.p { animation: pop .7s cubic-bezier(.2,.7,.2,1) forwards, glow 3s ease-in-out 1s infinite; }
+  .brand { display:flex; align-items:center; gap:36px; }
+  .name { font-size:112px; font-weight:800; letter-spacing:14px; line-height:1;
+    background:linear-gradient(90deg,#E6ECF8,#9BE7F7 55%,#C4B5FD); -webkit-background-clip:text; background-clip:text; color:transparent; }
+  .en { font-size:26px; letter-spacing:4px; color:var(--mute); margin-top:14px; }
+  .slogan { font-size:46px; font-weight:650; margin-top:70px; color:#DCE6FA; letter-spacing:2px; }
+  .chips { display:flex; flex-wrap:wrap; gap:16px; margin-top:54px; }
+  .chip { --c:#22D3EE; display:inline-flex; gap:10px; align-items:center; padding:10px 20px; border-radius:999px; font-size:24px;
+    color:#DCE4F5; background:color-mix(in srgb, var(--c) 13%, transparent); border:1.5px solid color-mix(in srgb, var(--c) 50%, transparent); }
+  .chip b { color:var(--c); }
+  .foot { position:absolute; left:160px; bottom:90px; font-size:22px; color:var(--mute); letter-spacing:1px; }
+
+  /* ---------- pain ---------- */
+  #pain .h { position:absolute; left:140px; top:110px; font-size:58px; font-weight:800; letter-spacing:2px; }
+  #pain .h span { color:var(--amber); }
+  .phone { position:absolute; left:140px; top:250px; width:760px; height:680px; border-radius:36px; background:#0E1626;
+    border:1.5px solid var(--line); box-shadow:0 30px 80px rgba(0,0,0,.5); overflow:hidden; }
+  .phone .bar { height:76px; display:flex; align-items:center; padding:0 30px; font-size:24px; color:#C7D2E8; border-bottom:1px solid var(--line); background:#111A2E; }
+  .phone .bar small { color:var(--mute); margin-left:14px; font-size:18px; }
+  .msg { display:flex; gap:18px; padding:28px 30px 0; }
+  .ava { flex:none; width:58px; height:58px; border-radius:14px; background:linear-gradient(135deg,#F472B6,#A78BFA); display:flex; align-items:center; justify-content:center; font-weight:800; font-size:24px; color:#fff; }
+  .bubble { background:#1B2740; border:1px solid #2A3A5E; border-radius:6px 22px 22px 22px; padding:18px 22px; font-size:27px; line-height:1.6; color:#E6ECF8; }
+  .msg.me { justify-content:flex-end; }
+  .bubble.mine { background:#123047; border-color:#1F5A73; border-radius:22px 6px 22px 22px; }
+  .bubble mark { background:rgba(251,191,36,.18); color:#FDE68A; padding:0 4px; border-radius:6px; }
+  .pains { position:absolute; left:990px; top:270px; right:140px; display:flex; flex-direction:column; gap:30px; }
+  .pain { background:var(--panel); border:1.5px solid var(--line); border-radius:22px; padding:28px 32px; display:flex; gap:26px; align-items:flex-start; }
+  .pain .n { flex:none; width:64px; height:64px; border-radius:18px; display:flex; align-items:center; justify-content:center; font-size:30px; font-weight:800; color:#0B1222; }
+  .pain .t { font-size:34px; font-weight:750; }
+  .pain .d { font-size:24px; color:var(--mute); margin-top:8px; line-height:1.5; }
+
+  /* ---------- close ---------- */
+  #close .h { position:absolute; left:0; right:0; top:110px; text-align:center; font-size:56px; font-weight:800; letter-spacing:3px; }
+  .lanes { position:absolute; left:150px; right:150px; top:250px; display:grid; grid-template-columns: 1fr 120px 1.1fr 120px 1fr; align-items:center; }
+  .col { display:flex; flex-direction:column; gap:22px; }
+  .ent { background:var(--panel); border:1.5px solid var(--line); border-radius:18px; padding:20px 26px; font-size:30px; font-weight:700; display:flex; gap:16px; align-items:center; }
+  .ent i { font-style:normal; width:46px; height:46px; border-radius:12px; display:inline-flex; align-items:center; justify-content:center; font-size:24px; color:#0B1222; font-weight:800; }
+  .core { background:linear-gradient(135deg, rgba(34,211,238,.16), rgba(167,139,250,.16)); border:2px solid rgba(34,211,238,.55); border-radius:26px; padding:34px 30px; text-align:center; }
+  .core .t { font-size:38px; font-weight:800; }
+  .core .s { font-size:23px; color:#C7D2E8; margin-top:16px; line-height:1.6; }
+  .ledger { background:var(--panel); border:2px solid rgba(251,191,36,.55); border-radius:26px; padding:34px 30px; text-align:center; }
+  .ledger .t { font-size:38px; font-weight:800; color:var(--amber); }
+  .ledger .s { font-size:23px; color:#C7D2E8; margin-top:16px; line-height:1.6; }
+  svg.arrow { width:120px; height:60px; }
+  svg.arrow path { stroke:#22D3EE; stroke-width:4; fill:none; stroke-dasharray:10 10; animation:flow 1s linear infinite; }
+  .copy { position:absolute; left:150px; right:150px; top:760px; display:flex; justify-content:center; gap:22px; font-size:28px; color:#C7D2E8; }
+  .copy b { color:var(--text); }
+  .copy .k { padding:10px 22px; border-radius:999px; border:1.5px solid var(--line); background:rgba(15,23,42,.7); }
+  .end { position:absolute; left:0; right:0; bottom:110px; text-align:center; font-size:60px; font-weight:800; letter-spacing:6px;
+    background:linear-gradient(90deg,#9BE7F7,#E6ECF8 50%,#C4B5FD); -webkit-background-clip:text; background-clip:text; color:transparent; }
+  .cut { position:absolute; right:60px; bottom:40px; font-size:20px; color:var(--mute); }
+</style>
+</head>
+<body>
+
+<section class="card" id="title">
+  <div class="wrap">
+    <div class="brand">
+      <div class="logo p" style="animation-delay:.1s">需</div>
+      <div>
+        <div class="name a" style="animation-delay:.35s">需知</div>
+        <div class="en a" style="animation-delay:.55s">XuZhi · 需求分析智能体</div>
+      </div>
+    </div>
+    <div class="slogan a" style="animation-delay:1.0s">一堆话进来，一份能开工的需求出去。</div>
+    <div class="chips">
+      <span class="chip a" style="--c:#22D3EE;animation-delay:1.5s"><b>问清</b>先问清，再开工</span>
+      <span class="chip a" style="--c:#60A5FA;animation-delay:1.65s"><b>写单</b>业务版 · 技术版</span>
+      <span class="chip a" style="--c:#A78BFA;animation-delay:1.8s"><b>估量</b>有依据的工时</span>
+      <span class="chip a" style="--c:#2DD4BF;animation-delay:1.95s"><b>定架</b>拍板什么 · 数据从哪取</span>
+      <span class="chip a" style="--c:#F472B6;animation-delay:2.1s"><b>出样</b>看得见的需求</span>
+      <span class="chip a" style="--c:#FBBF24;animation-delay:2.25s"><b>对账</b>估了多少 · 实际多少</span>
+      <span class="chip a" style="--c:#34D399;animation-delay:2.4s"><b>隐盾</b>进模型前脱敏</span>
+    </div>
+  </div>
+  <div class="foot f" style="animation-delay:2.8s">「智创未来」AI 创新应用大赛 · 团队赛 Demo ｜ 演示所用需求、系统与数据全部虚构</div>
+</section>
+
+<section class="card" id="pain">
+  <div class="h a" style="animation-delay:.1s">业务同事的<span>三句话</span>，技术部要问三天</div>
+  <div class="phone a" style="animation-delay:.4s">
+    <div class="bar">资管运营 · 小周<small>企业微信 · 周二 15:40（虚构）</small></div>
+    <div class="msg">
+      <div class="ava">周</div>
+      <div class="bubble">净值日报能不能加一列<mark>"较上一交易日变动"</mark>，就放在单位净值旁边。然后<mark>风险指标</mark>也放进去，回撤、集中度那几个。周五给客户的那版也要，<mark>客户版</mark>你看着把不该给的去掉。最好下周就能用。</div>
+    </div>
+    <div class="msg me a" style="animation-delay:1.2s">
+      <div class="bubble mine">收到。先确认几件事：变动按结算价还是收盘价？夜盘算哪天？客户版要去掉哪些字段？风险指标要哪几个？</div>
+      <div class="ava" style="background:linear-gradient(135deg,#22D3EE,#4361EE)">技</div>
+    </div>
+    <div class="msg a" style="animation-delay:2.6s">
+      <div class="ava">周</div>
+      <div class="bubble">结算价吧……夜盘我问问风控，字段明天给你。</div>
+    </div>
+  </div>
+  <div class="pains">
+    <div class="pain a" style="animation-delay:1.6s"><div class="n" style="background:#22D3EE">1</div>
+      <div><div class="t">澄清靠多轮微信</div><div class="d">口语需求缺口径、缺范围，来回确认，开工后才发现漏项</div></div></div>
+    <div class="pain a" style="animation-delay:3.2s"><div class="n" style="background:#A78BFA">2</div>
+      <div><div class="t">工时靠经验估</div><div class="d">没有拆分与依据，排期反复调整；AI 协同后的投入更说不清</div></div></div>
+    <div class="pain a" style="animation-delay:4.8s"><div class="n" style="background:#FBBF24">3</div>
+      <div><div class="t">期货口径最容易漏</div><div class="d">结算时点 · 夜盘归属 · 主力切换 · 限仓口径 · 客户版脱敏</div></div></div>
+  </div>
+</section>
+
+<section class="card" id="close">
+  <div class="h a" style="animation-delay:.1s">四个入口，一条流水线，一本账</div>
+  <div class="lanes">
+    <div class="col">
+      <div class="ent a" style="animation-delay:.5s"><i style="background:#22D3EE">网</i>网页工作台</div>
+      <div class="ent a" style="animation-delay:.7s"><i style="background:#34D399">企</i>企业微信 @需知</div>
+      <div class="ent a" style="animation-delay:.9s"><i style="background:#60A5FA">R</i>REST API</div>
+      <div class="ent a" style="animation-delay:1.1s"><i style="background:#A78BFA">M</i>MCP（智能体 / IDE）</div>
+    </div>
+    <svg class="arrow f" style="animation-delay:1.3s" viewBox="0 0 120 60"><path d="M6 30 H104 M90 16 L106 30 L90 44"/></svg>
+    <div class="core p" style="animation-delay:1.5s">
+      <div class="t">隐盾 → 六步流水线</div>
+      <div class="s">问清 · 写单 · 估量 · 定架 · 出样<br>规则秒出初稿，模型后台增强</div>
+    </div>
+    <svg class="arrow f" style="animation-delay:1.8s" viewBox="0 0 120 60"><path d="M6 30 H104 M90 16 L106 30 L90 44"/></svg>
+    <div class="ledger p" style="animation-delay:2.0s">
+      <div class="t">一本账</div>
+      <div class="s">受理 → 确认 → 开发<br>→ 交付 → 对账<br>实际工时回流成校准样本</div>
+    </div>
+  </div>
+  <div class="copy">
+    <span class="k a" style="animation-delay:2.6s">换三张表即可复制：<b>追问规则</b></span>
+    <span class="k a" style="animation-delay:2.8s"><b>系统目录</b></span>
+    <span class="k a" style="animation-delay:3.0s"><b>历史需求</b></span>
+  </div>
+  <div class="end a" style="animation-delay:3.6s">需知 · 先问清，再开工</div>
+</section>
+
+<script>
+  const id = (location.hash || '#title').slice(1);
+  document.getElementById(id).classList.add('on');
+</script>
+</body>
+</html>
