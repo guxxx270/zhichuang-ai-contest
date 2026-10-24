@@ -87,6 +87,24 @@ def test_header_department_does_not_override_each_requester():
     assert [s.requester for s in split_requirements(intro)] == ["风控部", "风控部"]
 
 
+def test_item_naming_an_unlisted_department_keeps_its_own_requester():
+    # 「结算部」不在部门词典里：本条不借上一条的资管部，也不在原话前写上错的「提出方」
+    email = ("主题：关于两项系统需求\n各位好，\n第一件事，资管部希望净值日报能自动发到投资经理邮箱，每天早上 8 点前。\n"
+             "第二件事，结算部需要一个保证金追加通知的导出功能，按客户导出 Excel。\n谢谢")
+    first, second = split_requirements(email)
+    assert (first.requester, second.requester) == ("资管部", "结算部")
+    assert "资管部" not in second.text and second.title_hint.startswith("保证金追加通知")
+    assert analyze(second.text, llm_polish=False).card.requester != "资管部"
+    # 名字里带词典部门的按词典口径，照样压过头部点名的部门；「我们部门 / 全部」这类不算点名
+    branch = ("来源：资管部周会纪要\n1. 上海营业部提出：开户进度要能按营业部查询，每天更新。\n"
+              "2. 产品净值异常波动要自动提醒投资经理，每天结算后检查。")
+    segs = split_requirements(branch)
+    assert [s.requester for s in segs] == ["营业部", "资管部"]
+    assert [analyze(s.text, llm_polish=False).card.requester for s in segs] == ["营业部", "资管部"]
+    ours = branch.replace("上海营业部提出：", "我们部门需要：")
+    assert [s.requester for s in split_requirements(ours)] == ["资管部", "资管部"]
+
+
 def test_cap_and_min_segments():
     many = "来源：技术部周会纪要\n" + "\n".join(f"{i}. 风控部提出：能不能做个第{i}号监控页面，每天结算后自动更新指标。" for i in range(1, 11))
     segs = split_requirements(many)

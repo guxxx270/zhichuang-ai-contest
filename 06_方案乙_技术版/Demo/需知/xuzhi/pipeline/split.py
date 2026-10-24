@@ -35,8 +35,12 @@ _INTRO = re.compile(r"(?:[：:]|如下)\s*$")   # 「要求如下：」后面不
 _DEPT_OF = dict(textutil.DEPARTMENTS)
 _DEPT_KEYS = "|".join(sorted((re.escape(k) for k in _DEPT_OF), key=len, reverse=True))
 # 部门（+ 人）+ 提出 / 希望 / 冒号；「补充」不算换人，「提醒 / 提示」不是「提」
-_LEAD = re.compile(rf"^(?P<dept>{_DEPT_KEYS})[^，,。；;！!？?：:]{{0,12}}?\s*"
-                   r"(?:提出|希望|反馈|反映|要求|表示|建议|想要|想|需要|提(?![醒示供交前高升])|说|问|(?=[：:]))")
+_SAYS = r"[^，,。；;！!？?：:]{0,12}?\s*(?:提出|希望|反馈|反映|要求|表示|建议|想要|想|需要|提(?![醒示供交前高升])|说|问|(?=[：:]))"
+_LEAD = re.compile(rf"^(?P<dept>{_DEPT_KEYS}){_SAYS}")
+# 词典外的部门开头（「结算部需要」「上海营业部提出：」）：本条自己点了提出方，不再借上一条 / 小节 / 头部的。
+# 部门名前至少两个字（「全部 / 内部」不算），「业务部门 / 相关部门」这类泛称也不算
+_UNIT_LEAD = re.compile(rf"^(?!我们|你们|他们|咱们)(?P<unit>[\u4e00-\u9fff]{{2,6}}?部)(?![门分]){_SAYS}")
+_KNOWN = set(_DEPT_OF.values())   # extract_card 认得出的提出方
 _FILLER = re.compile(r"^(?:对了|然后|同时|其次|最后|另外|此外|还有|再就是|顺便)[，,、\s]*")
 
 _CUE_STRONG = re.compile(r"^(?:(?:还有|另外|另|再)(?:一|有一)?(?:件|个)(?:事情|事|需求)"
@@ -60,7 +64,7 @@ class Segment:
     text: str           # 头部元信息 + 本条正文，可直接交给 analyze()
     body: str           # 本条正文
     title_hint: str     # 预览（≤ 30 字）
-    requester: str      # 本条提出方：开头点名的部门；没点名的沿用小节标题 / 开场白 / 头部，最后才看段内其它位置
+    requester: str      # 本条提出方：开头点名的部门（词典外的照原话）；没点名的沿用小节标题 / 开场白 / 头部，最后才看段内其它位置
     reason: str         # 为什么在这里切：首段 / 编号条目 / 提出方切换 / 连接词
 
 
@@ -75,6 +79,7 @@ class _Piece:
 class _Chunk:
     kind: str           # 首段 / 编号条目 / 提出方切换 / 连接词 / 小标题
     lead: str = ""
+    unit: str = ""          # 开头点了词典外的部门：本条自己的提出方，不借别处的
     pieces: list[_Piece] = field(default_factory=list)
     has_req: bool = False   # 已经有像需求的句子（逐句累计，长文不必反复重扫）
     multi: bool = False     # 说了「两件事 / 以下三个需求」
@@ -97,6 +102,12 @@ def _lead(s: str) -> str:
     """句首「部门（+ 人）+ 提出 / 希望 / ：」→ 提出方；没有返回空。"""
     m = _LEAD.match(_FILLER.sub("", s.strip(), count=1))
     return _DEPT_OF[m.group("dept")] if m else ""
+
+
+def _unit(s: str) -> str:
+    """句首点了词典外的部门 → 该部门（名字里带词典部门的按词典口径：上海营业部 → 营业部）；没有返回空。"""
+    m = _UNIT_LEAD.match(_FILLER.sub("", s.strip(), count=1))
+    return (_dept_in(m.group("unit")) or m.group("unit")) if m else ""
 
 
 def _size(s: str) -> int:
@@ -163,7 +174,7 @@ def source_hint(text: str) -> str:
 def _title_hint(body: str, limit: int = 30) -> str:
     sents = _req_sentences(body) or textutil.sentences(body) or [body]
     s = _CUE_STRONG.sub("", sents[0], count=1)
-    m = _LEAD.match(s)
+    m = _LEAD.match(s) or _UNIT_LEAD.match(s)
     if m:
         s = s[m.end():]
     s = textutil.clean_feature(s.lstrip("：:，, "))
@@ -200,6 +211,8 @@ def _chunks(body_lines: list[str], gated: bool, head_dept: str) -> list[_Chunk]:
                     kind, lead = "连接词", lead or _lead(core[weak.end():])
         if kind or cur is None:
             cur = _Chunk(kind or "首段", lead if kind != "小标题" else "")
+            if kind != "小标题" and not cur.lead:
+                cur.unit = _unit(_CUE_WEAK.sub("", _CUE_STRONG.sub("", core, count=1), count=1))
             chunks.append(cur)
         cur.pieces.append(p)
         cur.has_req = cur.has_req or bool(_req_sentences(s))
@@ -246,13 +259,13 @@ def split_requirements(text: str, *, min_segments: int = 2, max_segments: int = 
         is_req = bool(_req_sentences(body)) and _size(body) >= MIN_CHARS
         if is_req and (chunk.kind in ("首段", "连接词") or not found or _standalone(body)):
             # 段内别处出现的部门多是收件人（「提醒客户经理」），排在头部之后
-            requester = (chunk.lead or (found[-1]["requester"] if chunk.kind == "连接词" and found else "")
+            requester = (chunk.lead or chunk.unit or (found[-1]["requester"] if chunk.kind == "连接词" and found else "")
                          or context or head_dept or _dept_in(body))
             found.append({"body": body, "requester": requester, "reason": chunk.kind})
         elif found and (_req_sentences(body) or chunk.kind in ("提出方切换", "连接词")):
             found[-1]["body"] += "\n" + body   # 太短、是上一条的要点或补充：并回上一条
         elif not found and chunk.kind != "小标题":
-            context = chunk.lead or _dept_in(body) or context   # 开场白「风控部提出两件事：」「以下是研究所的需求」
+            context = chunk.lead or chunk.unit or _dept_in(body) or context   # 开场白「风控部提出两件事：」「以下是研究所的需求」
         # 其余（背景、参会、决议、落款）不进任何一条
 
     if len(found) < min_segments:
@@ -261,8 +274,8 @@ def split_requirements(text: str, *, min_segments: int = 2, max_segments: int = 
     for i, item in enumerate(found[:max_segments], 1):
         body, requester = item["body"].strip(), item["requester"]
         seg_text = head_text + ("\n\n" if head_text else "") + body
-        if requester and _dept_in(seg_text) != requester:
-            # 头部点名的部门会抢在本条前面被认成提出方：首行写明本条提出方
+        if requester in _KNOWN and _dept_in(seg_text) != requester:
+            # 头部点名的部门会抢在本条前面被认成提出方：首行写明本条提出方（词典外的部门认不出，写了也没用，不写）
             seg_text = f"提出方：{_dept_key(requester)}\n" + seg_text
         reason = item["reason"] if item["reason"] != "小标题" else "编号条目"
         out.append(Segment(i, seg_text, body, _title_hint(body), requester, reason))
