@@ -80,6 +80,36 @@ def _pct(rng: random.Random, lo=-3.0, hi=3.0) -> str:
     return f'<span class="{cls}">{v:+.2f}%</span>'
 
 
+def _column_edits(card: Card, demand_text: str = "") -> tuple[list[str], list[tuple[str, str]]]:
+    """原话里要删的列、要改名的列（与底稿改表同一套抽取）。"""
+    from .. import textutil as _tu
+
+    to_del: list[str] = []
+    to_rename: list[tuple[str, str]] = []
+    for snip in _demand_snippets(card, demand_text):
+        for col in _tu.find_removed_columns(snip):
+            _tu.merge_label(to_del, col)
+        for pair in _tu.find_renamed_columns(snip):
+            if not any(_tu.same_label(pair[0], a) and _tu.same_label(pair[1], b) for a, b in to_rename):
+                to_rename.append(pair)
+    return to_del, to_rename
+
+
+def _apply_column_edits(order: list[tuple[str, int | None]], to_del: list[str],
+                        to_rename: list[tuple[str, str]]) -> tuple[list[tuple[str, int | None]], dict[str, str]]:
+    """模板表头上落实删列 / 改名（先改名再删，与 _mutate_draft_table 一致）；返回新表头与 新名→原名，造数仍按原指标。"""
+    names = [h for h, _s in order]
+    renamed: dict[str, str] = {}
+    for old, new in to_rename:
+        idx = _match_header_index(names, old)
+        if idx is None or (new in names and names[idx] != new):
+            continue
+        renamed[new] = renamed.pop(names[idx], names[idx])
+        names[idx] = new
+    drop = {idx for idx in (_match_header_index(names, d) for d in to_del) if idx}   # 第一列是行维度，不删
+    return [(h, s) for i, (h, (_old, s)) in enumerate(zip(names, order)) if i not in drop], renamed
+
+
 def _report_or_page(card: Card, rng: random.Random, client_view: bool, demand_text: str = "") -> str:
     from .. import textutil as _tu
     from .intake import looks_futures_domain
@@ -90,16 +120,24 @@ def _report_or_page(card: Card, rng: random.Random, client_view: bool, demand_te
     for snip in _demand_snippets(card, demand_text):
         for col in _tu.find_added_columns(snip):
             _tu.merge_label(inds, col)
-    by_product = bool(card.scope_objects)
-    key = "名称"
-    keys = list(card.symbols or card.scope_objects or [])[:6] or [f"对象{i}" for i in range(1, 5)]
+    # 非期货：行按原话里的对象（客户 → 客户A / 客户B），不用「只」和结算时点
+    objs = [o.split("（")[0] for o in card.scope_objects]
+    if "客户" in objs:
+        key, keys = "客户", [f"客户{c}" for c in "ABCD"]
+    elif "资管产品" in objs:
+        key, keys = "产品", _PRODUCTS[:4]
+    elif objs:
+        key, keys = objs[0], [f"{objs[0]}{c}" for c in "ABCD"]
+    else:
+        key, keys = "名称", list(card.symbols or [])[:6] or [f"对象{i}" for i in range(1, 5)]
     if not inds:
         inds = ["数值"]
     headers: list[str] = [key]
     for h in inds:
         if h and h not in headers:
             headers.append(h)
-    headers = headers[:8]
+    to_del, to_rename = _column_edits(card, demand_text)
+    headers = [h for h, _s in _apply_column_edits([(h, i) for i, h in enumerate(headers)], to_del, to_rename)[0]][:8]
     if client_view:
         headers = [h for h in headers if h not in _HIDE_CLIENT]
     rows = []
@@ -109,8 +147,8 @@ def _report_or_page(card: Card, rng: random.Random, client_view: bool, demand_te
             r.append(_fake_like_neighbors(r, rng))
         rows.append(r)
     kpis = "".join(f'<div class="xz-kpi"><div class="n">{v}</div><div class="l">{l}</div></div>' for v, l in
-                   ((f"{len(keys)} 只" if by_product else f"{len(keys)} 个", f"{key}范围"), ("T+1 16:45", "数据时点（结算后）"),
-                    (f"{rng.randint(0, 3)}", "今日异常项"), ("已脱敏" if client_view else "内部版", "版本")))
+                   ((f"{len(keys)} 个", "记录数（示例）"), (date.today().isoformat(), "更新时间"),
+                    ("已脱敏" if client_view else "内部版", "版本")))
     chips = "".join(f'<span class="tag">{html.escape(f[:20])}</span>' for f in card.features[:5])
     bar = (f'<div class="xz-bar"><input type="date"><select><option>全部{key}</option>' + "".join(f"<option>{k}</option>" for k in keys[:6]) + "</select>"
            + '<button class="xz-btn">查询</button><button class="xz-btn ghost">导出</button></div>')
@@ -127,31 +165,43 @@ def _futures_report(card: Card, rng: random.Random, client_view: bool, demand_te
     key = "产品" if by_product else "品种"
     keys = list(_PRODUCTS if by_product else card.symbols)[:6]
     wanted = _wanted_columns(card, demand_text)
+    inds = list(card.indicators or (["单位净值", "回撤"] if by_product else ["涨跌幅", "持仓量"]))
+    if "期现价差" in _demand_blob(card, demand_text):
+        # 期现价差就是基差：并成一列，并把算基差用的现货价、主力合约价和基差率摆出来
+        inds = [i for i in inds if i != "价差"]
+        if "基差" not in inds:
+            inds.insert(0, "基差")
+        j = inds.index("基差")
+        inds[j:j + 1] = ["现货价", "主力合约价", "基差", "基差率"]
     order: list[tuple[str, int | None]] = [(key, 0)]
-    for h in card.indicators or (["单位净值", "回撤"] if by_product else ["涨跌幅", "持仓量"]):
+    for h in inds:
         if not _tu.has_label([x for x, _ in order] + [c for c, _a in wanted], h):   # 点名新增的列另排，不算原有列
             order.append((h, len(order)))
     for c, a in wanted:
         if not _tu.has_label([x for x, _ in order], c):
             _insert_after_anchor(order, c, a)
+    order, renamed = _apply_column_edits(order, *_column_edits(card, demand_text))   # 没有底稿时也落实删列 / 改名
     if client_view:
         order = [(h, s) for h, s in order if h not in _HIDE_CLIENT]
     order = order[:9]
     fresh = {h for h, s in order if s is None}
     bench, bench_move = _pick_benchmark(card), _pct(rng, -1.2, 1.2)
-    rows = [[k] + [_fake_cell(h, rng, bench, bench_move) for h, _s in order[1:]] for k in keys]
+    rows = [_basis_consistent([k] + [_fake_cell(renamed.get(h, h), rng, bench, bench_move) for h, _s in order[1:]],
+                              [h for h, _s in order], rng) for k in keys]
     th = "".join(
         f'<th style="background:#fff1e0;color:#9a3412">{html.escape(h)} <span class="tag md">新增</span></th>' if h in fresh
         else f"<th>{html.escape(h)}</th>" for h, _s in order)
     trs = "".join("<tr>" + "".join(f"<td>{c}</td>" for c in r) + "</tr>" for r in rows)
     table = f'<table class="xz"><thead><tr>{th}</tr></thead><tbody>{trs}</tbody></table>'
+    # 按钮和 KPI 跟着频率走：周报不写「订阅每日推送」「今日异常项」
+    every, this = {"每周": ("每周", "本周"), "每月": ("每月", "本月")}.get(card.frequency, ("每日", "今日"))
     kpis = "".join(f'<div class="xz-kpi"><div class="n">{v}</div><div class="l">{l}</div></div>' for v, l in (
         (f"{len(keys)} 只" if by_product else f"{len(keys)} 个", f"{key}范围（示例）"), ("T+1 16:45", "数据时点（结算后）"),
-        (f"{rng.randint(1, 3)}", "今日异常项"), ("客户版 · 已脱敏" if client_view else "内部版", "版本")))
+        (f"{rng.randint(1, 3)}", f"{this}异常项"), ("客户版 · 已脱敏" if client_view else "内部版", "版本")))
     bar = (f'<div class="xz-bar"><input type="date" value="{date.today().isoformat()}"><select><option>全部{key}</option>'
            + "".join(f"<option>{html.escape(k)}</option>" for k in keys) + "</select>"
            + '<button class="xz-btn">查询</button><button class="xz-btn ghost">导出 Excel</button>'
-           + '<button class="xz-btn ghost">订阅每日推送</button></div>')
+           + f'<button class="xz-btn ghost">订阅{every}推送</button></div>')
     notes = []
     if fresh:
         notes.append("橙色表头为本次需求新增的列")
@@ -435,19 +485,81 @@ def _feature_prototype(card: Card, rng: random.Random, client_view: bool = False
 """
 
 
-def _alerts(card: Card, rng: random.Random) -> str:
-    syms = card.symbols or [f"对象{i}" for i in range(1, 4)]
+def _alerts(card: Card, rng: random.Random, futures: bool = True) -> str:
+    """提醒列表：文案按原话的指标与对象写；非期货需求不出现夜盘、价格异动。"""
+    objs = [o.split("（")[0] for o in card.scope_objects]
+    if futures:
+        names = card.symbols or (_PRODUCTS[:3] if "资管产品" in objs else [f"对象{i}" for i in range(1, 4)])
+    else:
+        names = [f"{objs[0]}{c}" for c in "ABC"] if objs else [f"对象{i}" for i in range(1, 4)]
+    channel = next((c for c in card.channels if c in ("企业微信", "邮件", "短信")), "企业微信")
+    metric = card.indicators[0] if card.indicators else ("价格" if futures else "提醒条件")
     items = []
     levels = [("hi", "高"), ("md", "中"), ("lo", "低")]
     for i in range(5):
-        s = syms[i % len(syms)]
+        s = html.escape(names[i % len(names)])
         lv = levels[i % 3]
+        if futures and metric in ("价格", "基差", "价差", "涨跌幅"):
+            what = f"{html.escape(metric)}异动 {rng.uniform(1, 4):+.1f}%，超过阈值；已推送{channel}，30 分钟内不重复"
+        elif futures:
+            what = f"{html.escape(metric)}触发阈值（示例值 {rng.uniform(5, 95):.1f}）；已推送{channel}，30 分钟内不重复"
+        else:
+            what = f"满足{html.escape(metric)}；已推送{channel}，同一事项当天不重复提醒"
         items.append(f'<div class="alert"><span class="t">09:{30 + i * 7:02d}</span><span class="tag {lv[0]}">{lv[1]}</span>'
-                     f'<div><b>{s}</b> {"基差" if "基差" in card.indicators else "价格"}异动 {rng.uniform(1, 4):+.1f}%，超过阈值；已推送企业微信，30 分钟内不重复</div></div>')
-    settings = ('<div class="card"><b>提醒设置</b><div class="xz-bar" style="margin-top:8px"><span>阈值</span><input value="2.0%" size="6">'
-                '<span>渠道</span><select><option>企业微信</option><option>邮件</option></select><span>夜盘</span><select><option>只推高等级</option><option>全部</option><option>不推</option></select>'
-                '<button class="xz-btn">保存</button></div></div>')
+                     f'<div><b>{s}</b> {what}</div></div>')
+    options = "".join(f"<option>{c}</option>" for c in dict.fromkeys([channel, "企业微信", "邮件"]))
+    if futures:
+        extra = '<span>夜盘</span><select><option>只推高等级</option><option>全部</option><option>不推</option></select>'
+        limit = '<span>阈值</span><input value="2.0%" size="6">'
+    else:
+        extra = '<span>提前</span><select><option>当天</option><option>提前 1 天</option><option>提前 3 天</option></select>'
+        limit = '<span>提醒条件</span><input value="按业务规则" size="10">'
+    settings = (f'<div class="card"><b>提醒设置</b><div class="xz-bar" style="margin-top:8px">{limit}'
+                f'<span>渠道</span><select>{options}</select>{extra}<button class="xz-btn">保存</button></div></div>')
     return settings + "".join(items)
+
+
+_CONTRACT_CODES = {"螺纹钢": "rb", "热轧卷板": "hc", "铁矿石": "i", "焦炭": "j", "焦煤": "jm", "沪铜": "cu", "沪铝": "al",
+                   "豆粕": "m", "原油": "sc", "黄金": "au", "甲醇": "MA", "PTA": "TA"}
+
+
+def _pretrade_check(card: Card, rng: random.Random) -> str:
+    """下单前限仓校验：输入产品 / 合约 / 方向 / 拟下单手数，看下单后占用、还可下手数和状态（假数据）。"""
+    today = date.today()
+    syms = card.symbols or ["螺纹钢", "铁矿石", "沪铜", "豆粕"]
+    rows = []
+    for i, sym in enumerate(syms[:4]):
+        month = (today.month + i) % 12 + 1          # 第一行是下个月交割：落在交割月前一个月，限仓收紧
+        year = today.year + (1 if month <= today.month else 0)
+        contract = f"{_CONTRACT_CODES.get(sym, 'X')}{year % 100:02d}{month:02d}"
+        near = i == 0
+        ex_limit = rng.choice([300, 500, 800]) // (3 if near else 1)
+        co_limit = int(ex_limit * rng.uniform(0.7, 1.0))
+        limit = min(ex_limit, co_limit)
+        pos = int(limit * rng.uniform(0.5, 0.95))
+        qty = rng.choice([20, 50, 100])
+        after = pos + qty
+        left = max(0, limit - pos)
+        status = ('<span class="tag hi">超限</span>' if after > limit
+                  else '<span class="tag md">临近</span>' if after >= limit * 0.8 else '<span class="tag lo">正常</span>')
+        mark = ' <span class="tag md">交割月前一月</span>' if near else ""
+        rows.append([html.escape(_PRODUCTS[i % len(_PRODUCTS)]), contract + mark, rng.choice(["买开", "卖开"]), str(pos),
+                     str(ex_limit), str(co_limit), str(qty), f"{after / limit * 100:.0f}%", f"<b>{left}</b>", status])
+    first = rows[0]
+    form = ('<div class="xz-bar"><select>' + "".join(f"<option>{html.escape(p)}</option>" for p in _PRODUCTS[:4]) + "</select>"
+            f'<input value="{first[1].split(" ")[0]}" size="8" placeholder="合约"><select><option>买开</option><option>卖开</option></select>'
+            '<input value="100" size="6" placeholder="拟下单手数"><button class="xz-btn">下单前校验</button></div>')
+    kpis = "".join(f'<div class="xz-kpi"><div class="n">{v}</div><div class="l">{l}</div></div>' for v, l in (
+        (first[8].replace("<b>", "").replace("</b>", "") + " 手", "还可下（取最严口径）"), (first[7], "下单后占用"),
+        ("交易所 / 公司", "限仓口径"), ("仅提示不阻断", "首版方式")))
+    table = _table(["产品", "合约", "方向", "当前持仓（手）", "交易所限仓", "公司限额", "拟下单（手）", "下单后占用", "还可下（手）", "状态"], rows)
+    settings = ('<div class="card"><b>提醒设置</b><div class="xz-bar" style="margin-top:8px"><span>临近阈值</span><input value="80%" size="5">'
+                '<span>提示方式</span><select><option>下单界面弹窗</option><option>企业微信</option></select>'
+                '<span>超限时</span><select><option>仅提示</option><option>阻断（需交易系统改造）</option></select>'
+                '<button class="xz-btn">保存</button></div></div>')
+    foot = ('<div class="foot">口径：交易所限仓与公司风控限额同时计算，取最严者；还可下 = 限额 − 当前持仓；'
+            '进入交割月前一个月的合约限仓收紧，已打标。数据均为示例。</div>')
+    return form + f'<div class="xz-kpis">{kpis}</div>' + table + foot + settings
 
 
 def _impact(card: Card, rng: random.Random) -> str:
@@ -522,7 +634,23 @@ def _fake_cell(ind: str, rng: random.Random, bench: str, bench_move: str) -> str
         return f"{html.escape(bench)} {bench_move}"
     if "盈亏" in ind or "超额" in ind:
         return _pct(rng, -2.5, 2.5)
+    if ind.endswith("率"):
+        return f"{rng.uniform(-3, 4):+.2f}%"
+    if ind.endswith("价"):
+        return f"{rng.uniform(2500, 5000):,.0f}"
     return f"{rng.uniform(10, 90):.1f}"
+
+
+def _basis_consistent(row: list[str], headers: list[str], rng: random.Random) -> list[str]:
+    """同一行的现货价、主力合约价、基差、基差率互相对得上（基差 = 现货价 − 主力合约价）。"""
+    need = ("现货价", "主力合约价", "基差", "基差率")
+    if not all(h in headers for h in need):
+        return row
+    spot = rng.uniform(2500, 5000)
+    basis = rng.uniform(-120, 180)
+    fut = spot - basis
+    values = {"现货价": f"{spot:,.0f}", "主力合约价": f"{fut:,.0f}", "基差": f"{basis:+.0f}", "基差率": f"{basis / fut * 100:+.2f}%"}
+    return [values.get(h, c) for h, c in zip(headers, row)]
 
 
 def _inject_banner(html_src: str, card: Card, draft: Draft, added: list[str], *, focus_note: str = "") -> str:
@@ -711,10 +839,10 @@ def _demand_blob(card: Card, demand_text: str = "") -> str:
 
 
 def _demand_snippets(card: Card, demand_text: str = "") -> list[str]:
-    """分条文本，避免拼成 blob 后「加一列X」把后面词吞进列名。"""
+    """分条文本，避免拼成 blob 后「加一列X」把后面词吞进列名。模板标题不是原话，不拿来抽列。"""
     bits: list[str] = []
     for x in (
-        [demand_text or "", card.title or "", card.goal or ""]
+        [demand_text or "", "" if card.title_from_template else (card.title or ""), card.goal or ""]
         + list(card.features or [])
         + list(card.raw_features or [])
     ):
@@ -1589,11 +1717,13 @@ def adapt_draft_with_llm(card: Card, drafts: list[Draft], llm, repos: list | Non
         return None, None
     from ..drafts import draft_context_for_llm, _trim_html, redact_material
     from ..llm import load_prompt
-    from ..privacy import Redactor
+    from ..privacy import Redactor, labels_in
     from .. import textutil as _tu
     import json
 
-    mapping: dict[str, str] = {}   # 材料脱敏标签 → 原文；模型输出后还原
+    # 材料脱敏标签 → 原文；模型输出后还原。原话里已有的标签先记成「标签 → 标签」：
+    # 材料标签接在后面编号，还原时原话标签保持原样，不会被底稿 / 仓库里的号码顶替
+    mapping: dict[str, str] = {label: label for label in labels_in(demand_text)}
     keys = set(card.keywords()) | set(card.indicators) | set(card.features) | {card.title, card.req_type}
     usable = visual_drafts(drafts)
     draft = pick_draft(usable, keys) if usable else None
@@ -1620,16 +1750,17 @@ def adapt_draft_with_llm(card: Card, drafts: list[Draft], llm, repos: list | Non
         "需求类型": card.req_type,
         "本次原话": demand_text or "",
         "功能点": card.features,
-        "原表表头": (draft.table_headers if draft else []),
+        # 表头、文件名、空壳备注也可能带手机号或客户名，和底稿正文一样先过隐盾
+        "原表表头": [redact_material(h, mapping) for h in (draft.table_headers if draft else [])],
         "明确要加的列": add_cols,
         "明确要删的列": del_cols,
         "明确要改名的列": [{"from": a, "to": b} for a, b in rename_cols],
         "提出方": card.requester,
         "使用者": card.users,
         "渠道": card.channels,
-        "主底稿": draft.name if draft else "",
+        "主底稿": redact_material(draft.name, mapping) if draft else "",
         "有现有材料": bool(drafts or repos),
-        "材料备注": spa_notes,
+        "材料备注": [redact_material(n, mapping) for n in spa_notes],
     }
     if draft:
         payload["硬性要求"] = (
@@ -1721,8 +1852,13 @@ def _generated_page(card: Card, client_view: bool = False, demand_text: str = ""
     )
     if announcement:
         body = _impact(card, rng)
+    elif t not in ("接口", "报表") and re.search(r"限仓|超限|下单前|报单前", blob):
+        # 下单前限仓：要的是还能下多少手，不是行情异动列表；「限仓使用率日报」这类报表仍出表格
+        body = _pretrade_check(card, rng)
     elif t == "提醒":
-        body = _alerts(card, rng)
+        from .intake import looks_futures_domain
+
+        body = _alerts(card, rng, futures=looks_futures_domain(demand_text, card.title, " ".join(card.indicators)))
     elif t == "接口":
         body = _api(card)
     elif wants_ui:

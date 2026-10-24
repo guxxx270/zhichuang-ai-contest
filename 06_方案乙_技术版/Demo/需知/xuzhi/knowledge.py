@@ -19,9 +19,19 @@ class Probe:
     question: str
     why: str
     default: str
+    question_generic: str = ""   # 非期货需求用的中性问法（可选）
+    default_generic: str = ""
 
     def hits(self, text: str) -> bool:
-        return any(re.search(t, text) for t in self.triggers)
+        return any(_trigger_hits(t, text) for t in self.triggers)
+
+
+def _trigger_hits(trigger: str, text: str) -> bool:
+    if trigger == "@对客":   # 原话要给客户看（客户版、发给客户…），与问清 / 写单 / 定架同一口径
+        from . import textutil
+
+        return bool(textutil.CLIENT_FACING.search(text or ""))
+    return bool(re.search(trigger, text or ""))
 
 
 @dataclass(frozen=True)
@@ -84,7 +94,8 @@ def _load(path):
 @lru_cache(maxsize=1)
 def probes() -> list[Probe]:
     raw = _load(config.PROBES_PATH)["probes"]
-    return [Probe(p["id"], p["category"], p["tag"], p["impact"], tuple(p["triggers"]), p["question"], p["why"], p["default"]) for p in raw]
+    return [Probe(p["id"], p["category"], p["tag"], p["impact"], tuple(p["triggers"]), p["question"], p["why"], p["default"],
+                  p.get("question_generic", ""), p.get("default_generic", "")) for p in raw]
 
 
 @lru_cache(maxsize=1)

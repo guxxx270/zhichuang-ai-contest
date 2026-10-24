@@ -17,8 +17,9 @@ from datetime import datetime
 from . import config
 from .privacy import Redactor
 
-# 不进记忆的题：位置类与新增列的格式类（每条需求的列都不同，沿用到别的列会张冠李戴）、模型临时补问（id 不稳定）
-_NO_MEMORY_IDS = {"C_POS", "C_FMT", "C_NULL", "C_SIGN"}
+# 不进记忆的题：位置类、新增列的格式类（每条需求的列都不同，沿用到别的列会张冠李戴）、
+# 「原话信息不足」的对象题（每条需求不同）、模型临时补问（id 不稳定）
+_NO_MEMORY_IDS = {"C_POS", "C_FMT", "C_NULL", "C_SIGN", "Q_VAGUE"}
 _NO_MEMORY_PREFIX = ("L",)
 
 

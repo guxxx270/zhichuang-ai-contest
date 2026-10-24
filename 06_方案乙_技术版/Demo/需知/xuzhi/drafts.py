@@ -412,6 +412,29 @@ def normalize_url(url: str) -> str:
     return "https://" + u.lstrip("/")
 
 
+class _CheckedRedirect(urllib.request.HTTPRedirectHandler):
+    """每一跳都重新过内网拦截；跳到别的主机时去掉 Token 头，凭据不跟着跳转带出去。"""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        why = check_clone_url(newurl)
+        if why:
+            raise RuntimeError(f"链接跳转到了不允许的地址（{why}）：{redact_secrets(newurl)}")
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        old_host = (urlparse(req.full_url).hostname or "").lower()
+        if new is not None and (urlparse(newurl).hostname or "").lower() != old_host:
+            for key in list(new.headers):
+                if key.lower() in ("private-token", "authorization"):
+                    del new.headers[key]
+        return new
+
+
+def _checked_opener(ssl_no_verify: bool = False) -> urllib.request.OpenerDirector:
+    handlers: list = [_CheckedRedirect()]
+    if ssl_no_verify:
+        handlers.append(urllib.request.HTTPSHandler(context=ssl._create_unverified_context()))
+    return urllib.request.build_opener(*handlers)
+
+
 def fetch_url(url: str) -> bytes:
     url = normalize_url(url)
     why = check_clone_url(url)
@@ -421,7 +444,7 @@ def fetch_url(url: str) -> bytes:
         url,
         headers={"User-Agent": "XuZhi-DraftFetcher/0.3", "Accept": "*/*"},
     )
-    with urllib.request.urlopen(req, timeout=FETCH_TIMEOUT) as resp:
+    with _checked_opener().open(req, timeout=FETCH_TIMEOUT) as resp:
         data = resp.read(MAX_FILE_BYTES + 1)
     if len(data) > MAX_FILE_BYTES:
         data = data[:MAX_FILE_BYTES]
@@ -469,7 +492,8 @@ def _file_priority(rel: str) -> int:
 def _collect_source_files(root: Path) -> list[Path]:
     found: list[Path] = []
     for p in root.rglob("*"):
-        if not p.is_file():
+        # 软链接一律不读：伪装成 settings.py 的链接可能指向仓外的 .env 或凭据（is_file 会跟随链接）
+        if p.is_symlink() or not p.is_file():
             continue
         if _should_skip_path(p, root) or _should_skip_file(p):
             continue
@@ -547,13 +571,30 @@ def ingest_repo_dir(root: Path, url: str = "") -> tuple[list[Draft], RepoBundle]
     return drafts, bundle
 
 
+def _numeric_host(h: str) -> str | None:
+    """全是数字和点、或带 0x 段的主机名，按 inet_aton 的语义归一（git / curl 会把 0177.0.0.1 当 127.0.0.1）。
+    不是这种写法返回 None；全数字却解析不了返回空串（直接拒绝）。"""
+    import socket
+
+    digits_only = bool(re.fullmatch(r"[0-9.]+", h))
+    if not digits_only and not re.search(r"(?:^|\.)0x", h):
+        return None
+    try:
+        return socket.inet_ntoa(socket.inet_aton(h))
+    except OSError:
+        return "" if digits_only else None
+
+
 def _is_private_host(host: str) -> bool:
-    """回环 / 内网 / 链路本地地址一律拒绝：仓库只允许拉公网或公司代码托管平台，防止把需知当内网探针。"""
+    """非公网地址一律拒绝（回环、内网、链路本地、100.64/10 运营商 NAT 等）：仓库只允许拉公网或公司代码托管平台，防止把需知当内网探针。"""
     import ipaddress
     import socket
 
     h = (host or "").strip().lower().strip("[]")
     if not h or h in ("localhost", "localhost.localdomain") or h.endswith(".local") or h.endswith(".localhost"):
+        return True
+    numeric = _numeric_host(h)
+    if numeric == "":
         return True
     candidates: list[str] = []
     resolved = False
@@ -561,11 +602,21 @@ def _is_private_host(host: str) -> bool:
         ipaddress.ip_address(h)
         candidates.append(h)
     except ValueError:
-        try:
-            candidates = sorted({ai[4][0] for ai in socket.getaddrinfo(h, None)})
-            resolved = True
-        except (socket.gaierror, OSError):
-            return False   # 解析不了就交给 git 报错，不在此处误判
+        if numeric:
+            # 八进制 / 十六进制 / 整数写法：以 inet_aton 的结果为准；本机解析出来不一样就说明各方理解不同，拒绝
+            try:
+                got = {ai[4][0] for ai in socket.getaddrinfo(h, None)}
+            except (socket.gaierror, OSError):
+                got = set()
+            if got != {numeric}:
+                return True
+            candidates = [numeric]
+        else:
+            try:
+                candidates = sorted({ai[4][0] for ai in socket.getaddrinfo(h, None)})
+                resolved = True
+            except (socket.gaierror, OSError):
+                return False   # 解析不了就交给 git 报错，不在此处误判
     fake_net = ipaddress.ip_network(_FAKE_IP_NET)
     for ip in candidates:
         try:
@@ -574,7 +625,8 @@ def _is_private_host(host: str) -> bool:
             return True
         if resolved and addr in fake_net and _fake_ip_trusted(h):
             continue
-        if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved or addr.is_multicast or addr.is_unspecified:
+        if (not addr.is_global or addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved
+                or addr.is_multicast or addr.is_unspecified):
             return True
     return False
 
@@ -682,6 +734,8 @@ def _run_git_clone(
         "-c", "protocol.http.allow=always",
         "-c", "protocol.https.allow=always",
         "-c", "credential.helper=",
+        # 内网拦截只校验了填写的地址；git 默认跟随 HTTP 跳转，可能被带去内网，所以不跟随
+        "-c", "http.followRedirects=false",
     ]
     if ssl_backend:
         git_args += ["-c", f"http.sslBackend={ssl_backend}"]
@@ -726,11 +780,7 @@ def _gitlab_api_target(url: str) -> tuple[str, str, str] | None:
 
 def _http_get_bytes(url: str, headers: dict[str, str], *, ssl_no_verify: bool, timeout: int) -> bytes:
     req = urllib.request.Request(url, headers=headers)
-    ctx = ssl._create_unverified_context() if ssl_no_verify else None
-    kwargs: dict = {"timeout": timeout}
-    if ctx is not None:
-        kwargs["context"] = ctx
-    with urllib.request.urlopen(req, **kwargs) as resp:
+    with _checked_opener(ssl_no_verify).open(req, timeout=timeout) as resp:   # 跳转逐跳校验，跨主机不带 PRIVATE-TOKEN
         return resp.read()
 
 
@@ -927,7 +977,9 @@ def load_from_git(
         api_err = redact_secrets(str(e), token, username)
 
     detail = last_detail or "clone failed"
-    if _is_ssl_handshake_error(detail):
+    if re.search(r"(?i)redirect|HTTP 30[12378]|error: 30[12378]", detail):
+        hint = "（仓库地址发生跳转，请直接填写最终的 https 地址）"
+    elif _is_ssl_handshake_error(detail):
         hint = (
             "（本机 Git/schannel 无法完成 TLS，已自动改走 GitLab API 归档仍失败。"
             f"API：{api_err or '无详情'}。"
@@ -1227,12 +1279,15 @@ def is_secret_path(path: str) -> bool:
 
 
 def redact_material(text: str, mapping: dict[str, str] | None = None) -> str:
-    """材料（底稿 HTML、仓库代码摘录）进模型前也过一遍隐盾；mapping 若给出则累计标签→原文，供输出还原。"""
-    from .privacy import Redactor
+    """材料（底稿 HTML、仓库代码摘录）进模型前也过一遍隐盾；mapping 若给出则累计标签→原文，供输出还原。
+    给了 mapping 时新标签接着已有编号往后编、同一原文沿用同一标签：每份材料都从 _1 编号的话，还原时会把别人的号码填错位置。"""
+    from .privacy import Redactor, label_counts
 
-    r = Redactor().redact(text or "")
-    if mapping is not None:
-        mapping.update(r.mapping)
+    if mapping is None:
+        return Redactor().redact(text or "").text
+    known = {original: label for label, original in mapping.items() if original != label}
+    r = Redactor().redact(text or "", start=label_counts(mapping), known=known)
+    mapping.update(r.mapping)
     return r.text
 
 
@@ -1286,12 +1341,13 @@ def draft_context_for_llm(
     remain_html = html_limit
     for i, d in enumerate(ordered[:4]):
         share = remain_html if i == 0 else min(6000, max(1500, remain_html // max(1, 4 - i)))
+        # 文件名、表头、来源这些元数据同样可能带手机号、客户名，和正文一起过隐盾
         html_briefs.append({
-            "name": redact_material(d.name),
-            "source": d.source,
+            "name": redact_material(d.name, mapping),
+            "source": redact_material(d.source, mapping),
             "title": redact_material(d.title, mapping),
             "headings": [redact_material(h, mapping) for h in d.headings[:8]],
-            "table_headers": [redact_material(h) for h in d.table_headers[:20]],
+            "table_headers": [redact_material(h, mapping) for h in d.table_headers[:20]],
             "html": redact_material(_trim_html(d.html, share), mapping),
         })
         remain_html = max(0, remain_html - len(html_briefs[-1]["html"]))
@@ -1310,19 +1366,19 @@ def draft_context_for_llm(
                 continue
             share = min(4000, remain_code)
             excerpt = redact_material(_trim_text(f.text, share), mapping)
-            repo_files.append({"path": redact_material(f.path), "kind": f.kind, "excerpt": excerpt})
+            repo_files.append({"path": redact_material(f.path, mapping), "kind": f.kind, "excerpt": excerpt})
             remain_code -= len(excerpt)
         code_briefs.append({
-            "url": redact_material(repo.url),
-            "tree": [redact_material(p) for p in repo.tree[:80]],
-            "note": redact_material(repo.note),
+            "url": redact_material(repo.url, mapping),
+            "tree": [redact_material(t, mapping) for t in repo.tree[:80]],
+            "note": redact_material(repo.note, mapping),
             "files": repo_files,
         })
 
     return {
         "draft_count": len(drafts),
         "repo_count": len(repos),
-        "summary": redact_material(summarize(drafts, repos)),
+        "summary": redact_material(summarize(drafts, repos), mapping),
         "html_drafts": html_briefs,
         "repos": code_briefs,
         # 兼容旧字段名

@@ -8,7 +8,7 @@ from datetime import date
 
 from .. import knowledge
 from ..drafts import Draft, RepoBundle, summarize, visual_drafts
-from .intake import Card
+from .intake import Card, looks_futures_domain
 
 
 @dataclass
@@ -163,7 +163,8 @@ def build_data_map(card: Card, text: str) -> tuple[list[DataSource], str, dict[s
 
 
 def discover_reuse(card: Card, text: str) -> list[Reuse]:
-    hay = text + " " + " ".join(card.features) + " " + " ".join(card.data_sources) + " " + " ".join(card.channels) + " " + card.req_type
+    # 不拼数据来源标签：「持仓（交易系统实时 / 结算后）」这类说明文字会让没提结算的需求也命中结算系统
+    hay = text + " " + " ".join(card.features) + " " + " ".join(card.channels) + " " + card.req_type
     out = []
     host = AFFINITY.get(card.req_type)
     if card.req_type == "数据" or "公告" in hay:
@@ -193,6 +194,23 @@ def _coverage_line(card: Card, reuse: list[Reuse]) -> str:
     return line
 
 
+def _short(label: str, limit: int) -> str:
+    label = (label or "").strip()
+    return label if len(label) <= limit else label[: limit - 1] + "…"
+
+
+def _app_labels(card: Card) -> list[str]:
+    """分层图应用层只放短标签（新增列、指标），不放整句原话。"""
+    from .. import textutil
+
+    cols: list[str] = []
+    for snip in [*card.raw_features, *card.features]:
+        for col in textutil.find_added_columns(snip):
+            textutil.merge_label(cols, col)
+    labels = [f"新增列·{c}" for c in cols] + [i for i in card.indicators if not textutil.has_label(cols, i)]
+    return [_short(x, 12) for x in labels[:3]]
+
+
 def suggest_stack(
     card: Card,
     text: str,
@@ -201,7 +219,7 @@ def suggest_stack(
     repos: list[RepoBundle] | None = None,
 ) -> tuple[list[tuple[str, str]], dict[str, list[str]]]:
     t = card.req_type
-    realtime = card.frequency in ("实时", "分钟级") or bool(re.search(r"实时|盘中|下单前", text))
+    realtime = card.frequency in ("实时", "分钟级", "事件后限时") or bool(re.search(r"实时|盘中|下单前", text))
     stack: list[tuple[str, str]] = []
     drafts = drafts or []
     repos = repos or []
@@ -236,11 +254,11 @@ def suggest_stack(
         stack.append(("安全", "客户字段脱敏（隐盾规则）；对外内容合规审阅留痕"))
     if re.search(r"公告|通知文案|解释|解析", text):
         stack.append(("AI", "公司 AI 平台（OpenAI 兼容 API）做非结构化解析 / 文案生成，输出需人工复核"))
-    app_layer = [card.title] + [f for f in card.features[:3]]
+    app_layer = [_short(card.title, 16)] + _app_labels(card)
     if drafts:
-        app_layer = [f"底稿·{d.title or d.name}" for d in drafts[:3]] + app_layer
+        app_layer = [_short(f"底稿·{d.title or d.name}", 16) for d in drafts[:3]] + app_layer
     if repos:
-        app_layer = [f"仓·{r.name}" for r in repos[:2]] + app_layer
+        app_layer = [_short(f"仓·{r.name}", 16) for r in repos[:2]] + app_layer
     layers = {
         "入口": card.channels or (["现有页面改造"] if (drafts or repos) else ["网页"]),
         "应用": app_layer,
@@ -258,6 +276,7 @@ def build_decisions(
     reuse: list[Reuse],
     drafts: list[Draft] | None = None,
     repos: list[RepoBundle] | None = None,
+    data_map: list[DataSource] | None = None,
 ) -> list[Decision]:
     ds: list[Decision] = []
     drafts = drafts or []
@@ -283,21 +302,31 @@ def build_decisions(
                        (f"复用「{top.system}」" if top and top.score >= 2 else "新建独立服务"),
                        (f"目录命中 {top.score} 项能力，成熟度「{top.maturity}」" if top else "无可复用系统"), "复用边界和改动窗口会影响投入，纳入模型工作项估算"))
     if card.data_sources:
-        ds.append(Decision("D2", "数据来源与时点", "数据从哪取、以哪个时点为准？",
-                           [("数据仓库日终（T+1）", "稳定、口径统一、成本低", "不能盘中看"), ("行情服务 / 交易系统实时", "盘中可用", "需订阅额度、并发与稳定性要求高"),
-                            ("混合：盘中实时 + 日终归档", "两者兼顾", "两套口径要对账")],
-                           "行情服务 / 交易系统实时" if re.search(r"实时|盘中|下单前", text) else "数据仓库日终（T+1）",
-                           "按原话的时效要求判断" + ("（提到实时 / 盘中）" if re.search(r"实时|盘中|下单前", text) else "（未提实时）"), "架构与成本量级"))
+        ds.append(_d2_data_timing(card, text, data_map if data_map is not None else build_data_map(card, text)[0]))
     if card.req_type == "提醒" or re.search(r"提醒|预警|推送|通知", text):
-        ds.append(Decision("D3", "批处理 vs 实时检测", "检测按分钟轮询、日终批处理，还是事件驱动？",
-                           [("日终批处理", "最简单", "只能次日发现"), ("分钟级轮询", "够用且简单", "延迟几分钟"), ("事件驱动（行情 / 公告推送触发）", "秒级", "接入复杂、误报需治理")],
-                           "分钟级轮询" if not re.search(r"公告|秒级", text) else "事件驱动（行情 / 公告推送触发）", "首版求稳，二期升级", "需评估时效、接入与联调工作，纳入模型估算"))
-        ds.append(Decision("D4", "推送渠道", "提醒走什么渠道？", [("企业微信", "触达快、可模板消息", "夜间打扰"), ("邮件", "留痕好", "看得慢"), ("企业微信 + 邮件双发", "兼顾", "重复")],
-                           "企业微信" if "企业微信" in card.channels or not card.channels else "、".join(card.channels[:2]), "复用消息推送中心，频控由平台配置", "小"))
+        ds.append(_d3_detection(card, text))
+        # 推送渠道只从能推送的渠道里选：网页、手机端是看的地方，不是推送渠道
+        pushes = [c for c in ("企业微信", "邮件", "短信") if c in card.channels]
+        push_opts = [("企业微信", "触达快、可模板消息", "夜间打扰"), ("邮件", "留痕好", "看得慢"), ("企业微信 + 邮件双发", "兼顾", "重复")]
+        if "短信" in pushes:
+            push_opts.append(("短信", "触达最直接", "按条计费、内容须脱敏"))
+        push = "企业微信 + 邮件双发" if {"企业微信", "邮件"} <= set(pushes) else (pushes[0] if pushes else "企业微信")
+        ds.append(Decision("D4", "推送渠道", "提醒走什么渠道？", push_opts, push,
+                           "复用消息推送中心，频控由平台配置" + ("" if pushes else "；原话没指定推送渠道，默认企业微信"), "小"))
     if card.req_type in ("页面", "报表") or "客户" in card.scope_objects or re.search(r"权限|本人|只能看|自己管理|谁能看", text):
+        futures = looks_futures_domain(text, card.title, " ".join(card.features), " ".join(card.indicators))
+        first = "角色 + 产品维度（权限中心现成）" if futures else "角色 + 部门维度（权限中心现成）"
+        if re.search(r"本人|只能看|自己管理|投资经理", text):
+            why = "原话要求只看本人负责的数据，权限中心按角色 + 数据范围授权即可满足"
+        elif "客户" in card.scope_objects:
+            why = "涉及客户明细：按角色控制可见范围，导出留痕，权限中心已支持"
+        elif futures:
+            why = "投资经理只看本人产品是常见诉求，权限中心已支持"
+        else:
+            why = "按部门 / 角色授权即可，权限中心已支持"
         ds.append(Decision("D5", "权限模型", "谁能看什么：按角色、按产品、按人？",
-                           [("角色 + 产品维度（权限中心现成）", "现成、审计友好", "细粒度需配置"), ("自建权限表", "灵活", "重复建设、审计弱")],
-                           "角色 + 产品维度（权限中心现成）", "投资经理只看本人产品是常见诉求，权限中心已支持", "复用现有权限前需核对适用范围"))
+                           [(first, "现成、审计友好", "细粒度需配置"), ("自建权限表", "灵活", "重复建设、审计弱")],
+                           first, why, "复用现有权限前需核对适用范围"))
     if re.search(r"公告|解析|通知文案|解释|识别", text):
         ds.append(Decision("D6", "是否使用 AI 平台", "非结构化解析 / 文案生成用规则还是大模型？",
                            [("规则 + 模板", "确定性强", "覆盖不全、维护累"), ("公司 AI 平台 + 人工复核", "覆盖广、省人工", "需复核环节与评测"), ("两者结合：规则硬判、模型建议", "兼顾", "多一层逻辑")],
@@ -306,10 +335,48 @@ def build_decisions(
         ds.append(Decision("D7", "是否改交易链路", "只做旁路提示，还是改交易系统做阻断？",
                            [("旁路提示（只读）", "不动交易链路、审批简单、可快速上线", "不能强制拦截"), ("交易系统事前风控增强（阻断）", "强约束", "变更审批、灰度、回退要求高，周期长")],
                            "旁路提示（只读）", "首版先解释与测算，阻断纳入二期与交易系统排期", "阻断链路需额外验证与上线配合，具体投入待估"))
-    if "客户" in card.scope_objects or "对外" in text:
+    # 只是提到客户不算对客；给客户看的内容或报送监管才要定外发管控
+    if card.client_facing or re.search(r"报送|监管", text):
         ds.append(Decision("D8", "对外内容与部署", "客户可见内容如何管控？", [("内网生成、人工发送", "最安全", "多一步人工"), ("系统直发客户", "省事", "需合规审阅自动化与更严的脱敏")],
                            "内网生成、人工发送", "首版先保证脱敏与审阅，直发放二期", "合规风险"))
     return ds
+
+
+def _d2_data_timing(card: Card, text: str, data_map: list[DataSource]) -> Decision:
+    """D2 跟着数据地图走：有限时要求又定位到了实时数据，就推荐盘中实时 + 日终归档，不再和同页数据地图打架。"""
+    level = _realtime_level(card, text)
+    realtime_rows = [r for r in data_map if r.freshness == "实时"]
+    if level >= 2:
+        rec, why = "行情服务 / 交易系统实时", "按原话的时效要求判断（提到实时 / 盘中 / 下单前）"
+    elif level == 1 and realtime_rows:
+        rec, why = "混合：盘中实时 + 日终归档", f"原话有限时要求（{card.frequency}），数据地图已定位到实时数据；盘中取实时源，日终归档对账"
+    else:
+        rec, why = "数据仓库日终（T+1）", "按原话的时效要求判断（未提实时）"
+    return Decision("D2", "数据来源与时点", "数据从哪取、以哪个时点为准？",
+                    [("数据仓库日终（T+1）", "稳定、口径统一、成本低", "不能盘中看"), ("行情服务 / 交易系统实时", "盘中可用", "需订阅额度、并发与稳定性要求高"),
+                     ("混合：盘中实时 + 日终归档", "两者兼顾", "两套口径要对账")], rec, why, "架构与成本量级")
+
+
+def _d3_detection(card: Card, text: str) -> Decision:
+    """D3 按已抽到的频率和触发方式选：下单前同步校验、事件驱动、日终批处理，其余才分钟级轮询。"""
+    options = [("日终批处理", "最简单", "只能次日发现"), ("分钟级轮询", "够用且简单", "延迟几分钟"),
+               ("事件驱动（行情 / 公告推送触发）", "秒级", "接入复杂、误报需治理")]
+    if re.search(r"下单前|报单前", text):
+        options.append(("事件驱动（下单前同步校验）", "下单当时就给结果", "要接交易系统下单事件，对延迟敏感"))
+        rec, why = "事件驱动（下单前同步校验）", "原话要在下单前给出结果，必须随下单同步校验"
+    elif m := re.search(r"每隔?\s*(?:\d+|[一两三五十半几])?\s*个?\s*(?:分钟|小时)", text):
+        # 「盘中每半小时查一次」已经给了检查间隔，按间隔轮询，不必上事件驱动
+        rec, why = "分钟级轮询", f"原话给了检查间隔（{m.group(0)}），按这个间隔轮询即可"
+    elif card.frequency in ("实时", "事件后限时") or re.search(r"秒级", text):
+        rec, why = "事件驱动（行情 / 公告推送触发）", f"原话要求{'实时' if card.frequency == '实时' else '事件发生后限时完成'}，轮询赶不上时效"
+    elif card.frequency in ("每日", "每周", "每月", "结算后"):
+        rec, why = "日终批处理", f"原话是{card.frequency}更新，日终跑一次即可"
+    elif re.search(r"公告", text):
+        rec, why = "事件驱动（行情 / 公告推送触发）", "公告发布时点不定，按推送触发"
+    else:
+        rec, why = "分钟级轮询", "首版求稳，二期升级"
+    return Decision("D3", "批处理 vs 实时检测", "检测按分钟轮询、日终批处理，还是事件驱动？", options, rec, why,
+                    "需评估时效、接入与联调工作，纳入模型估算")
 
 
 def data_map_markdown(rows: list[DataSource], line: str = "") -> list[str]:
@@ -357,8 +424,8 @@ def build_architecture(
     usable = visual_drafts(drafts)
     reuse = discover_reuse(card, text)
     stack, layers = suggest_stack(card, text, reuse, drafts=usable, repos=repos)
-    decisions = build_decisions(card, text, reuse, drafts=usable, repos=repos)
     data_map, map_line, map_stats = build_data_map(card, text)
+    decisions = build_decisions(card, text, reuse, drafts=usable, repos=repos, data_map=data_map)
     if data_map:
         # 分层图的数据层改用数据地图定位到的系统；目录里没有的数据项单独标"待接入"
         located = list(dict.fromkeys(r.system for r in data_map if r.system != "—"))

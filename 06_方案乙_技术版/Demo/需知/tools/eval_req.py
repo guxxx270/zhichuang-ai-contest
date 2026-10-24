@@ -13,6 +13,7 @@
     probes_must_not 不该问的追问编号             decisions_must   必须给出的 IT 决策编号
     days            专家工时区间 [低, 高]         realtime         需求是否要求实时（对照定架的时效判断）
     redact_must_not_contain  脱敏后文本里不得出现的内容
+    message_must_not_contain 确认消息里不得出现的用语（非期货需求不该带出品种、交易日等期货口径）
 """
 from __future__ import annotations
 
@@ -113,6 +114,11 @@ def score_case(case: dict, llm: LLM) -> dict:
         r["redact_ok"] = not leaked
         if leaked:
             r["notes"].append("脱敏漏：" + "/".join(leaked))
+    if exp.get("message_must_not_contain"):
+        stray = [s for s in exp["message_must_not_contain"] if s in a.message]
+        r["message_ok"] = not stray
+        if stray:
+            r["notes"].append("确认消息带出：" + "/".join(stray))
     dm = getattr(arch, "data_map", []) or []
     r["map_located"] = round(sum(1 for x in dm if x.system != "—") / len(dm), 2) if dm else None
     return r
@@ -137,6 +143,7 @@ def summarize(rows: list[dict]) -> dict:
         "unestimated_cases": sum(r.get("estimate_status") != "ready" for r in rows),
         "realtime_acc": _rate(col("realtime_ok")),
         "redact": _rate(col("redact_ok")),
+        "message_clean": _rate(col("message_ok")),
         "map_located": _rate(col("map_located")),
         "avg_questions": round(statistics.mean([r["n_questions"] for r in rows]), 1) if rows else 0,
         "avg_seconds": round(statistics.mean([r["seconds"] for r in rows]), 3) if rows else 0,
@@ -152,7 +159,7 @@ LABELS = {"type_acc": "类型识别准确率", "title_acc": "标题命中率", "
           "symbol_acc": "品种抽取命中率", "probe_cov": "追问覆盖率（专家必问）", "probe_false": "误问率（专家不该问）",
           "decision_cov": "IT 决策覆盖率", "days_in_range": "估算落在专家区间", "realtime_acc": "时效判断准确率",
           "estimate_state_acc": "规则模式正确标记未估时",
-          "redact": "脱敏无漏检", "map_located": "数据地图定位率"}
+          "redact": "脱敏无漏检", "message_clean": "确认消息不串领域", "map_located": "数据地图定位率"}
 
 
 def _pct(v):

@@ -762,3 +762,68 @@ def test_draft_usability_hints_spa_and_files_folder():
     )
     hints2 = draft_usability_hints([broken])
     assert any("_files" in h or "相对资源" in h for h in hints2)
+
+
+def test_symlinked_source_files_are_not_read(tmp_path: Path):
+    """伪装成 settings.py 的软链接指向仓外文件：不进代码包，也不进送模型的上下文。"""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "placeholder.txt").write_text("SECRET_MARKER_42 = 'do-not-send'\n", encoding="utf-8")
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "app.py").write_text("print('ok')\n", encoding="utf-8")
+    (repo / "src" / "settings.py").symlink_to(outside / "placeholder.txt")
+    drafts, bundle = ingest_repo_dir(repo)
+    paths = {f.path for f in bundle.files}
+    assert "src/app.py" in paths and "src/settings.py" not in paths
+    assert "SECRET_MARKER_42" not in str(draft_context_for_llm(drafts, [bundle]))
+
+
+def test_clone_url_rejects_non_public_and_numeric_host_tricks(monkeypatch):
+    """100.64/10 不是公网；0177.0.0.1、2130706433、0x7f000001 在 git 眼里都是 127.0.0.1。"""
+    import socket
+
+    from xuzhi.drafts import check_clone_url
+
+    public = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))]
+    monkeypatch.setattr(socket, "getaddrinfo", lambda host, port: public)
+    for host in ("100.64.0.1", "0177.0.0.1", "2130706433", "0x7f000001"):
+        assert check_clone_url(f"http://{host}/group/repo.git"), host
+    assert check_clone_url("https://github.com/acme/demo.git") == ""
+    assert check_clone_url("https://93.184.216.34/group/repo.git") == ""
+
+
+def test_redirects_are_rechecked_and_tokens_stay_on_the_original_host(monkeypatch):
+    import socket
+    import urllib.request
+
+    from xuzhi import drafts as D
+
+    monkeypatch.setattr(socket, "getaddrinfo", lambda host, port: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))])
+    handler = D._CheckedRedirect()
+    req = urllib.request.Request("https://gitlab.example.com/api/v4/projects/g%2Fp/repository/archive.zip",
+                                 headers={"PRIVATE-TOKEN": "glpat-test", "Authorization": "Bearer glpat-test"})
+    with pytest.raises(RuntimeError, match="不允许"):
+        handler.redirect_request(req, None, 302, "Found", {}, "http://127.0.0.1/admin")
+    same_host = handler.redirect_request(req, None, 302, "Found", {}, "https://gitlab.example.com/archive/p.zip")
+    assert same_host.get_header("Private-token") == "glpat-test"
+    moved = handler.redirect_request(req, None, 302, "Found", {}, "https://cdn.example.net/p.zip")
+    assert moved is not None and moved.get_header("Private-token") is None and moved.get_header("Authorization") is None
+
+
+def test_git_clone_does_not_follow_redirects(monkeypatch, tmp_path: Path):
+    import subprocess
+
+    from xuzhi import drafts as D
+
+    seen = {}
+
+    def fake_run(args, **kwargs):
+        seen["args"] = args
+        raise subprocess.CalledProcessError(128, "git", stderr="fatal: unable to update url base from redirection")
+
+    monkeypatch.setattr(D.subprocess, "run", fake_run)
+    monkeypatch.setattr(D, "_is_private_host", lambda host: False)
+    with pytest.raises(RuntimeError, match="仓库地址发生跳转"):
+        D.load_from_git("https://github.com/acme/demo.git")
+    assert "http.followRedirects=false" in seen["args"]
