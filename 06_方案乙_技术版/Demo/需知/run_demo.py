@@ -1,4 +1,4 @@
-"""命令行一键跑通需知（不需要界面）：python run_demo.py [样例编号 1-4]"""
+"""命令行一键跑通需知（不需要界面）：python run_demo.py [样例编号 1-6]"""
 from __future__ import annotations
 
 import sys
@@ -12,6 +12,7 @@ if hasattr(sys.stdout, "reconfigure"):
 from xuzhi import config
 from xuzhi.llm import LLM
 from xuzhi.pipeline import analyze
+from xuzhi.pipeline.split import split_requirements
 
 
 def main() -> None:
@@ -20,7 +21,14 @@ def main() -> None:
     llm = LLM()
     print(f"{config.PRODUCT_NAME} · {config.PRODUCT_SLOGAN}")
     print(f"LLM 模式：{llm.mode}（{'已接入 ' + config.LLM_MODEL if llm.mode == 'api' else (llm.note or '未配置 key，规则引擎兜底')}）\n样例：{path.name}\n")
-    a = analyze(path.read_text(encoding="utf-8"), llm=llm)
+    text = path.read_text(encoding="utf-8")
+    segments = split_requirements(text)
+    if segments:
+        print(f"【纪要直通车】这段话里识别到 {len(segments)} 条需求（页面上可一键拆开分别受理；下面先按整段跑一遍）：")
+        for s in segments:
+            print(f"  {s.index}. {s.requester or '未注明'}｜{s.title_hint}｜依据：{s.reason}")
+        print()
+    a = analyze(text, llm=llm)
     c = a.card
     print("=" * 70); print(f"【问清】{c.title}｜{c.req_type}｜提出方 {c.requester}｜脱敏 {a.redacted} 处｜{a.seconds}s")
     for i, f in enumerate(c.features, 1):

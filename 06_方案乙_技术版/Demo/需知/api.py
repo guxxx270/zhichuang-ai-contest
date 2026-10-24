@@ -79,6 +79,12 @@ class AnalyzeIn(BaseModel):
     client_view: bool = False
 
 
+class SplitIn(BaseModel):
+    text: str = Field(..., description="一段会议纪要 / 长消息：里面可能有几条互不相干的需求", min_length=1)
+    record: bool = Field(False, description="true = 拆出的每条按规则跑一遍流水线并各记一行账（事件「纪要拆分受理」），返回每条的紧凑结果；"
+                                            "false = 只看怎么拆")
+
+
 class StatusIn(BaseModel):
     status: str = Field(..., description="受理 / 已确认 / 开发中 / 已交付")
 
@@ -117,6 +123,20 @@ def clarify_endpoint(body: AnalyzeIn) -> dict[str, Any]:
                       channel="API", record=body.record, ledger=ledger() if body.record else None, memory=memory())
     d = service.to_dict(res.analysis, req_id=res.req_id, include_spec=False, include_tasks=False, include_adr=False)
     return {k: d[k] for k in ("req_id", "engine", "seconds", "redacted", "recalled", "card", "questions", "confirm_message")}
+
+
+@app.post("/api/v1/split", dependencies=[Depends(require_token)])
+def split_endpoint(body: SplitIn) -> dict[str, Any]:
+    """纪要直通车：一段纪要里识别多条需求（编号条目 / 提出方切换 / 「还有一件事」等连接词，纯规则）。
+    segments 为空 = 只有一条需求，照常调 /analyze；record=true 时逐条受理，results 里带各自的 req_id。"""
+    if not body.text.strip():
+        raise HTTPException(status_code=422, detail="原话不能为空")
+    segments = service.split(body.text)
+    out: dict[str, Any] = {"count": len(segments), "segments": segments}
+    if body.record and segments:
+        results = service.run_split(body.text, record=True, channel="API", ledger=ledger(), memory=memory())
+        out["results"] = [service.brief(r.analysis, r.req_id) for r in results]
+    return out
 
 
 @app.get("/api/v1/requirements", dependencies=[Depends(require_token)])
