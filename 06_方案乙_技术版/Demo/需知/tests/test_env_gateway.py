@@ -36,7 +36,9 @@ def test_env_custom_gateway_is_preselected_and_prefilled(monkeypatch, fresh_reso
     assert app.session_state["model_preset"].startswith("自定义网关")
     assert app.session_state["custom_api_base_custom"] == GATEWAY
     assert app.session_state["custom_model_custom"] == "company-model-1"
-    assert app.session_state["api_key_input_custom"] == "sk-test-not-real"
+    # Key 只在服务端用：页面控件里不出现（控件状态会下发到浏览器），但页面已按配置好的模型运行
+    assert not app.session_state["api_key_input_custom"]
+    assert all(box.value != "sk-test-not-real" for box in app.text_input), "Key 不能出现在任何页面控件里"
     assert any("模型已配置" in element.value for element in app.markdown)
 
 
@@ -79,4 +81,17 @@ def test_llm_mode_mock_does_not_prefill_the_key(monkeypatch, fresh_resources):
     app = _run(AppTest.from_file(str(APP_PATH), default_timeout=20))
 
     assert not app.session_state["api_key_input_custom"]
+    assert not any("模型已配置" in element.value for element in app.markdown)
+
+
+def test_env_key_is_not_sent_to_another_gateway(monkeypatch, fresh_resources):
+    monkeypatch.setattr(config, "LLM_API_BASE", GATEWAY)
+    monkeypatch.setattr(config, "LLM_MODEL", "company-model-1")
+    monkeypatch.setattr(config, "LLM_API_KEY", "sk-test-not-real")
+    monkeypatch.setattr(config, "LLM_MODE", "auto")
+    app = _run(AppTest.from_file(str(APP_PATH), default_timeout=20))
+    [base_box] = [box for box in app.text_input if box.key == "custom_api_base_custom"]
+    base_box.input("https://other-gateway.example.com/v1")
+    _run(app)
+
     assert not any("模型已配置" in element.value for element in app.markdown)

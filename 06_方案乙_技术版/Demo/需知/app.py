@@ -868,24 +868,26 @@ def _render_model_secrets(
     if mode_sel != "api":
         return api_key_sel, api_base_sel, model_sel, backend_sel, extra
 
-    key_state = f"api_key_input_{provider_id}"
     env_custom = provider_id == "custom" and _env_custom_gateway()
-    # LLM_MODE=mock（现场网络不稳时）不自动带出 Key：开工只跑规则，页面上手填的照常可用
-    if key_state not in st.session_state and config.LLM_API_KEY and config.LLM_MODE != "mock" and (
-            (api_base_sel and api_base_sel == config.LLM_API_BASE) or env_custom):
-        st.session_state[key_state] = config.LLM_API_KEY
     if env_custom:   # 首次进页带出 .env 的网关与模型；之后以页面上的修改为准
         st.session_state.setdefault("custom_api_base_custom", config.LLM_API_BASE)
         st.session_state.setdefault("custom_model_custom", config.LLM_MODEL)
+    # .env 的 Key 只在服务端用，不放进页面控件（控件状态会下发到浏览器）；只发往 .env 里同一个网关。
+    # LLM_MODE=mock（现场网络不稳时）不用它：开工只跑规则，页面上手填的照常可用。
+    env_key_ok = bool(config.LLM_API_KEY) and config.LLM_MODE != "mock" and (
+        bool(api_base_sel and api_base_sel == config.LLM_API_BASE) or env_custom)
     with (key_slot or st.container()):
         api_key_sel = st.text_input(
             "API Key",
             type="password",
             key=f"api_key_input_{provider_id}",
-            placeholder="PAT（pt-…）" if provider_id.startswith("qoder") else "sk-…（不填 = 规则引擎）",
+            placeholder=("已用本机 .env 的 Key（页面不显示）；填写则以页面为准" if env_key_ok
+                         else "PAT（pt-…）" if provider_id.startswith("qoder") else "sk-…（不填 = 规则引擎）"),
             help=("只在本次会话内使用，不写入仓库。点击「读取可用模型」才请求当前网关的目录。" if provider_id == "custom"
                   else "只在本次会话内使用，不写入仓库。填了会实时拉取网关当前可用的模型。"),
         ).strip()
+    if not api_key_sel and env_key_ok and not env_custom:
+        api_key_sel = config.LLM_API_KEY
     st.session_state.api_keys[provider_id] = api_key_sel
 
     live_compat = getattr(config, "LIVE_OPENAI_PROVIDERS", {}) or {}
@@ -903,6 +905,9 @@ def _render_model_secrets(
                 placeholder=default_base,
                 help="须为 OpenAI 兼容的 /v1 地址。",
             ).strip() or (api_base_sel or default_base)
+            if not api_key_sel and env_key_ok and api_base_sel == config.LLM_API_BASE:   # 网关改了就不再带 .env 的 Key
+                api_key_sel = config.LLM_API_KEY
+                st.session_state.api_keys[provider_id] = api_key_sel
         else:
             c_base.caption(f"网关：`{api_base_sel}`")
         if model_sel == "__custom__" or provider_id == "custom":
