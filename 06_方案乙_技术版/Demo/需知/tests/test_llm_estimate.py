@@ -480,6 +480,24 @@ def test_parse_json_loose_skips_brackets_in_prose_and_gives_up_fast_on_truncatio
     assert parse_json_loose(body[: len(body) // 2]) is None             # 半截里有完整的小对象 / 列表，也不单拿出来
     assert parse_json_loose("{" * 200000) is None
     assert time.perf_counter() - started < 0.1
+    # 中途写坏（引号没转义）：出错处之后的工作项也是这个对象的一部分，不能单拿出来当结果
+    assert parse_json_loose(body.replace('"summary": "s"', '"summary": "按"上一交易日"口径"')) is None
+
+
+def test_broken_json_is_asked_again_as_unparsed_not_as_a_missing_summary():
+    good = json.dumps(_response(), ensure_ascii=False)
+    broken = good.replace("修改既有计算，并逐项核对关键数字。", '修改既有计算，按"上一交易日"口径逐项核对。')
+    replies, calls = iter([broken, good]), []
+
+    def create(**kwargs):
+        calls.append(kwargs)
+        choice = SimpleNamespace(finish_reason="stop", message=SimpleNamespace(content=next(replies)))
+        return SimpleNamespace(model="gateway-model", choices=[choice])
+
+    result = _estimate(_gateway_llm(SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))))
+
+    assert result.status == "ready" and len(calls) == 2
+    assert json.loads(calls[1]["messages"][1]["content"])["上次校验错误"] == "模型未返回估时对象"
 
 
 def _wrapped_timeout():

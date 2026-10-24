@@ -191,8 +191,10 @@ def main(argv: list[str] | None = None) -> int:
     out = seed()
     d, m = out["dashboard"], out["memory"]
     print(f"已预置 {out['count']} 条虚构需求：{d['depts']} 个部门；状态 " + " / ".join(f"{k} {v}" for k, v in d["by_status"].items()))
+    # 规则模板参考不调模型也有，看板会单列它与实际的偏差；这里只说模型那一套没生成
+    rule = f"（规则模板参考偏差 {d['rule_mape']}%，{d['rule_count']} 条，另列）" if d.get("rule_mape") is not None else ""
     print(f"看板：平均追问 {d['avg_questions']} 条，平均澄清 {d['avg_rounds']} 轮，已记录实际工时 {d['closed']} 条；"
-          f"未调用模型，工时预测与偏差均未生成；追问记忆 {m['entries']} 条口径、省问 {m['hits']} 次")
+          f"未调用模型，模型工时与模型偏差均未生成{rule}；追问记忆 {m['entries']} 条口径、省问 {m['hits']} 次")
     print("模型调用审计为空（只记真实调用）；样例 ① 与资管运营的追问记忆保持全新。")
     print(REOPEN)
     print("提醒：以上均为虚构演示数据，不要当作试运行成绩讲。")

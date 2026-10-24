@@ -22,7 +22,7 @@ def tmp_db(tmp_path, monkeypatch):
     knowledge.history.cache_clear()
 
 
-def test_seed_fills_dashboard_without_touching_demo(tmp_db):
+def test_seed_fills_dashboard_without_touching_demo(tmp_db, capsys):
     sample1 = next(config.SAMPLES_DIR.glob("01_*.md")).read_text(encoding="utf-8")
     before = analyze(sample1, llm=LLM(mode="mock")).estimate.mid
     Ledger().event(0, "旧数据", "")                      # 旧库里有东西 → 先备份
@@ -31,6 +31,9 @@ def test_seed_fills_dashboard_without_touching_demo(tmp_db):
     d = Ledger().dashboard()
     assert d["count"] == len(demo_seed.PLAN) and d["depts"] >= 8 and all(d["by_status"].values())
     assert d["closed"] >= 5 and d["mape"] is None and d["avg_rounds"] > 1
+    out = capsys.readouterr().out                      # 只说模型那一套没生成；规则模板参考偏差与看板一致、另列
+    assert "模型工时与模型偏差均未生成" in out and d["rule_mape"] is not None
+    assert f"规则模板参考偏差 {d['rule_mape']}%，{d['rule_count']} 条" in out
     assert d["saved_days"] is None and d["estimated_count"] == 0
     assert d["unestimated_count"] == len(demo_seed.PLAN)
     assert "未注明" not in d["by_dept"]

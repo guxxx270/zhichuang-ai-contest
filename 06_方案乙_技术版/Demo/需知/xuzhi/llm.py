@@ -19,6 +19,7 @@ from . import config, sandbox
 
 GATEWAY_COOLDOWN = 120   # 网关超时 / 连不上之后，这么多秒内的调用直接走规则引擎
 _JSON_STARTS = 64        # parse_json_loose 每种括号最多试几个起点
+_OBJECT_START = re.compile(r'\{\s*"')   # 像 JSON 对象的起点（{"键"…），区别于说明文字里的 {注意}
 
 
 class OutputTruncated(RuntimeError):
@@ -225,13 +226,15 @@ class LLM:
 def parse_json_loose(text: str) -> Any:
     """从模型输出里尽量抠出 JSON（容忍 ```json 围栏与前后废话）。
     依次从每个「{」起用 raw_decode 解一个完整对象（前面的说明里带「[见下]」也不碍事），都不行才试「[」；
-    截断的 JSON 解不出来就返回 None，不再逐字截短重试（那是 O(n²)，长输出会卡住）。"""
+    截断或中途写坏的 JSON 解不出来就返回 None，不从里面挑一个小对象充数（否则校验报的是「缺摘要」这类误导原因）；
+    也不再逐字截短重试（那是 O(n²)，长输出会卡住）。"""
     if not text:
         return None
     m = re.search(r"```(?:json)?\s*(.*?)```", text, re.S)
     candidate = m.group(1) if m else text
     decoder = json.JSONDecoder()
-    # 「{」解到一半出错的区间（截断或写坏的大对象）：里面那些完整的小对象 / 列表不单拿出来。区间按起点递增、互不重叠
+    # 「{」解不出的区间：里面那些完整的小对象 / 列表不单拿出来。区间按起点递增、互不重叠。
+    # 像 JSON 对象的起点解不出（截断，或中途引号没转义），出错处之后的括号也可能还在它里面，区间一直算到末尾
     failed: list[tuple[int, int]] = []
     for opener in ("{", "["):
         start, k, tries = candidate.find(opener), 0, 0
@@ -246,7 +249,7 @@ def parse_json_loose(text: str) -> Any:
             try:
                 return decoder.raw_decode(candidate, start)[0]
             except json.JSONDecodeError as exc:
-                end = max(start + 1, exc.pos)
+                end = len(candidate) if opener == "{" and _OBJECT_START.match(candidate, start) else max(start + 1, exc.pos)
             except RecursionError:   # 嵌套深到解析器递归上限，不是正常输出；后面不再逐个起点重试
                 end = len(candidate)
             if opener == "{":
