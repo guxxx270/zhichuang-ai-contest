@@ -32,7 +32,8 @@ mcp = FastMCP(
     instructions=(
         f"{config.PRODUCT_NAME}（XuZhi）：期货公司技术部的需求分析智能体。把业务的一堆话交给 xuzhi_clarify 先问清，"
         "拿到业务答复后用 answers 重算；xuzhi_estimate 给双轨工时（传统 vs AI 协同）；xuzhi_architect 给数据地图与 IT 决策；"
-        "xuzhi_spec 出双版需求单。所有数字由程序算，模型只组织语言。原话进入前已本地脱敏。"
+        "xuzhi_spec 出双版需求单；一段会议纪要里有几条需求时先用 xuzhi_split 拆开、逐条受理。"
+        "所有数字由程序算，模型只组织语言。原话进入前已本地脱敏。"
     ),
 )
 
@@ -106,6 +107,21 @@ def xuzhi_analyze(text: str, answers: dict[str, str] | None = None, req_id: int 
     """整条链一次跑完（问清 + 写单 + 估量 + 定架），返回完整 JSON（不含原型 HTML）。"""
     res = _run(text, answers, req_id, polish)
     return _dump(service.to_dict(res.analysis, req_id=res.req_id))
+
+
+@mcp.tool()
+def xuzhi_split(text: str, record: bool = False) -> str:
+    """纪要直通车：一段会议纪要 / 长消息里有几条互不相干的需求时按规则拆开（编号条目、提出方切换、「还有一件事」等连接词），
+    返回每条的提出方、预览与拆分依据；参会名单、「下周再议」这类决议不算需求。
+    record=true 时逐条跑问清 / 估量 / 定架并各记一行账，results 里带各自的 req_id，之后可带 req_id 调 xuzhi_clarify 等继续。
+    segments 为空表示只有一条需求，直接用 xuzhi_analyze。"""
+    ledger, memory = _deps()
+    segments = service.split(text)
+    out: dict[str, Any] = {"count": len(segments), "segments": segments}
+    if record and segments:
+        results = service.run_split(text, record=True, channel="MCP", ledger=ledger, memory=memory)
+        out["results"] = [service.brief(r.analysis, r.req_id) for r in results]
+    return _dump(out)
 
 
 @mcp.tool()

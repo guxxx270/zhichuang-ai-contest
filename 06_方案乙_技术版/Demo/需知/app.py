@@ -13,6 +13,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from app_jira import SRC_OPTIONS, calib_pool, jira_text_from_analysis, render_jira_mode
+from app_minutes import render_minutes_split
 
 from xuzhi import config, knowledge, sandbox, textutil
 from xuzhi.asr import correct_domain_speech
@@ -1334,6 +1335,9 @@ if _mat and (st.session_state.get("drafts") or st.session_state.get("repos")):  
     with st.expander("📦 本次已读材料（Git / HTML）", expanded=bool(st.session_state.get("repos") or getattr(a, "repos", None))):
         for line in _mat:
             st.markdown(line)
+# 纪要直通车：一段话里有几条需求时提示拆开；单条需求不显示
+render_minutes_split(a, ledger=ledger, memory=memory, source="" if src == "自动识别" else src,
+                     busy=_model_running(), on_switch=_cancel_model_job)
 
 tabs = st.tabs([":material/forum: 问清", ":material/description: 写单", ":material/speed: 估量", ":material/account_tree: 定架",
                 ":material/web: 出样", ":material/menu_book: 一本账", ":material/shield: 隐盾"])

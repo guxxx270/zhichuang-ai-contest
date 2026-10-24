@@ -2,7 +2,7 @@
 
 > 一堆话进来，一份能开工的需求出去。
 > 团队赛方案乙（技术部视角）的 Demo。页面顶部两种用法：
-> 1. **零散需求 → 完整需求**：微信三句话、一段会议纪要、一封邮件、一页 Word 扔进去，它先出一版需求，然后告诉你：要和业务确认哪几件事、这活多复杂、大概多少人天、哪几处要 IT 拍板，顺手把可点的原型页画出来。
+> 1. **零散需求 → 完整需求**：微信三句话、一段会议纪要、一封邮件、一页 Word 扔进去，它先出一版需求，然后告诉你：要和业务确认哪几件事、这活多复杂、大概多少人天、哪几处要 IT 拍板，顺手把可点的原型页画出来。一段纪要里提了好几件事，「纪要直通车」识别出来，一键拆成几条分别受理。
 > 2. **Jira 需求评估**：已经写好的 Jira 工单（粘贴一条，或上传 Jira 导出的 CSV / Excel 一次评一个迭代），给出技术复杂度、传统工时、**AI 编码工时**（编码阶段）与全流程 AI 协同工时，并和故事点 / 原始预估对比。
 >
 > 两种用法接得上：「写单」页一键「转成 Jira 工单去评估」。
@@ -23,7 +23,7 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-- 命令行看全流程：`python run_demo.py 1`（1～5 为五个样例；请用上面虚拟环境里的 python）
+- 命令行看全流程：`python run_demo.py 1`（1～6 为六个样例；⑥ 会先列出纪要里识别到的几条需求；请用上面虚拟环境里的 python）
 - 测试：`pytest -q tests`
 
 不配置 Key 可以整理需求、写单、出原型，并查看**规则模板与历史记录参考**。配置模型后增加独立的大模型估时；未配置或调用失败只影响模型结果，不影响其他参考。页面只展示真实模型；**开工先显示规则初稿，再后台调用已配置的模型增强**。规则与历史参考、需求单和原型无需等待模型返回；未填 Key 时保留这些快结果，不显示模型运行中的状态。**页面底稿 / Git 仓库**：可上传 HTML，或粘贴多个文件/整仓链接；整仓会浅克隆并抽取前后端源码摘要，模型据此问清、估时、定架、出样（复刻现页再改）。**口述**仍可用（注意厂商语音服务合规）。API Key 仅会话有效。
@@ -61,18 +61,19 @@ app.py                  Streamlit 界面        run_demo.py  命令行全流程
 xuzhi/config.py         配置与品牌            xuzhi/llm.py  OpenAI 兼容客户端 + mock
 xuzhi/privacy.py        隐盾                  xuzhi/ledger.py  SQLite 台账（留痕 + 飞轮）
 xuzhi/knowledge.py      知识层加载            xuzhi/textutil.py  领域词典与文本工具
-xuzhi/pipeline/         intake 问清 · spec 写单 · estimate 模型估量 · estimate_references 规则与历史参考 · tasks 双轨任务结构 · architect 定架 · prototype 出样
+xuzhi/pipeline/         intake 问清 · spec 写单 · estimate 模型估量 · estimate_references 规则与历史参考 · tasks 双轨任务结构 · architect 定架 · prototype 出样 · split 纪要直通车（一段纪要拆成几条）
 xuzhi/drafts.py         页面底稿：上传 HTML / URL / git 拉取与解析
 xuzhi/memory.py         追问记忆（问过的不再问）      xuzhi/audit.py  模型调用审计
 xuzhi/sandbox.py        沙箱策略加载（sandbox.yaml）  xuzhi/reminders.py  催办摘要（附加，默认不推送）
 xuzhi/service.py        服务层：跑流水线 + 记账 + 序列化（REST / MCP 共用）
 xuzhi/channels/wecom/   企微入口：长连接 · 消息分发 · 答问会话 · 企微 markdown 渲染
-api.py                  REST API（FastAPI，/api/v1/*）  mcp_server.py  MCP 服务（xuzhi_clarify / estimate / architect / spec …）
+api.py                  REST API（FastAPI，/api/v1/*）  mcp_server.py  MCP 服务（xuzhi_clarify / estimate / architect / spec / split …）
+app_jira.py             Jira 需求评估页        app_minutes.py  纪要直通车（结果页签上方的拆分提示与切换）
 sandbox.yaml            沙箱策略（所有访问边界一页）
 knowledge/futures_probes.json   期货追问知识库（36 条示例，可增删）
 knowledge/system_catalog.json   公司系统 / 组件目录（11 个虚构系统）
 data/history_requirements.json  历史需求库（30 条虚构，含估算与实际人天）
-data/samples/           五个样例：微信 / 纪要 / 邮件 / Word；⑤ 是同一提出方的第二条，用来演示追问记忆
+data/samples/           六个样例：微信 / 纪要 / 邮件 / Word；⑤ 是同一提出方的第二条，用来演示追问记忆；⑥ 是一段提了三件事的晨会纪要，用来演示纪要直通车
 data/drafts/            示例页面底稿（净值日报 HTML）
 prompts/                模型润色提示词         tests/  pytest（150 项）
 tools/demo_seed.py      演示数据：一本账备份 → 清空 → 预置（重置演示数据.command / .bat）
@@ -92,14 +93,30 @@ tools/demo_seed.py      演示数据：一本账备份 → 清空 → 预置（�
 
 校准样本：把公司 Jira 导出的历史工单（含耗费时间）放进 `data/jira/历史/`，估算即按团队实际耗时校准；没有时用 `data/jira/示例_迭代导出（虚构）.csv` 里已完成的 8 条（虚构）。代码：`xuzhi/jira.py`（解析）、`xuzhi/pipeline/assess.py`（评估）、`app_jira.py`（页面）。
 
+## 纪要直通车（一段纪要拆成几条需求）
+
+晨会、周会纪要里常常一口气提好几件事：研究所要周报、风控部要提醒、资管部要页面。整段当一条需求分析，问题、工时、原型都会混在一起。开工后如果识别到 2 条以上需求，结果页签上方出现「纪要直通车：这段话里识别到 N 条需求」，列出每条的提出方、预览和拆分依据；点「拆成 N 条分别受理」，每条单独走问清、写单、估量、定架、出样，在一本账里各记一行。单条需求不出现任何提示，原来的流程不变。
+
+| 规则 | 说明 |
+|---|---|
+| 怎么切 | 按优先级：行首编号条目（1. / 1、 / （1） / 一、 / ① / - •）→ 部门开头（「风控部提出：」「研究所：」「资管部希望」）→ 句首连接词（还有一件事 / 第二件事 / 另外 / 此外 / 再就是 / 顺便）。编号只在像纪要、开头说了「几件事」或至少两条编号各带提出方时才切：需求单里的 1. 2. 3. 是同一条需求的功能点；「要求如下：」后面的编号也算这一条的要点 |
+| 什么算一条 | 有需求动词（要 / 希望 / 能不能 / 自动 / 提醒…）、不少于 12 字；参会名单、背景、「下周再议」这类决议、领导表态不算；太短的、只是上一条要点的并回上一条；单次最多 8 条 |
+| 带上什么 | 头部元信息（来源 / 时间 / 记录 / 主题 / 标题 / 日期）每条都带上，来源识别照常；参会名单不带（名单里的部门会被认成提出方）。头部点名的部门和本条提出方不同时，本条首行写明「提出方：××」 |
+| 提出方 | 本条开头点名的部门；没点名的沿用小节标题、开场白（「风控部提出两件事：」）或头部；段内别处出现的部门多是收件人，排在最后。开头点了领域词典里没有的部门（「结算部需要…」）照原话显示，不借上一条或头部的提出方；这类部门需求分析暂认不出，一本账里记「未注明」（头部点了部门时记头部的） |
+| 记账 | 每条记一行，流水「纪要拆分受理 · 同一段纪要拆出 3 条，第 2 条（原纪要 #12）」；整段那行保留原文，流水记「纪要拆分 · 已拆分为 #13 #14 #15」 |
+| 切换查看 | 拆完显示各条的编号、标题、类型、待确认数与规则参考（以前 → 现在，小时），用「查看哪一条」切到任意一条或回到整段，下方各页签跟着换；答复重算记在各自那行，切走再回来答复仍在。拆分本身和每条受理都只用规则，要模型润色可在切过去的那一条里点 |
+
+接口同样能用：`POST /api/v1/split`、MCP `xuzhi_split`（见下文「接口」）。代码：`xuzhi/pipeline/split.py`（切分规则）、`xuzhi/service.py`（`split` / `run_split`）、`app_minutes.py`（页面）。
+
 ## 现场演示（上台前 5 分钟）
 
 1. 先关掉需知，双击 `重置演示数据.command`（Windows：`重置演示数据.bat`）：一本账恢复成预置状态——20 条虚构需求、10 个部门、各状态都有、7 条已对账，催办摘要与追问记忆也有内容。当前数据先整份备份到 `data/backup/<时间>/`。
 2. 双击 `启动需知.command`，Chrome / Edge 全屏（1920×1080），首屏就是样例、原话与「需知，开工」；选模型、填 Key、底稿与仓库都收在「⚙️ 模型与材料」折叠栏里。
 3. 建议顺序：样例 ① 开工 → 问清前两题（结算时点、比较基准）答「结算后为准，夜盘算下一交易日」「上一交易日结算价，不复权」→ 重算 → 写单 / 估量 / 定架 / 出样（出样切客户版，集中度列消失）→ 一本账看板 → 选样例 ⑤ 开工，回到「问清」看 🧠 沿用上次口径 2 条。
-4. Jira 评估：顶部切到「Jira 需求评估」→「上传导出（批量）」→「用示例导出（虚构 14 条）」，看汇总、柱状图与逐条表；点 XZ-1040 看「原估偏乐观」，点 XZ-1036 看交易链路风险。也可在「零散需求」写单页点「转成 Jira 工单去评估」。
-5. 开工后先查看需求初稿、规则与历史参考、需求单和原型；配置了模型时，后台继续增强，页面显示当前步骤、已用时间及运行状态，完成后自动刷新同一条需求。也可在估量页点「大模型分析估时」或「重新分析估时」单独后台估时；运行中不能重复启动同一操作，但可以开新需求，旧任务随后完成也不会覆盖新需求。
-6. 未填 Key 时不显示模型加载状态；“尚无模型结果”表示还没有有效结果，不表示正在调用。模型失败或返回不合格时显示失败原因，规则、历史和已有需求初稿仍可使用。模型单次调用上限 `LLM_TIMEOUT`（默认 90 秒）。
+4. 纪要直通车：选样例 ⑥（投研晨会纪要）开工 → 结果上方提示识别到 3 条需求（研究所 / 风控部 / 资管部）→「拆成 3 条分别受理」→ 在「查看哪一条」切到第 2 条，问清 / 估量 / 出样都换成风控部的追保提醒 → 一本账里多出 3 行，整段那行的流水写着拆到了哪几条。
+5. Jira 评估：顶部切到「Jira 需求评估」→「上传导出（批量）」→「用示例导出（虚构 14 条）」，看汇总、柱状图与逐条表；点 XZ-1040 看「原估偏乐观」，点 XZ-1036 看交易链路风险。也可在「零散需求」写单页点「转成 Jira 工单去评估」。
+6. 开工后先查看需求初稿、规则与历史参考、需求单和原型；配置了模型时，后台继续增强，页面显示当前步骤、已用时间及运行状态，完成后自动刷新同一条需求。也可在估量页点「大模型分析估时」或「重新分析估时」单独后台估时；运行中不能重复启动同一操作，但可以开新需求，旧任务随后完成也不会覆盖新需求。
+7. 未填 Key 时不显示模型加载状态；“尚无模型结果”表示还没有有效结果，不表示正在调用。模型失败或返回不合格时显示失败原因，规则、历史和已有需求初稿仍可使用。模型单次调用上限 `LLM_TIMEOUT`（默认 90 秒）。
 
 预置数据全部虚构：看板数字只用来展示界面，不是试运行成绩。预置不写模型调用审计（那张表只记真实调用，现场点一次润色就会出现）。
 
@@ -145,10 +162,11 @@ tools/demo_seed.py      演示数据：一本账备份 → 清空 → 预置（�
 
 **REST**：`python api.py`（或双击 `启动接口.command`），文档在 http://127.0.0.1:8770/docs 。
 - `POST /api/v1/analyze` `{text, source?, answers?, req_id?, polish?, include_spec?, include_prototype?}` → 整条链 JSON（卡片、清单、确认消息、双轨估算、数据地图与决策、需求单）；答复重算时带 `answers` + 上次的 `req_id`，一本账在同一条上更新并写追问记忆
+- `POST /api/v1/split` `{text, record?}` 纪要直通车：返回 `{count, segments:[{index, requester, reason, title_hint, body, text}]}`（片段已过隐盾）；`count` 为 0 表示只有一条需求，照常调 analyze；`record: true` 时逐条按规则受理、各记一行账，另返回 `results`（每条的紧凑结果，含各自 `req_id`），之后可带 `req_id` 答复重算
 - `POST /api/v1/clarify` 只要问清；`GET /api/v1/requirements[/{id}]`、`POST …/{id}/status`、`POST …/{id}/reconcile` 一本账；`GET /api/v1/dashboard` 看板（含记忆与审计统计）；`GET /api/v1/digest` 催办摘要；`GET /api/v1/audit/llm` 模型调用审计；`GET /api/v1/sandbox` 沙箱策略
 - 安全：默认只监听 127.0.0.1；对外必须设 `XUZHI_API_HOST` 且配 `XUZHI_API_TOKEN`（否则拒绝启动）；请求体不接受模型 Key，模型只用服务端 .env；`polish` 默认 false（需求初稿走规则；估时以返回的状态为准，无模型时仍返回独立规则与历史参考）
 
-**MCP**：`python mcp_server.py`（stdio）或 `--transport streamable-http --port 8771`（只听本机）。工具：`xuzhi_clarify` 问清 · `xuzhi_estimate` 双轨估算 · `xuzhi_architect` 数据地图与决策 · `xuzhi_spec` 需求单 · `xuzhi_analyze` 整条链 · `xuzhi_ledger` 一本账 · `xuzhi_reconcile` 对账；资源 `xuzhi://sandbox`、`xuzhi://info`。
+**MCP**：`python mcp_server.py`（stdio）或 `--transport streamable-http --port 8771`（只听本机）。工具：`xuzhi_clarify` 问清 · `xuzhi_estimate` 双轨估算 · `xuzhi_architect` 数据地图与决策 · `xuzhi_spec` 需求单 · `xuzhi_analyze` 整条链 · `xuzhi_split` 纪要直通车（`record=true` 逐条受理）· `xuzhi_ledger` 一本账 · `xuzhi_reconcile` 对账；资源 `xuzhi://sandbox`、`xuzhi://info`。
 Claude Code：`claude mcp add xuzhi -- python /path/to/需知/mcp_server.py`；Cursor / Claude Desktop 的 `mcpServers` 里填同样的命令。三个工具带同一个 `req_id` 时落在同一条账上。
 
 依赖：`pip install -r requirements-api.txt`（比 Web 端多 fastapi / uvicorn / mcp / httpx）。
@@ -183,4 +201,4 @@ Claude Code：`claude mcp add xuzhi -- python /path/to/需知/mcp_server.py`；C
 
 ## 二期
 
-需求版本 diff（增删改、工时与架构影响、需重新确认项）、纪要直通车（一段纪要识别多条需求）、评测集 `eval_req.py`。
+需求版本 diff（增删改、工时与架构影响、需重新确认项）、评测集 `eval_req.py`。

@@ -2,6 +2,7 @@
 
 Web（app.py）和企微入口各有自己的交互逻辑，这里只负责三件事：
 1. run()：跑 analyze()，按 record 决定是否进一本账（首轮记一条；带 req_id 的答复轮更新答复数并写追问记忆）；
+   split() / run_split()：纪要直通车，一段纪要拆成几条，逐条跑规则流水线、各记一行账；
 2. to_dict()：把 Analysis 序列化成纯 JSON（dataclass → dict），供接口返回；
 3. 模型：只用服务端 .env 的网关（sandbox.yaml api.accept_keys_in_request=false，请求体不接受 Key）。
 """
@@ -16,6 +17,8 @@ from .ledger import Ledger, estimate_snapshot
 from .llm import LLM
 from .memory import Memory
 from .pipeline import Analysis, analyze
+from .pipeline.split import source_hint, split_requirements
+from .privacy import Redactor
 
 
 @dataclass
@@ -85,6 +88,47 @@ def run(
             ledger.update_answers(res.req_id, sum(1 for q in a.questions if q.answer.strip()), int(getattr(a.estimate, "unanswered_high", 0) or 0))
             res.learned = memory.learn(a.card, a.questions, res.req_id)
     return res
+
+
+def split(text: str) -> list[dict[str, Any]]:
+    """纪要直通车预览：识别到 2 条以上需求才返回各条，否则 []。
+    返回的原文片段先过隐盾（与其它接口一样不回显明文手机号、账号）；拆分本身只用规则。"""
+    red = Redactor()
+    return [
+        {"index": s.index, "requester": s.requester, "reason": s.reason, "title_hint": red.redact(s.title_hint).text,
+         "body": red.redact(s.body).text, "text": red.redact(s.text).text}
+        for s in split_requirements(text or "")
+    ]
+
+
+def run_split(
+    text: str,
+    *,
+    record: bool = True,
+    channel: str = "API",
+    ledger: Ledger | None = None,
+    memory: Memory | None = None,
+) -> list[RunResult]:
+    """纪要直通车：拆出的每条按规则跑一遍流水线（不调模型），record 时各记一行账（事件「纪要拆分受理」）。
+    识别不到 2 条返回 []，调用方照常按一条需求走 run()。"""
+    text = (text or "").strip()
+    if not text:
+        raise ValueError("原话不能为空")
+    segments = split_requirements(text)
+    if not segments:
+        return []
+    ledger = ledger if ledger is not None else (Ledger() if record else None)
+    memory = memory if memory is not None else Memory()
+    hint = source_hint(text)
+    out: list[RunResult] = []
+    for seg in segments:
+        a = analyze(seg.text, hint, None, llm_polish=False, memory=memory)
+        res = RunResult(a)
+        if record and ledger is not None:
+            res.req_id = ledger.log_analysis(a)
+            ledger.event(res.req_id, "纪要拆分受理", f"同一段纪要拆出 {len(segments)} 条，第 {seg.index} 条（{channel}）")
+        out.append(res)
+    return out
 
 
 def to_dict(a: Analysis, *, req_id: int = 0, include_spec: bool = True, include_prototype: bool = False,
