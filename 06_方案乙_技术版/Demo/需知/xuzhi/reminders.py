@@ -2,8 +2,8 @@
 
 三块内容，全部只有数量、需求标题、等待天数——不含原话、不含客户信息：
 1. 待业务确认超期：状态"受理"、还有高影响问题没答、受理超过 N 天；
-2. 已交付未对账：状态"已交付"超过 M 天还没回写实际人天（估算飞轮断了）；
-3. 本周受理汇总：各部门本周提了几条、各状态几条。
+2. 已交付未对账：改成"已交付"超过 M 天（按交付时间算）还没回写实际人天（偏差无从复盘）；
+3. 本周受理汇总：各部门本周提了几条（Jira 导入另计）、各状态几条。
 
 三种用法：
 - 拉：企微里发 /摘要，或 Web 一本账页"催办摘要"，或 GET /api/v1/digest；
@@ -39,6 +39,7 @@ class Digest:
     stale_reconcile: list[Item] = field(default_factory=list)
     week_by_dept: dict[str, int] = field(default_factory=dict)
     week_total: int = 0
+    week_jira: int = 0            # 本周导入的 Jira 工单：不是业务新提的需求，不算进本周受理
     by_status: dict[str, int] = field(default_factory=dict)
     stale_confirm_days: int = 3
     stale_reconcile_days: int = 5
@@ -62,6 +63,7 @@ def build_digest(ledger, now: datetime | None = None) -> Digest:
                stale_confirm_days=int(sandbox.get("notify.stale_confirm_days", 3) or 3),
                stale_reconcile_days=int(sandbox.get("notify.stale_reconcile_days", 5) or 5))
     rows = ledger.export_rows()
+    delivered = ledger.delivered_ts()   # 最近一次改成「已交付」的时间；老数据没有这条流水时退回受理时间
     week_start = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
     for r in rows:
         if r.get("split_into"):
@@ -72,8 +74,11 @@ def build_digest(ledger, now: datetime | None = None) -> Digest:
         dept = (r.get("dept") or "未注明").strip() or "未注明"
         d.by_status[status] = d.by_status.get(status, 0) + 1
         if ts and ts >= week_start:
-            d.week_total += 1
-            d.week_by_dept[dept] = d.week_by_dept.get(dept, 0) + 1
+            if r.get("source") == "Jira":
+                d.week_jira += 1
+            else:
+                d.week_total += 1
+                d.week_by_dept[dept] = d.week_by_dept.get(dept, 0) + 1
         if not ts:
             continue
         age = (now - ts).days
@@ -81,8 +86,10 @@ def build_digest(ledger, now: datetime | None = None) -> Digest:
         n_ans = int(r.get("n_answered") or 0)
         if status == "受理" and (high_open > 0 or n_ans == 0) and age >= d.stale_confirm_days:
             d.stale_confirm.append(Item(int(r["id"]), title, dept, age, f"{high_open} 个高影响问题未答" if high_open else "尚无业务答复"))
-        if status == "已交付" and age >= d.stale_reconcile_days and not r.get("actual_days"):
-            d.stale_reconcile.append(Item(int(r["id"]), title, dept, age, "未回写实际人天"))
+        if status == "已交付" and not r.get("actual_days"):
+            since = (now - (_parse_ts(delivered.get(int(r["id"])) or "") or ts)).days
+            if since >= d.stale_reconcile_days:
+                d.stale_reconcile.append(Item(int(r["id"]), title, dept, since, "未回写实际人天"))
     d.stale_confirm.sort(key=lambda i: -i.days)
     d.stale_reconcile.sort(key=lambda i: -i.days)
     return d
@@ -101,12 +108,15 @@ def render_digest(d: Digest, limit: int = 8) -> str:
         if len(d.stale_confirm) > limit:
             lines.append(f"- …另有 {len(d.stale_confirm) - limit} 条")
     if d.stale_reconcile:
-        lines.append(f"\n📒 **已交付未对账超 {d.stale_reconcile_days} 天：{len(d.stale_reconcile)} 条**（回写实际人天，估算才会越用越准）")
+        lines.append(f"\n📒 **已交付未对账超 {d.stale_reconcile_days} 天：{len(d.stale_reconcile)} 条**（回写实际人天，偏差才能复盘）")
         for it in d.stale_reconcile[:limit]:
             lines.append(f"- #{it.req_id} {it.title}（{it.dept}，交付后 {it.days} 天）")
-    if d.week_total:
+        if len(d.stale_reconcile) > limit:
+            lines.append(f"- …另有 {len(d.stale_reconcile) - limit} 条")
+    if d.week_total or d.week_jira:
         depts = "、".join(f"{k} {v}" for k, v in sorted(d.week_by_dept.items(), key=lambda kv: -kv[1])[:6])
-        lines.append(f"\n📈 **本周受理 {d.week_total} 条**：{depts}")
+        lines.append(f"\n📈 **本周受理 {d.week_total} 条**" + (f"：{depts}" if depts else "")
+                     + (f"（另有 Jira 导入 {d.week_jira} 条）" if d.week_jira else ""))
     if d.by_status:
         lines.append("状态：" + "，".join(f"{k} {v}" for k, v in d.by_status.items()))
     lines.append("\n_只含数量、标题与天数；详情在需知 Web 端一本账。_")
@@ -121,6 +131,7 @@ def digest_to_dict(d: Digest) -> dict[str, Any]:
         "stale_confirm": [it.__dict__ for it in d.stale_confirm],
         "stale_reconcile": [it.__dict__ for it in d.stale_reconcile],
         "week_total": d.week_total,
+        "week_jira": d.week_jira,
         "week_by_dept": dict(d.week_by_dept),
         "by_status": dict(d.by_status),
         "markdown": render_digest(d),

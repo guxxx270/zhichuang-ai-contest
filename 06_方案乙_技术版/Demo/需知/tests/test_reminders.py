@@ -25,12 +25,20 @@ def _backdate(ledger: Ledger, req_id: int, days: int) -> None:
     ledger.conn.commit()
 
 
+def _deliver(ledger: Ledger, req_id: int, days_ago: int) -> None:
+    """改成「已交付」，并把这条状态流水挪到 days_ago 天前（「交付后 N 天」按它算）。"""
+    ledger.set_status(req_id, "已交付")
+    ts = (datetime.now() - timedelta(days=days_ago)).isoformat(timespec="seconds")
+    ledger.conn.execute("UPDATE events SET ts=? WHERE req_id=? AND action='状态' AND detail='已交付'", (ts, req_id))
+    ledger.conn.commit()
+
+
 def test_digest_contents_and_privacy(ledger):
     r1 = ledger.log_analysis(analyze(T1))     # 受理、高影响未答 → 回溯 5 天 → 超期
     r2 = ledger.log_analysis(analyze(T2))     # 已交付 8 天未对账
     r3 = ledger.log_analysis(analyze(T3))     # 今天受理，不超期
     _backdate(ledger, r1, 5)
-    ledger.set_status(r2, "已交付")
+    _deliver(ledger, r2, 8)
     _backdate(ledger, r2, 8)
     d = reminders.build_digest(ledger)
     assert [it.req_id for it in d.stale_confirm] == [r1]
@@ -46,6 +54,44 @@ def test_digest_contents_and_privacy(ledger):
     ledger.reconcile(r2, 6, write_history=False)
     assert not reminders.build_digest(ledger).stale_reconcile
     assert r3 not in [it.req_id for it in reminders.build_digest(ledger).stale_confirm]
+
+
+def test_reconcile_reminder_counts_from_delivery_not_intake(ledger):
+    fresh = ledger.log_analysis(analyze(T2))   # 受理 30 天前，2 天前才交付：还不该催
+    late = ledger.log_analysis(analyze(T3))    # 受理 20 天前，8 天前交付
+    _backdate(ledger, fresh, 30)
+    _deliver(ledger, fresh, 2)
+    _backdate(ledger, late, 20)
+    _deliver(ledger, late, 8)
+
+    d = reminders.build_digest(ledger)
+
+    assert [(it.req_id, it.days) for it in d.stale_reconcile] == [(late, 8)]
+    assert "交付后 8 天" in reminders.render_digest(d)
+
+
+def test_reconcile_list_says_how_many_more(ledger):
+    ids = [ledger.log_analysis(analyze(t)) for t in (T1, T2, T3)]
+    for rid in ids:
+        _deliver(ledger, rid, 9)
+    md = reminders.render_digest(reminders.build_digest(ledger), limit=2)
+    assert "已交付未对账超 5 天：3 条" in md and "…另有 1 条" in md
+
+
+def test_jira_imports_are_not_this_weeks_intake(ledger):
+    from test_jira import STORY
+    from xuzhi.jira import parse_issue_text
+    from xuzhi.pipeline.assess import assess, calibrate
+
+    ledger.log_analysis(analyze(T3))
+    ledger.log_jira(assess(parse_issue_text(STORY), calibrate([])), "粘贴")
+
+    d = reminders.build_digest(ledger)
+
+    assert d.week_total == 1 and d.week_jira == 1 and "Jira 工单" not in d.week_by_dept
+    md = reminders.render_digest(d)
+    assert "本周受理 1 条" in md and "另有 Jira 导入 1 条" in md
+    assert reminders.digest_to_dict(d)["week_jira"] == 1
 
 
 def test_empty_ledger(ledger):

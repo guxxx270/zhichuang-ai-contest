@@ -25,8 +25,9 @@
 - low/mid/high 分别对应同一范围下顺利、常见、受阻的实施情形；在 reason 或 assumptions 中说明主要区间驱动因素。mid 采用明确写出的合理基准条件，不把所有未知都当成已发生的困难；high 可反映有具体触发原因的额外排查与返工，不累加彼此互斥的坏情形。
 - 缺代码时明确写“粗估”，confidence 只能为“低”。未知实现主要体现为证据缺口、条件假设和合理区间，不能仅因没给代码就给每个任务加惩罚工时。需要新建关系表、接入数据源等范围变化单列为需另估的触发条件，不悄悄计入当前基准。
 - 有 code_files 时引用真实文件 id 和原文，分析具体调用、筛选、计算、输出与测试逻辑对范围和工时的影响。只看到摘录，不能声称读完整仓库或运行过代码。页面 HTML 不证明业务后端已存在；不能虚构函数、表、复用能力或已验证结论。
-- 每项 evidence 至少一条。source=requirement 的 quote 必须逐字来自 requirement；source=answer 逐字来自 answers[].answer；source=code 的 file 必须等于 code_files[].id，quote 必须逐字来自对应 excerpt。待核对假设可引用需求说明核对原因，不得伪造代码证据。
-- assumptions 至少一条，说明估计成立的实施前提、尚需材料及能力限制。不要将“是否已有”“尚未包含”当作确认。所有数字为小时，low ≤ mid ≤ high 且 mid > 0。
+- 每项 evidence 至少一条。source=requirement 的 quote 必须逐字来自 requirement；source=answer 逐字来自 answers[].answer；source=code 的 file 必须等于 code_files[].id，quote 必须逐字来自对应 excerpt。quote 从原文直接复制一段连续文字，标点、空格和引号照抄，不改写、不缩写、不拼接。待核对假设可引用需求说明核对原因，不得伪造代码证据。
+- reference_pages（页面 HTML）只帮助理解界面，不能作为 evidence。
+- assumptions 至少一条，说明估计成立的实施前提、尚需材料及能力限制。不要将“是否已有”“尚未包含”当作确认。所有数字为小时，low ≤ mid ≤ high 且 mid > 0；单项 high 不超过 400 小时，超过请拆分。
 
 输出前自检：是否重复收费、重新追问已确认口径、把机器等待算成人时、把负责验收当成全量手算、把未提供代码当成缺少整个开发环境、或只对写代码打折而忽略调试测试？有则按工作事实修正，不按目标百分比改数字。
 
@@ -35,11 +36,37 @@
 - confidence: “低”/“中”/“高”；缺代码只能为“低”。
 - confidence_reason: 字符串，说明把握程度和缺口。
 - assumptions: 字符串列表，明确待核对条件。
-- tasks: 1～40 个工作项，每项字段如下：
+- tasks: 1～40 个工作项（建议不超过 15 项，输出过长会被截断），每项字段如下：
   - name: 不重复的具体工作名称。
   - phase: “需求与设计”/“开发”/“测试与比对”/“上线与培训”。
   - who: “AI 能做”/“AI 做人审”/“人必须做”，描述现在的分工。
   - change: 字符串，实际改动内容及复用边界。
-  - before: 对象，low/mid/high 为数值小时，reason 为这项人工开发工时的分析依据。
-  - after: 对象，low/mid/high 为数值小时，reason 说明代理执行方式和人的实际操作投入组成。
+  - before: 对象，low/mid/high 为数值小时，reason 为这项人工开发工时的分析依据（不超过 120 字）。
+  - after: 对象，low/mid/high 为数值小时，reason 说明代理执行方式和人的实际操作投入组成（不超过 120 字）。
   - evidence: 对象列表，字段 source、file、quote；非代码来源的 file 为 ""。
+
+JSON 骨架（数值处填小时数，不加引号；中文说明处换成实际内容，枚举值照抄其中一个；没有 code_files 时不写 source=code 的依据）：
+```json
+{
+  "summary": "本次修改范围与材料充分程度",
+  "confidence": "低 / 中 / 高 之一",
+  "confidence_reason": "把握程度与缺口",
+  "assumptions": ["待核对的实施前提或尚需材料"],
+  "tasks": [
+    {
+      "name": "具体工作名称",
+      "phase": "需求与设计 / 开发 / 测试与比对 / 上线与培训 之一",
+      "who": "AI 能做 / AI 做人审 / 人必须做 之一",
+      "change": "实际改动内容与复用边界",
+      "before": {"low": 数值, "mid": 数值, "high": 数值, "reason": "人工开发的主要操作与投入"},
+      "after": {"low": 数值, "mid": 数值, "high": 数值, "reason": "代理执行方式与人的投入"},
+      "evidence": [
+        {"source": "requirement", "file": "", "quote": "从 requirement 逐字复制的一段原文"},
+        {"source": "code", "file": "code_files[].id 原样", "quote": "从该文件 excerpt 逐字复制的代码"}
+      ]
+    }
+  ]
+}
+```
+
+若输入里有“上次校验错误”：说明上次输出没有通过程序校验，按其指出的问题修正后，重新输出完整的 JSON 对象。

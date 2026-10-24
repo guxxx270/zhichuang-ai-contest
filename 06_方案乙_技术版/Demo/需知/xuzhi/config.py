@@ -23,6 +23,10 @@ try:
     LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "").strip() or 90)   # 单次模型调用上限（秒）；连接 10 秒连不上即放弃
 except ValueError:
     LLM_TIMEOUT = 90.0
+try:
+    LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "").strip() or 0)   # 单次输出上限；0 = 不传，按网关默认
+except ValueError:
+    LLM_MAX_TOKENS = 0
 
 # 页面预设：(显示名, mode, provider_id, api_base, model_id)
 # model_id 为空：填 Key 后实时 GET /models；为 "__custom__" 时手填模型名。
@@ -47,12 +51,13 @@ LIVE_OPENAI_PROVIDERS: dict[str, str] = {
 DATA_DIR = ROOT / "data"
 SAMPLES_DIR = DATA_DIR / "samples"
 HISTORY_PATH = DATA_DIR / "history_requirements.json"
-HISTORY_LEARNED_PATH = DATA_DIR / "history_learned.json"   # 台账对账回写的真实样本（gitignore），与样本库合并使用
 KNOWLEDGE_DIR = ROOT / "knowledge"
 PROBES_PATH = KNOWLEDGE_DIR / "futures_probes.json"
 CATALOG_PATH = KNOWLEDGE_DIR / "system_catalog.json"
 PROMPT_DIR = ROOT / "prompts"
 LEDGER_DB = Path(os.getenv("XUZHI_LEDGER_DB", "").strip() or (DATA_DIR / "ledger.sqlite3"))   # 一本账 + 追问记忆 + 模型调用审计 同一个库
+# 台账对账回写的真实样本（gitignore），与样本库合并使用；跟着一本账放，换了库位置对账就不会写进别的库的历史
+HISTORY_LEARNED_PATH = Path(os.getenv("XUZHI_HISTORY_LEARNED", "").strip() or (LEDGER_DB.parent / "history_learned.json"))
 
 PRODUCT_NAME = "需知"
 PRODUCT_EN = "XuZhi"

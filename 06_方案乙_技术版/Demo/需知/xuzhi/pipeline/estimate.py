@@ -1,16 +1,19 @@
 """大模型逐项分析以前/现在的工时；程序校验证据和数字，只做汇总。"""
 from __future__ import annotations
 
+import itertools
 import json
 import math
+import re
+import unicodedata
 from dataclasses import dataclass, field
 from decimal import Decimal
 
 from ..drafts import Draft, RepoBundle, draft_context_for_llm, redact_material
-from ..llm import load_prompt
+from ..llm import OutputTruncated, gateway_unreachable, load_prompt
 from .intake import Card, Question
 from .estimate_references import build_references
-from .tasks import AI_DO, AI_REVIEW, HUMAN, PHASES, Task, who_split
+from .tasks import AI_DO, AI_REVIEW, HUMAN, PHASES, Task, delivery_mode, who_split
 
 
 ESTIMATION_COMPARISON = {
@@ -20,6 +23,12 @@ ESTIMATION_COMPARISON = {
     "unit": "有效人时：参与人员的实际投入之和；无人值守的模型生成、构建、测试运行及排期等待不计入人时，同一人的重叠时间不重复计算。",
     "environment": "待验证的实施前提：开发时双方均可访问项目代码、已有开发环境和必要测试样本，代理获得相应工具权限；材料明确限制能力时，以限制为准。估算时未提供源码不等于开发时无法取得源码。",
 }
+
+_TASK_HOURS_MAX = 400     # 单项上界：再大多半是单位写错（分钟当小时）或该拆成几项
+_TOTAL_HOURS_MAX = 4000   # 以前的上界合计：超过就不是一条需求的量级
+_QUOTE_MARKS = "\"'“”„‟‘’‚‛「」『』"
+_TO_STRAIGHT = str.maketrans({mark: '"' for mark in _QUOTE_MARKS})
+_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]{2,}")
 
 
 @dataclass
@@ -67,18 +76,44 @@ def _text(value, label: str, limit: int = 3000) -> str:
     return value.strip()
 
 
+def _label(value) -> str:
+    """阶段 / 分工 / 置信度 / 来源：NFKC、去掉全部空白和首尾引号再比，「AI做人审」「"开发"」照样认。"""
+    if not isinstance(value, str):
+        return ""
+    return re.sub(r"\s+", "", unicodedata.normalize("NFKC", value)).strip(_QUOTE_MARKS)
+
+
+def _choice(value, options) -> str | None:
+    """宽松匹配到标准写法；对不上返回 None。"""
+    key = _label(value)
+    return next((option for option in options if _label(option) == key), None) if key else None
+
+
+def _loose(text: str) -> str:
+    """依据比对用：NFKC、各种引号统一成直引号、去掉空白（标点保留）——少个空格、弯引号不等于伪造。"""
+    return re.sub(r"\s+", "", unicodedata.normalize("NFKC", text).translate(_TO_STRAIGHT))
+
+
+def _solid_code_quote(quote: str) -> bool:
+    """够格把结果升级为「已参考代码」的摘录：至少 12 个非空白字符且含标识符；一个字母也「出现在源码里」。"""
+    return len(re.sub(r"\s+", "", quote)) >= 12 and bool(_IDENTIFIER.search(quote))
+
+
 def _hours(track, label: str) -> tuple[Decimal, Decimal, Decimal, str]:
     if not isinstance(track, dict):
         raise ValueError(f"{label}缺少工时区间")
     values = []
     for key in ("low", "mid", "high"):
         value = track.get(key)
+        # 先比大小再判有限：超大整数直接 isfinite 会溢出
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 100000 or not math.isfinite(value):
             raise ValueError(f"{label}须为有限的非负小时数")
         values.append(Decimal(str(value)))
     low, mid, high = values
     if not low <= mid <= high or mid <= 0:
         raise ValueError(f"{label}区间应满足下界 ≤ 参考值 ≤ 上界，参考值须大于零")
+    if high > _TASK_HOURS_MAX:
+        raise ValueError(f"{label}单项上界超过 {_TASK_HOURS_MAX} 小时，请拆小工作项或核对单位")
     return low, mid, high, _text(track.get("reason"), f"{label}依据")
 
 
@@ -118,7 +153,7 @@ def _parse(data, payload: dict, result: Estimate) -> Estimate:
         raise ValueError("模型未返回估时对象")
     summary = _text(data.get("summary"), "分析摘要")
     why = _text(data.get("confidence_reason"), "置信度说明")
-    confidence = data.get("confidence")
+    confidence = _label(data.get("confidence"))[:1]   # 「低（粗估）」「中等」只看首字，回填标准写法
     if confidence not in ("低", "中", "高"):
         raise ValueError("置信度格式错误")
     assumptions = data.get("assumptions")
@@ -128,8 +163,9 @@ def _parse(data, payload: dict, result: Estimate) -> Estimate:
     raw_tasks = data.get("tasks")
     if not isinstance(raw_tasks, list) or not 1 <= len(raw_tasks) <= 40:
         raise ValueError("需要1至40项具体工作")
-    code = {f["id"]: f["excerpt"] for f in payload["code_files"]}
-    answers = [a["answer"] for a in payload["answers"]]
+    code = {f["id"]: _loose(f["excerpt"]) for f in payload["code_files"]}
+    requirement = _loose(payload["requirement"])
+    answers = [_loose(a["answer"]) for a in payload["answers"]]
     tasks, totals, phases, ai_phases = [], [Decimal(0) for _ in range(6)], {}, {}
     has_code_evidence = False
     names = set()
@@ -137,11 +173,11 @@ def _parse(data, payload: dict, result: Estimate) -> Estimate:
         if not isinstance(raw, dict):
             raise ValueError("工作项格式错误")
         name = _text(raw.get("name"), "工作项名称", 160)
-        if name in names:
-            raise ValueError("工作项名称重复，请合并后重估")
+        if name in names:   # 重名不作废整份：加序号区分，内容照常逐项校验
+            name = next(f"{name}（{n}）" for n in itertools.count(2) if f"{name}（{n}）" not in names)
         names.add(name)
-        phase, who = raw.get("phase"), raw.get("who")
-        if phase not in PHASES or who not in (AI_DO, AI_REVIEW, HUMAN):
+        phase, who = _choice(raw.get("phase"), PHASES), _choice(raw.get("who"), (AI_DO, AI_REVIEW, HUMAN))
+        if phase is None or who is None:
             raise ValueError("工作阶段或分工格式错误")
         change = _text(raw.get("change"), "具体改动")
         b_low, b_mid, b_high, b_reason = _hours(raw.get("before"), "以前")
@@ -153,19 +189,22 @@ def _parse(data, payload: dict, result: Estimate) -> Estimate:
         for ref in evidence:
             if not isinstance(ref, dict):
                 raise ValueError("依据格式错误")
-            source = ref.get("source")
+            source = _label(ref.get("source")).lower()
             quote = _text(ref.get("quote"), "依据摘录", 1500)
+            key = _loose(quote)
             file = ref.get("file", "")
             if source == "code":
-                if not isinstance(file, str) or file not in code or quote not in code[file]:
+                file = file.strip() if isinstance(file, str) else file
+                if not isinstance(file, str) or file not in code or key not in code[file]:
                     raise ValueError("代码依据未出现在本次提供的源码摘录中")
-                has_code_evidence = True
+                # 只有开发项里像样的代码摘录才把结果升级为「已参考代码」，否则粗估警告会被一个字母抹掉
+                has_code_evidence = has_code_evidence or (phase == "开发" and _solid_code_quote(quote))
             elif source == "requirement":
-                if quote not in payload["requirement"]:
+                if key not in requirement:
                     raise ValueError("需求依据未出现在原话中")
                 file = ""
             elif source == "answer":
-                if not any(quote in a for a in answers):
+                if not any(key in a for a in answers):
                     raise ValueError("答复依据未出现在业务答复中")
                 file = ""
             else:
@@ -179,6 +218,8 @@ def _parse(data, payload: dict, result: Estimate) -> Estimate:
         totals = [x + y for x, y in zip(totals, (b_low, b_mid, b_high, a_low, a_mid, a_high))]
         phases[phase] = phases.get(phase, Decimal(0)) + b_mid
         ai_phases[phase] = ai_phases.get(phase, Decimal(0)) + a_mid
+    if totals[2] > _TOTAL_HOURS_MAX:
+        raise ValueError(f"以前的上界合计超过 {_TOTAL_HOURS_MAX} 小时，不像一条需求的量级，请拆分需求或核对单位")
     # 所有检查通过后才公开整份结果；模型给的总计、系数、节省比例一律不采用。
     converted_totals = [_finite_number(n / 8) for n in totals]
     converted_phases = {k: _finite_number(v / 8) for k, v in phases.items()}
@@ -199,8 +240,38 @@ def _parse(data, payload: dict, result: Estimate) -> Estimate:
     result.summary = summary
     # 保存本次采用的比较口径；旧结果不随新提示词被重新解释。
     result.comparison = dict(payload["comparison"])
-    result.delivery = "以前与现在比较相同交付范围；两边均为预计投入工时，不含排期和等待时间。"
     result.method, result.status = "llm", "ready"
+    return result
+
+
+def _ask(llm, system: str, payload: dict):
+    llm.current_purpose = "估时分析"
+    return llm.chat_json(system, json.dumps(payload, ensure_ascii=False))
+
+
+def _call_failed(result: Estimate, exc: Exception) -> Estimate:
+    """调用失败按原因给能照着做的提示；不带网关返回的原文（可能含账号或密钥信息）。"""
+    result.status = "failed"
+    body = getattr(exc, "body", None)
+    detail = body.get("error", body) if isinstance(body, dict) else {}
+    error_code = getattr(exc, "code", None) or (detail.get("code") if isinstance(detail, dict) else None)
+    message = str(exc)
+    if isinstance(exc, OutputTruncated):
+        result.error = "模型输出被截断（max_tokens 不足或材料过多），尚未生成工时。请减少材料或换支持长输出的模型后重试。"
+    elif error_code == "model_not_found":
+        result.error = "当前网关没有为所选模型提供可用渠道，尚未生成工时。请读取可用模型目录，并核对账号分组支持的模型后重试。"
+    elif "沙箱策略拒发" in message:
+        result.error = "出站内容含明文敏感项，已按沙箱策略拒发，尚未生成工时；请检查材料与答复的脱敏。"
+    elif "网关超时或连不上" in message or gateway_unreachable(exc):
+        result.error = "模型网关超时或连不上，尚未生成工时；稍后再试。"
+    else:
+        result.error = "模型估时调用失败，尚未生成工时。请检查模型连接后重新分析。"
+    return result
+
+
+def _ready(result: Estimate, card: Card, text: str) -> Estimate:
+    # 交付建议按模型给的分工占比与原话风险算：AI 能做的多、人工少、无对客 / 交易风险的报表与页面可业务自建
+    result.delivery = delivery_mode(card, result.who, text)
     return result
 
 
@@ -214,23 +285,26 @@ def estimate(card: Card, text: str, questions: list[Question], *, llm=None,
         return result
     result.model = getattr(llm, "model", "")
     try:
+        system = load_prompt("estimate_analysis")
         payload = _payload(text, questions, card, list(repos or []), list(drafts or []))
         result.code_files = [f["id"] for f in payload["code_files"]]
-        llm.current_purpose = "估时分析"
-        data = llm.chat_json(load_prompt("estimate_analysis"), json.dumps(payload, ensure_ascii=False))
+        data = _ask(llm, system, payload)
         result.model = getattr(llm, "last_model", "") or result.model
     except Exception as exc:
-        result.status = "failed"
-        result.error = "模型估时调用失败，尚未生成工时。请检查模型连接后重新分析。"
-        body = getattr(exc, "body", None)
-        detail = body.get("error", body) if isinstance(body, dict) else {}
-        error_code = getattr(exc, "code", None) or (detail.get("code") if isinstance(detail, dict) else None)
-        if error_code == "model_not_found":
-            result.error = "当前网关没有为所选模型提供可用渠道，尚未生成工时。请读取可用模型目录，并核对账号分组支持的模型后重试。"
-        return result
+        return _call_failed(result, exc)
     try:
-        return _parse(data, payload, result)
+        return _ready(_parse(data, payload, result), card, text)
+    except ValueError as exc:
+        problem = str(exc)
+    # 格式不合格只重问一次，带上校验错误让模型照着改；连接、截断等调用异常不重问。
+    try:
+        data = _ask(llm, system, {**payload, "上次校验错误": problem})
+        result.model = getattr(llm, "last_model", "") or result.model
+    except Exception as exc:
+        return _call_failed(result, exc)
+    try:
+        return _ready(_parse(data, payload, result), card, text)
     except ValueError as exc:
         result.status = "failed"
-        result.error = "模型估时结果未通过校验：" + str(exc) + "。请重新分析。"
+        result.error = f"模型输出格式不合格：{exc}；可直接重试。"
         return result

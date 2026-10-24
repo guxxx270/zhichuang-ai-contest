@@ -46,3 +46,39 @@ def test_seed_fills_dashboard_without_touching_demo(tmp_db):
     # 再跑一次：清掉重来，条数不翻倍
     assert demo_seed.main([]) == 0 and Ledger().dashboard()["count"] == len(demo_seed.PLAN)
     assert demo_seed.main(["--empty"]) == 0 and Ledger().dashboard()["count"] == 0
+    assert len(list((tmp_db / "backup").iterdir())) == 3   # 连跑三次各备一份，同一秒也不互相覆盖
+
+
+def test_reset_says_reopen_not_refresh(tmp_db, capsys):
+    """旧页面里的需求编号在重置后已失效，刷新救不回来；提示与 README「先关掉需知」一致。"""
+    assert demo_seed.main(["--empty"]) == 0
+    out = capsys.readouterr().out
+    assert demo_seed.REOPEN in out and "刷新" not in out
+    for name in ("重置演示数据.command", "重置演示数据.bat"):
+        script = (demo_seed.ROOT / name).read_text(encoding="utf-8")
+        assert "请关闭需知后重新打开（旧页面里的需求编号已失效）" in script and "刷新" not in script
+
+
+def test_seed_counts_each_recalled_question_once(tmp_db, monkeypatch):
+    """「记忆省问」= 开工时沿用了几题；答复重算时那几题照页面那样随答复带上，不再 recall 一遍。"""
+    calls: list[tuple[bool, int]] = []   # (是否答复重算, 本次沿用条数)
+    real_analyze, real_recall = demo_seed.analyze, Memory.recall
+    rerun = {"on": False}
+
+    def analyze_spy(text, *args, answers=None, **kwargs):
+        rerun["on"] = bool(answers)
+        return real_analyze(text, *args, answers=answers, **kwargs)
+
+    def recall_spy(self, card, questions):
+        n = real_recall(self, card, questions)
+        calls.append((rerun["on"], n))
+        return n
+
+    monkeypatch.setattr(demo_seed, "analyze", analyze_spy)
+    monkeypatch.setattr(Memory, "recall", recall_spy)
+    out = demo_seed.seed()
+
+    first = sum(n for again, n in calls if not again)
+    assert first > 0, "预置数据里应有沿用记忆的题，否则测不出重复计数"
+    assert sum(n for again, n in calls if again) == 0
+    assert out["memory"]["hits"] == Memory().stats()["hits"] == first
