@@ -133,6 +133,27 @@ def get_requirement(req_id: int) -> dict[str, Any]:
     return row
 
 
+@app.get("/api/v1/requirements/{req_id}/versions", dependencies=[Depends(require_token)])
+def list_versions(req_id: int) -> dict[str, Any]:
+    """版本记录：受理、业务答复重算、模型增强、模型估时、需求变更各存一版快照（要素、待确认、工时、数据地图、决策）。"""
+    if not ledger().get(req_id):
+        raise HTTPException(status_code=404, detail=f"一本账里没有编号 {req_id}")
+    found = ledger().versions_of(req_id)
+    return {"req_id": req_id, "count": len(found), "versions": found}
+
+
+@app.get("/api/v1/requirements/{req_id}/diff", dependencies=[Depends(require_token)])
+def diff_versions(req_id: int, v_from: int = Query(0, alias="from", ge=0, description="旧版本号，0 = to 的上一版"),
+                  v_to: int = Query(0, alias="to", ge=0, description="新版本号，0 = 最新")) -> dict[str, Any]:
+    """两版对比（默认最近两版）：增删改、工时变化（模型与规则分开比）、数据地图与决策影响、需重新确认项，附变更说明 Markdown。"""
+    try:
+        return service.version_diff(ledger(), req_id, v_from, v_to)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+
+
 @app.post("/api/v1/requirements/{req_id}/status", dependencies=[Depends(require_token)])
 def set_status(req_id: int, body: StatusIn) -> dict[str, Any]:
     if body.status not in STATUSES or body.status == "已对账":

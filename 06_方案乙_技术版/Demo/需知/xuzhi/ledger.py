@@ -1,5 +1,6 @@
 """需求一本账（台账）：SQLite 记录每一次分析（卡片 / 清单 / 估算 / 决策）、业务答复、状态流转、对账与反馈。
-既是审计留痕，也是估算飞轮的数据：对账回写实际人天 → 追加到历史需求库 → 下次估量自动校准；看板按部门 / 类型 / 状态汇总。"""
+既是审计留痕，也是估算飞轮的数据：对账回写实际人天 → 追加到历史需求库 → 下次估量自动校准；看板按部门 / 类型 / 状态汇总。
+每条需求另存版本快照（versions 表）：受理、答复重算、模型增强、需求变更各一版，供版本对比（xuzhi/versions.py）。"""
 from __future__ import annotations
 
 import dataclasses
@@ -11,7 +12,7 @@ import sqlite3
 from dataclasses import asdict, is_dataclass
 from datetime import datetime
 
-from . import config
+from . import config, versions
 from .jira import DONE_STATUSES, HOURS_PER_DAY, JiraIssue
 
 MINUTES_SAVED = {"问清": 60, "写单": 90, "估量": 30, "定架": 60, "出样": 120}   # 与人工相比的估计节省，方案文档里需校准
@@ -99,6 +100,8 @@ class Ledger:
             engine TEXT, n_questions INTEGER, n_answered INTEGER, mid_days REAL, confidence TEXT, redacted INTEGER, payload TEXT);
         CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, req_id INTEGER, action TEXT, detail TEXT);
         CREATE TABLE IF NOT EXISTS feedback(id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, req_id INTEGER, skill TEXT, score INTEGER, note TEXT);
+        CREATE TABLE IF NOT EXISTS versions(id INTEGER PRIMARY KEY AUTOINCREMENT, req_id INTEGER, ts TEXT, label TEXT, snapshot TEXT);
+        CREATE INDEX IF NOT EXISTS idx_versions_req ON versions(req_id);
         """)
         # 逐列补齐（老库无该列时才加）
         for col, typ in (("ai_days", "REAL"), ("dept", "TEXT"), ("status", "TEXT"), ("actual_days", "REAL"),
@@ -125,7 +128,9 @@ class Ledger:
                          "decisions": [d.recommended for d in a.architecture.decisions],
                          "data_map": [r.__dict__ for r in getattr(a.architecture, "data_map", [])]}, ensure_ascii=False)))
         self.conn.commit()
-        return int(cur.lastrowid)
+        rid = int(cur.lastrowid)
+        self.add_version(rid, a, "受理")
+        return rid
 
     def log_jira(self, a, origin: str = "粘贴") -> tuple[int, bool]:
         """记一条 Jira 评估（xuzhi.pipeline.assess.Assessment）。同一单号再评只更新数字、记「Jira 重新评估」，不重复建账；
@@ -209,8 +214,8 @@ class Ledger:
                  json.dumps({"previous": previous, "current": current}, ensure_ascii=False)),
             )
 
-    def update_analysis(self, req_id: int, analysis) -> None:
-        """把后台增强结果更新到同一条需求，保留其状态和审计记录。"""
+    def update_analysis(self, req_id: int, analysis, label: str = "模型增强") -> int:
+        """把后台增强结果更新到同一条需求，保留其状态和审计记录；另存一版（内容没变不另存）。返回最新版本号。"""
         self.update_estimate(req_id, analysis.estimate)
         row = self.get(req_id)
         payload = json.loads(row.get("payload") or "{}")
@@ -224,6 +229,47 @@ class Ledger:
                  sum(bool(q.answer.strip()) for q in analysis.questions), analysis.estimate.unanswered_high,
                  analysis.seconds, json.dumps(payload, ensure_ascii=False), req_id),
             )
+        return self.add_version(req_id, analysis, label)
+
+    def record_change(self, req_id: int, analysis, channel: str = "") -> int:
+        """需求变更：原话改了，同一编号换成新原话的分析，记「需求变更」流水并存一版。返回最新版本号。
+        受理时间、来源、提出方与状态不动（还是这条需求）；类型与脱敏处数跟着新原话走。"""
+        if not self.get(req_id):
+            raise ValueError(f"台账里没有编号 {req_id}")
+        before = self.latest_version(req_id)
+        with self.conn:
+            self.conn.execute("UPDATE requirements SET req_type=?, redacted=? WHERE id=?",
+                              (analysis.card.req_type, int(getattr(analysis, "redacted", 0) or 0), req_id))
+        n = self.update_analysis(req_id, analysis, label="需求变更")
+        if before and n > before["version"]:
+            d = versions.diff(before["snapshot"], self.latest_version(req_id)["snapshot"], before["version"], n)
+            detail = f"记为 v{n}，{d.summary}"
+        elif before:
+            detail = f"原话与分析结果同 v{n}，未另存版本"
+        else:
+            detail = f"记为 v{n}"
+        self.event(req_id, "需求变更", detail + (f"（{channel}）" if channel else ""))
+        return n
+
+    def add_version(self, req_id: int, analysis, label: str = "") -> int:
+        """存一版分析快照（analysis 也可直接给快照 dict）。和最新一版比不出差别（顺序变化不算）就不另存。
+        返回本条最新的版本号（从 1 起）；台账里没有这条需求返回 0。"""
+        req_id = int(req_id or 0)
+        if not req_id or not self.conn.execute("SELECT 1 FROM requirements WHERE id=?", (req_id,)).fetchone():
+            return 0
+        body = json.dumps(analysis if isinstance(analysis, dict) else versions.snapshot(analysis), ensure_ascii=False)
+        count, last = self.conn.execute(
+            "SELECT COUNT(*), (SELECT snapshot FROM versions WHERE req_id=? ORDER BY id DESC LIMIT 1) FROM versions WHERE req_id=?",
+            (req_id, req_id)).fetchone()
+        try:
+            if last and versions.same(json.loads(last), json.loads(body)):
+                return int(count)
+        except (ValueError, TypeError, AttributeError):
+            pass   # 旧版快照坏了就照常另存
+        with self.conn:
+            self.conn.execute("INSERT INTO versions(req_id,ts,label,snapshot) VALUES(?,?,?,?)",
+                              (req_id, datetime.now().isoformat(timespec="seconds"), label, body))
+        return int(count) + 1
 
     def event(self, req_id: int, action: str, detail: str = "") -> None:
         self.conn.execute("INSERT INTO events(ts,req_id,action,detail) VALUES(?,?,?,?)", (datetime.now().isoformat(timespec="seconds"), req_id, action, detail))
@@ -321,6 +367,22 @@ class Ledger:
     def events_of(self, req_id: int) -> list[dict]:
         cur = self.conn.execute("SELECT ts,action,detail FROM events WHERE req_id=? ORDER BY id", (req_id,))
         return [{"ts": t, "action": a, "detail": d} for t, a, d in cur.fetchall()]
+
+    def versions_of(self, req_id: int) -> list[dict]:
+        """本条全部版本（旧 → 新）：版本号（1 起）、时间、动作、快照。"""
+        out = []
+        rows = self.conn.execute("SELECT ts, label, snapshot FROM versions WHERE req_id=? ORDER BY id", (int(req_id or 0),)).fetchall()
+        for n, (ts, label, body) in enumerate(rows, 1):
+            try:
+                snap = json.loads(body or "{}")
+            except ValueError:
+                snap = {}
+            out.append({"version": n, "ts": ts or "", "label": label or "", "snapshot": snap if isinstance(snap, dict) else {}})
+        return out
+
+    def latest_version(self, req_id: int) -> dict | None:
+        found = self.versions_of(req_id)
+        return found[-1] if found else None
 
     def export_rows(self) -> list[dict]:
         """审计导出：全部需求行（不含 payload 原文）。"""

@@ -32,7 +32,8 @@ mcp = FastMCP(
     instructions=(
         f"{config.PRODUCT_NAME}（XuZhi）：期货公司技术部的需求分析智能体。把业务的一堆话交给 xuzhi_clarify 先问清，"
         "拿到业务答复后用 answers 重算；xuzhi_estimate 给双轨工时（传统 vs AI 协同）；xuzhi_architect 给数据地图与 IT 决策；"
-        "xuzhi_spec 出双版需求单。所有数字由程序算，模型只组织语言。原话进入前已本地脱敏。"
+        "xuzhi_spec 出双版需求单；需求改了就带同一 req_id 重发，xuzhi_diff 看两版差异与需重新确认项。"
+        "所有数字由程序算，模型只组织语言。原话进入前已本地脱敏。"
     ),
 )
 
@@ -113,6 +114,15 @@ def xuzhi_ledger(n: int = 20) -> str:
     """一本账：最近 n 条需求（编号、标题、部门、状态、问题数/已答复、传统与 AI 协同人天、实际人天）与经营看板汇总。"""
     ledger, memory = _deps()
     return _dump({"recent": ledger.recent(n), "dashboard": ledger.dashboard(), "memory": memory.stats()})
+
+
+@mcp.tool()
+def xuzhi_diff(req_id: int, from_version: int = 0, to_version: int = 0) -> str:
+    """需求版本对比：同一条需求（req_id）两版之间改了什么——功能点、要素、待确认与答复、工时（模型估时与规则参考分开比，不混算）、
+    数据地图、IT 决策，以及需重新确认的事项，附可直接发给业务 / 开发的变更说明 Markdown。
+    默认对比最近两版（0 = 自动）；受理、业务答复重算、模型增强、需求变更（带同一 req_id 发来改过的原话）时自动存版本。"""
+    ledger, _ = _deps()
+    return _dump(service.version_diff(ledger, int(req_id), int(from_version or 0), int(to_version or 0)))
 
 
 @mcp.tool()

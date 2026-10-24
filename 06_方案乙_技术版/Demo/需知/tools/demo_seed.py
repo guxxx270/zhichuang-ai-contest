@@ -1,7 +1,7 @@
 """演示数据：把一本账恢复成上台用的预置状态（上台前双击 重置演示数据.command）。
 
 做什么：
-  1. 当前一本账（data/ledger.sqlite3：需求 / 流水 / 追问记忆 / 模型调用审计）与 data/history_learned.json 先整份备份到 data/backup/<时间>/；
+  1. 当前一本账（data/ledger.sqlite3：需求 / 流水 / 版本 / 追问记忆 / 模型调用审计）与 data/history_learned.json 先整份备份到 data/backup/<时间>/；
   2. 清空上述数据（就地清表，需知页面开着也不会写到旧文件里）；
   3. 用评测集里的虚构需求 + 本文件 6 条虚构需求，真实跑一遍规则引擎（不调模型）记进一本账，
      再按计划补上业务答复、状态流转与对账，时间分散到近 8 周 —— 看板、催办摘要、追问记忆都有内容。
@@ -107,7 +107,7 @@ def clear() -> None:
     Ledger(), Memory()   # 确保表都在（老库 / 空库）
     conn = sqlite3.connect(str(config.LEDGER_DB))
     tables = [t for (t,) in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")]
-    for t in ("requirements", "events", "feedback", "answer_memory", "llm_calls"):
+    for t in ("requirements", "events", "feedback", "answer_memory", "llm_calls", "versions"):
         if t in tables:
             conn.execute(f"DELETE FROM {t}")
     if "sqlite_sequence" in tables:
@@ -138,6 +138,7 @@ def seed(now: datetime | None = None) -> dict:
             ledger.event(rid, "业务答复重算", f"{len(answers)} 条")
             ledger.update_answers(rid, sum(1 for q in a.questions if q.answer.strip()), int(getattr(a.estimate, "unanswered_high", 0) or 0))
             ledger.update_estimate(rid, a.estimate)
+            ledger.add_version(rid, a, "业务答复重算")
             learned = memory.learn(a.card, a.questions, rid)
             if learned:
                 ledger.event(rid, "追问记忆", f"记住 {learned} 条口径（{a.card.requester or '未注明'}）")
@@ -162,6 +163,12 @@ def _backdate(ledger: Ledger, memory: Memory, rid: int, t0: datetime, days_ago: 
         ledger.conn.execute("UPDATE events SET ts=? WHERE id=?", (t.isoformat(timespec="seconds"), eid))
         if _action == "对账":
             ledger.conn.execute("UPDATE requirements SET closed_ts=? WHERE id=?", (t.isoformat(timespec="seconds"), rid))
+    # 版本时间跟流水对齐：受理那版落在受理时间，答复重算那版落在对应流水的时间
+    first_ts: dict[str, str] = {}
+    for action, ts in ledger.conn.execute("SELECT action, ts FROM events WHERE req_id=? ORDER BY id", (rid,)).fetchall():
+        first_ts.setdefault(action, ts)
+    for vid, label in ledger.conn.execute("SELECT id, label FROM versions WHERE req_id=? ORDER BY id", (rid,)).fetchall():
+        ledger.conn.execute("UPDATE versions SET ts=? WHERE id=?", (first_ts.get(label) or t0.isoformat(timespec="seconds"), vid))
     ledger.conn.commit()
     memory.conn.execute("UPDATE answer_memory SET ts=? WHERE req_id=?", ((t0 + timedelta(hours=2)).isoformat(timespec="seconds"), rid))
     memory.conn.commit()

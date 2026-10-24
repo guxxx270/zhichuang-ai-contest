@@ -1,9 +1,10 @@
 """服务层：给 REST API / MCP / 其它入口共用的"跑一遍流水线 + 记账 + 序列化"。
 
-Web（app.py）和企微入口各有自己的交互逻辑，这里只负责三件事：
-1. run()：跑 analyze()，按 record 决定是否进一本账（首轮记一条；带 req_id 的答复轮更新答复数并写追问记忆）；
+Web（app.py）和企微入口各有自己的交互逻辑，这里只负责四件事：
+1. run()：跑 analyze()，按 record 决定是否进一本账（首轮记一条；带 req_id 的答复轮更新答复数并写追问记忆；每轮存一版）；
 2. to_dict()：把 Analysis 序列化成纯 JSON（dataclass → dict），供接口返回；
-3. 模型：只用服务端 .env 的网关（sandbox.yaml api.accept_keys_in_request=false，请求体不接受 Key）。
+3. version_diff()：同一条需求两版对比（默认最近两版），供 REST / MCP；
+4. 模型：只用服务端 .env 的网关（sandbox.yaml api.accept_keys_in_request=false，请求体不接受 Key）。
 """
 from __future__ import annotations
 
@@ -11,7 +12,7 @@ import json
 from dataclasses import asdict, dataclass, is_dataclass
 from typing import Any
 
-from . import config
+from . import config, versions
 from .ledger import Ledger, estimate_snapshot
 from .llm import LLM
 from .memory import Memory
@@ -73,7 +74,12 @@ def run(
         n_ans = sum(1 for q in a.questions if q.answer.strip())
         ledger.event(res.req_id, "业务答复重算", f"{len(answers)} 条（{channel}）")
         ledger.update_answers(res.req_id, n_ans, int(getattr(a.estimate, "unanswered_high", 0) or 0))
-        ledger.update_estimate(res.req_id, a.estimate)
+        if _text_changed(ledger, res.req_id, a):
+            # 带同一 req_id 发来改过的原话 = 需求变更：整条换成新分析，记「需求变更」并存一版
+            ledger.record_change(res.req_id, a, channel)
+        else:
+            ledger.update_estimate(res.req_id, a.estimate)
+            ledger.add_version(res.req_id, a, "业务答复重算" if answers else "重新分析")
         if answers:
             res.learned = memory.learn(a.card, a.questions, res.req_id)
             if res.learned:
@@ -85,6 +91,44 @@ def run(
             ledger.update_answers(res.req_id, sum(1 for q in a.questions if q.answer.strip()), int(getattr(a.estimate, "unanswered_high", 0) or 0))
             res.learned = memory.learn(a.card, a.questions, res.req_id)
     return res
+
+
+def _text_changed(ledger: Ledger, req_id: int, a: Analysis) -> bool:
+    """和最新一版的原话指纹比（台账不存原话）；还没有版本或旧版没有指纹，就当原话没变。"""
+    last = ledger.latest_version(req_id) or {}
+    sig = (last.get("snapshot") or {}).get("text_sig") or ""
+    return bool(sig) and sig != versions.text_sig(a.redacted_text)
+
+
+def _version_meta(v: dict) -> dict[str, Any]:
+    return {"version": v["version"], "ts": v["ts"], "label": v["label"]}
+
+
+def version_diff(ledger: Ledger, req_id: int, v_from: int = 0, v_to: int = 0) -> dict[str, Any]:
+    """两版对比：结构化差异 + 变更说明 Markdown。默认最近两版；只给 to 时对比它的上一版。
+    没有这条需求抛 LookupError；版本不够或版本号不对抛 ValueError。"""
+    row = ledger.get(int(req_id))
+    if not row:
+        raise LookupError(f"一本账里没有编号 {req_id}")
+    found = ledger.versions_of(int(req_id))
+    n = len(found)
+    if n < 2:
+        raise ValueError(f"#{req_id} 只有 {n} 版，至少两版才能对比（业务答复重算、模型增强或需求变更后会存新版）")
+    to = int(v_to or n)
+    if not v_from and to == 1:
+        raise ValueError("v1 是第一版，前面没有可比的版本；请同时给 from")
+    frm = int(v_from or to - 1)
+    for v in (frm, to):
+        if not 1 <= v <= n:
+            raise ValueError(f"#{req_id} 只有 v1～v{n}，没有 v{v}")
+    if frm == to:
+        raise ValueError("from 与 to 是同一版，请选两个不同的版本")
+    old, new = found[frm - 1], found[to - 1]
+    d = versions.diff(old["snapshot"], new["snapshot"], v_old=frm, v_new=to)
+    title = new["snapshot"].get("title") or row.get("title") or ""
+    return {"req_id": int(req_id), "title": title, "from": _version_meta(old), "to": _version_meta(new),
+            "versions": [_version_meta(v) for v in found], "summary": d.summary, "diff": d.to_dict(),
+            "markdown": versions.diff_markdown(d, title, old, new)}
 
 
 def to_dict(a: Analysis, *, req_id: int = 0, include_spec: bool = True, include_prototype: bool = False,

@@ -13,6 +13,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from app_jira import SRC_OPTIONS, calib_pool, jira_text_from_analysis, render_jira_mode
+import app_versions
 
 from xuzhi import config, knowledge, sandbox, textutil
 from xuzhi.asr import correct_domain_speech
@@ -161,8 +162,8 @@ iframe[title="xuzhi_dictation"] { border: none !important; }
 
 
 @st.cache_resource
-def get_ledger(api_version: str = "progressive-analysis-v2") -> Ledger:
-    """API 版本参与缓存，升级后不复用缺少模型估时接口的旧实例。"""
+def get_ledger(api_version: str = "versions-v1") -> Ledger:
+    """API 版本参与缓存，升级后不复用缺少新接口（模型估时、版本记录）的旧实例。"""
     return Ledger()
 
 
@@ -359,6 +360,7 @@ def render_ledger(ledger: Ledger, memory: Memory, audit: Audit, *, req_id: int =
                         st.caption(f"{ev['ts'][5:16]}　{ev['action']}　{event_detail}")
                 else:
                     st.caption("还没有流水。")
+            app_versions.render_version_history(ledger, picked)   # 版本记录：任选两版对比，下载变更说明
 
     st.markdown("#### 需求经营看板")
     dash = ledger.dashboard()
@@ -645,6 +647,8 @@ def _settle_model_job(ledger: Ledger) -> bool:
         st.session_state.analysis = current
         if meta["kind"] == "estimate":
             ledger.update_estimate(meta["req_id"], current.estimate)
+            if current.estimate.status == "ready":   # 只有成功的模型估时算一版，失败不记
+                ledger.add_version(meta["req_id"], current, "模型估时")
         else:
             ledger.update_analysis(meta["req_id"], current)
     else:
@@ -1231,6 +1235,7 @@ with intake_area:
                 args=(choice, text_key),
             )
             go = st.button("需知，开工", type="primary", icon=":material/bolt:")
+            change_of = app_versions.change_toggle()   # 屏上已有分析时可记为它的新版本（需求变更），0 = 新需求
 
 llm = None
 if go:
@@ -1277,7 +1282,9 @@ if go:
         try:
             with st.spinner("正在生成快速初稿、规则模板、历史参考和原型……"):
                 a = analyze(
-                    text, "" if src == "自动识别" else src, llm, answers=None,
+                    text, "" if src == "自动识别" else src, llm,
+                    answers=app_versions.carried_answers(st.session_state.get("analysis"), st.session_state.get("answers"))
+                    if change_of else None,
                     mobile=mobile, client_view=client, llm_polish=False,
                     drafts=drafts, repos=repos, memory=memory,
                 )
@@ -1288,7 +1295,10 @@ if go:
         st.session_state.drafts = drafts
         st.session_state.repos = repos
         st.session_state.answers = {}
-        st.session_state.req_id = ledger.log_analysis(a)
+        if change_of:   # 需求变更：沿用编号，同一行更新、记「需求变更」并存一版
+            app_versions.apply_change(ledger, change_of, a)
+        else:
+            st.session_state.req_id = ledger.log_analysis(a)
         st.session_state.last_llm = {
             "mode": llm.mode, "model": llm.model, "api_base": run_base, "backend": backend_sel,
             "provider_id": provider_id,
@@ -1326,6 +1336,7 @@ else:
         st.warning("模型分析未完全成功；已保留快速初稿、规则模板和历史参考，可在对应页签重试。")
     else:
         st.info("快速结果已生成 · 尚未调用模型。规则初稿、模板和历史参考均可查看。")
+app_versions.render_change_banner(ledger, st.session_state.get("req_id", 0), a)   # 存了新版就一句话说清本次改了什么
 _mat = st.session_state.get("materials_report") or materials_report(
     getattr(a, "drafts", None) or st.session_state.get("drafts"),
     getattr(a, "repos", None) or st.session_state.get("repos"),
@@ -1453,6 +1464,7 @@ with tabs[0]:
             ledger.update_answers(_rid, sum(1 for q in a2.questions if q.answer.strip()), int(getattr(a2.estimate, "unanswered_high", 0) or 0))
             if _rid:
                 ledger.update_estimate(_rid, a2.estimate)
+                ledger.add_version(_rid, a2, "业务答复重算")
             _learned = memory.learn(a2.card, a2.questions, _rid)
             if _learned:
                 ledger.event(_rid, "追问记忆", f"记住 {_learned} 条口径（{a2.card.requester or '未注明'}）")
