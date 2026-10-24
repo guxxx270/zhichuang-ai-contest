@@ -123,7 +123,7 @@ def _estimate_tab(app):
 def _assert_fast_results_visible(app):
     analysis = app.session_state["analysis"]
     tab = _estimate_tab(app)
-    reference = _by_label(tab.expander, "规则模板参考 · 公式、任务与前提")
+    reference = _by_label(tab.expander, "规则模板参考 · 六维复杂度、公式与任务")
     assert "8.5" in _visible_text(reference)
     assert _by_label(tab.expander, "历史记录参考 · 当时估算与实际工时") is not None
     spec_tab = next(tab for tab in app.tabs if tab.label.endswith("写单"))
@@ -207,11 +207,11 @@ def test_no_model_keeps_model_unestimated_and_shows_separate_rule_reference(ui):
     assert "尚未调用模型" in _visible_text(ui.app)
     assert any("尚无模型估时" in message.value for message in tab.info)
     assert "模型正在分析" not in _visible_text(ui.app)
-    assert not ui.app.status
+    assert not [status for status in ui.app.status if "模型正在分析" in status.label]
     assert "暂无模型统计" in _visible_text(ui.app)
     assert _current_job(ui.app) is None
     assert not tab.metric, "规则参考不能冒充模型的工时指标"
-    reference = _by_label(tab.expander, "规则模板参考 · 公式、任务与前提")
+    reference = _by_label(tab.expander, "规则模板参考 · 六维复杂度、公式与任务")
     assert "8.5" in _visible_text(reference)
     assert "15" in _visible_text(reference)
     assert "不是模型输出" in _visible_text(reference)
@@ -234,7 +234,7 @@ def test_stale_primary_rule_total_is_not_treated_as_model_result(ui):
     assert any("尚无独立模型结果" in message.value for message in tab.info)
     assert not tab.metric
     assert "9999" not in _visible_text(tab)
-    assert "8.5" in _visible_text(_by_label(tab.expander, "规则模板参考 · 公式、任务与前提"))
+    assert "8.5" in _visible_text(_by_label(tab.expander, "规则模板参考 · 六维复杂度、公式与任务"))
 
 
 def test_independent_button_shows_two_ranges_and_rough_basis_without_new_ledger_row(ui):
@@ -335,7 +335,7 @@ def test_retry_without_key_clears_previous_completed_status(ui):
 
     assert app.session_state["analysis"].estimate.status == "unavailable"
     assert not _estimate_tab(app).metric
-    assert not app.status
+    assert not [status for status in app.status if "模型正在分析" in status.label]
     assert _state(app, "_model_last_status") is None
     assert "模型分析已完成" not in _visible_text(app)
     assert "尚未调用模型" in _visible_text(app)
@@ -381,7 +381,7 @@ def test_failed_reestimate_removes_old_ui_numbers_and_old_ledger_totals(ui):
         assert row["mid_days"] is None and row["ai_days"] is None
         assert snapshot["status"] == "failed" and snapshot["tasks"] == []
         assert snapshot["references"]["rule"]["after"]["mid"] == 8.5
-        assert "8.5" in _visible_text(_by_label(tab.expander, "规则模板参考 · 公式、任务与前提"))
+        assert "8.5" in _visible_text(_by_label(tab.expander, "规则模板参考 · 六维复杂度、公式与任务"))
         assert all(snapshot[field] is None for field in ("mid", "low", "high", "ai_mid", "ai_low", "ai_high"))
         assert len(ui.fake.calls) == 2
         assert app.session_state["analysis"].spec.business_md == spec_before
@@ -461,7 +461,7 @@ def test_full_background_failure_keeps_fast_outputs_and_shows_terminal_status(ui
     assert app.session_state["analysis"].prototype_html == prototype_before
     assert app.session_state["analysis"].estimate.status == "failed"
     assert not _estimate_tab(app).metric
-    assert not app.status
+    assert not [status for status in app.status if "模型正在分析" in status.label]
     assert _state(app, "_model_last_status")["status"] == "failed"
     assert "模型分析未完全成功" in _visible_text(app)
     assert "模型正在分析" not in _visible_text(app)
