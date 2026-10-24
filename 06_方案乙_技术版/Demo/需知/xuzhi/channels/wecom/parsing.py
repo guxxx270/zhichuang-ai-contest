@@ -33,8 +33,25 @@ def parse_answers(text: str) -> Dict[int, str]:
     return out
 
 
+# 编号里夹着一条完整的新诉求（动词后 12 字内出现交付物）。「想要一个…页面」几乎只在提需求时说；
+# 「加一个 / 做个 / 需要一个…功能」答复里也常见（「1 加一个导出功能，导出时带水印」），要更像一整条需求才算
+_DELIVERABLE = r"[^\n]{0,12}?(?:页面|报表|看板|提醒|接口|功能|系统)"
+_NEW_DEMAND_STRONG = re.compile(r"想要" + _DELIVERABLE)
+_NEW_DEMAND_WEAK = re.compile(r"(?:需要一个|新增一个|做一个|做个|加一个)" + _DELIVERABLE)
+
+
+def _new_demand(text: str, answers: Dict[int, str]) -> bool:
+    """带编号列表发来的新需求：有新诉求句式，且篇幅像需求。单看字数或关键词都会误伤真实答复（答复也可能长、
+    也会提到页面），所以两条同时满足才算：「想要…」整段超过 40 字或某条超过 20 字；「加一个 / 做个…」要整段超过 60 字或某条超过 30 字。"""
+    total = len((text or "").strip())
+    longest = max((len(a) for a in answers.values()), default=0)
+    if any(_NEW_DEMAND_STRONG.search(a) for a in answers.values()) and (total > 40 or longest > 20):
+        return True
+    return any(_NEW_DEMAND_WEAK.search(a) for a in answers.values()) and (total > 60 or longest > 30)
+
+
 def looks_like_answers(text: str, numbered_count: int) -> bool:
-    """像"在回答问题"而不是"一条新需求"：上轮问过题，且正文以编号行为主、整体不长。"""
+    """像"在回答问题"而不是"一条新需求"：上轮问过题，且正文以编号行为主、不像一条带编号的新需求。"""
     if numbered_count <= 0:
         return False
     lines = [ln for ln in (text or "").splitlines() if ln.strip()]
@@ -46,7 +63,9 @@ def looks_like_answers(text: str, numbered_count: int) -> bool:
     # 编号行占多数，且没有超出上轮的题号
     if len(answers) < max(1, len(lines) // 2):
         return False
-    return all(n <= numbered_count for n in answers)
+    if not all(n <= numbered_count for n in answers):
+        return False
+    return not _new_demand(text, answers)
 
 
 # /问 /问码 /ask /代码 + 问题；返回问题正文，不是这个前缀则返回 None

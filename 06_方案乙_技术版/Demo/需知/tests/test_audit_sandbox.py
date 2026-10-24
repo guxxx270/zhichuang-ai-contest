@@ -1,10 +1,12 @@
 """模型调用审计 + 沙箱策略。"""
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from xuzhi import sandbox
-from xuzhi.audit import Audit, count_plain_sensitive, count_redaction_tags, host_of
+from xuzhi.audit import Audit, RecordingSink, count_plain_sensitive, count_redaction_tags, host_of, track
 from xuzhi.drafts import check_clone_url, is_secret_path
 from xuzhi.llm import LLM
 
@@ -55,7 +57,7 @@ def test_counts():
     assert host_of("https://api.siliconflow.cn/v1") == "api.siliconflow.cn"
 
 
-def test_every_call_is_audited(tmp_path):
+def test_every_call_is_audited(tmp_path, monkeypatch):
     audit = Audit(tmp_path / "a.sqlite3")
     llm = _llm(audit, _FakeClient())
     llm.current_purpose = "问清润色"
@@ -75,9 +77,95 @@ def test_every_call_is_audited(tmp_path):
     assert st["calls"] == 2 and st["ok"] == 1 and st["failed"] == 1
     assert audit.recent()[0]["error"].startswith("RuntimeError")
     assert len(audit.export_rows()) == 2
-    # 明文敏感项会被计数（不阻断，Demo 策略 block_if_plain_sensitive=false）
+    # 明文敏感项会被计数（这里显式关掉拒发策略，只看计数）
+    monkeypatch.setitem(sandbox.policy()["llm"], "block_if_plain_sensitive", False)
     _llm(audit, _FakeClient()).chat("s", "手机 13812345678", purpose="出样改稿")
     assert audit.recent()[0]["plain_hits"] == 1
+
+
+def test_default_policy_refuses_plain_sensitive(tmp_path):
+    """默认策略：出站提示词还有明文手机号就拒发（该步骤回退规则结果），审计照常记一行失败。"""
+    assert sandbox.DEFAULTS["llm"]["block_if_plain_sensitive"] is True
+    assert sandbox.get("llm.block_if_plain_sensitive") is True
+    assert any(g == "llm" and k == "block_if_plain_sensitive" and v == "是" for g, k, v, _ in sandbox.rows())
+    audit = Audit(tmp_path / "a.sqlite3")
+    client = _FakeClient()
+    llm = _llm(audit, client)
+    with pytest.raises(RuntimeError, match="沙箱策略拒发"):
+        llm.chat("s", "手机 13812345678", purpose="出样改稿")
+    assert client.calls == []                         # 没发出去
+    row = audit.recent()[0]
+    assert row["ok"] == 0 and row["plain_hits"] == 1 and "沙箱策略拒发" in row["error"]
+
+
+def test_default_policy_does_not_refuse_material_paths(tmp_path):
+    """带仓库材料的问清：时间戳迁移文件名（db/migrate/20240101123456_…）会被认成账号；
+    路径、目录树、摘要出站前同样脱敏，默认拒发策略不误拦，模型这一步照常调用。"""
+    import json
+
+    from xuzhi.drafts import CodeFile, RepoBundle, draft_context_for_llm
+    from xuzhi.pipeline.intake import build_questions, extract_card, refine_with_llm
+
+    migration = "db/migrate/20240101123456_create_positions.rb"
+    repo = RepoBundle(url="https://gitlab.com/acme/futures-report",
+                      tree=["app/models/position.rb", migration, "src/migrations/1700000000000-Init.ts"],
+                      files=[CodeFile(migration, "backend", "class CreatePositions < ActiveRecord::Migration[7.0]\nend")])
+    assert count_plain_sensitive(json.dumps(draft_context_for_llm([], [repo]), ensure_ascii=False)) == 0
+    audit, client = Audit(tmp_path / "a.sqlite3"), _FakeClient()
+    text = "机构部想看各品种持仓排名，按合约汇总"
+    card = extract_card(text, "")
+    refine_with_llm(text, card, build_questions(text, card), _llm(audit, client), repos=[repo])
+    assert len(client.calls) == 1                     # 发出去了，没被拒发
+    sent = client.calls[0]["messages"][1]["content"]
+    assert "20240101123456" not in sent and "1700000000000" not in sent
+    row = audit.recent()[0]
+    assert row["ok"] == 1 and row["plain_hits"] == 0
+
+
+def test_audit_error_is_sanitized(tmp_path):
+    audit = Audit(tmp_path / "a.sqlite3")
+    audit.record(purpose="问清润色", backend="openai", api_base="https://gw.example.com/v1", model="m", duration_ms=1,
+                 prompt_chars=1, completion_chars=0, redacted_tags=0, plain_hits=0, ok=False,
+                 error="RuntimeError: LLM 调用失败：401 https://gw.example.com/v1/chat?key=abc sk-123456789")
+    err = audit.recent()[0]["error"]
+    assert err.startswith("RuntimeError") and "401" in err and "gw.example.com" in err
+    assert "abc" not in err and "sk-123" not in err and "/v1/chat" not in err
+    audit.record(purpose="写单润色", backend="openai", api_base="", model="m", duration_ms=1, prompt_chars=1,
+                 completion_chars=0, redacted_tags=0, plain_hits=0, ok=False,
+                 error="APIStatusError: Error code: 403 Authorization: Bearer abc.def-ghi token=xyz123 " + "后面很长" * 60)
+    err = audit.recent()[0]["error"]
+    assert "abc.def-ghi" not in err and "xyz123" not in err and "[已隐藏]" in err and len(err) <= 120
+
+
+def test_concurrent_records_are_not_dropped(tmp_path):
+    """多个线程共用一个审计实例（Web 后台任务、企微线程）也不丢行。"""
+    audit = Audit(tmp_path / "a.sqlite3")
+
+    def worker(n: int) -> None:
+        for i in range(25):
+            audit.record(purpose=f"并发{n}", backend="openai", api_base="https://gw.example/v1", model="m",
+                         duration_ms=i, prompt_chars=1, completion_chars=1, redacted_tags=0, plain_hits=0, ok=True)
+
+    threads = [threading.Thread(target=worker, args=(n,)) for n in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert audit.stats()["calls"] == 150 and len(audit.export_rows()) == 150
+
+
+def test_recording_sink_backfills_req_id(tmp_path):
+    audit = Audit(tmp_path / "a.sqlite3")
+    llm = _llm(audit, _FakeClient())
+    sink = track(llm)
+    assert isinstance(sink, RecordingSink) and llm.audit is sink and track(llm) is sink
+    llm.chat("s", "原话：<手机_1>", purpose="问清润色")
+    llm.chat("s", "原话：<手机_1>", purpose="估时分析")
+    assert len(sink.ids) == 2 and all(r["req_id"] == 0 for r in audit.recent())
+    assert sink.assign(7) == 2
+    assert {r["req_id"] for r in audit.recent()} == {7}
+    assert sink.stats()["calls"] == 2                 # 其余属性转给底层审计
+    assert track(LLM(mode="mock", audit=audit)) is None and track(_llm(False, _FakeClient())) is None
 
 
 def test_block_if_plain_sensitive(tmp_path, monkeypatch):

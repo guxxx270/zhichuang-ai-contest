@@ -58,6 +58,14 @@ class ClaudeAgentOptions:
     max_turns: int = None
     model: str = None
     resume: str = None
+    hooks: dict = None
+
+
+@dataclass
+class HookMatcher:
+    matcher: str = None
+    hooks: list = field(default_factory=list)
+    timeout: float = None
 
 
 class FakeSDK(types.ModuleType):
@@ -66,6 +74,7 @@ class FakeSDK(types.ModuleType):
         self.TextBlock, self.ToolUseBlock = TextBlock, ToolUseBlock
         self.AssistantMessage, self.ResultMessage = AssistantMessage, ResultMessage
         self.ClaudeAgentOptions = ClaudeAgentOptions
+        self.HookMatcher = HookMatcher
         self.calls: List[ClaudeAgentOptions] = []
         self.prompts: List[str] = []
         self.script = None
@@ -124,6 +133,59 @@ def test_readonly_lockdown(sdk, asker):
     assert Path(opt.cwd) == ROOT
     assert "需知" in opt.system_prompt and "只读" in opt.system_prompt
     assert "xuzhi/privacy.py:36" in out
+    # 只放行的三件套也要管读哪里：hook + Read 拒绝规则
+    (m,) = opt.hooks["PreToolUse"]
+    assert m.matcher == "Read|Grep|Glob" and len(m.hooks) == 1
+    assert {"Read(./.env)", "Read(./**/.env)", "Read(./**/*.pem)", "Read(./data/**)", "Read(./.git/**)"} <= set(opt.disallowed_tools)
+
+
+def _decision(asker, tool, **inp):
+    out = asyncio.run(asker._guard({"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": inp}, "t1", None))
+    return (out.get("hookSpecificOutput") or {}).get("permissionDecision", "allow")
+
+
+def test_guard_denies_credentials_data_and_outside(sdk, asker):
+    ask(asker, "隐盾在哪实现")
+    guard = sdk.calls[0].hooks["PreToolUse"][0].hooks[0]
+    out = asyncio.run(guard({"tool_name": "Read", "tool_input": {"file_path": str(ROOT / ".env")}}, "t1", None))
+    assert out["hookSpecificOutput"] == {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                         "permissionDecisionReason": "问码不读凭据与数据文件"}
+    for tool, inp in [
+        ("Read", {"file_path": "../outside.txt"}),
+        ("Read", {"file_path": "/etc/hosts"}),
+        ("Read", {"file_path": "~/.ssh/id_rsa"}),
+        ("Read", {"file_path": "data/ledger.sqlite3"}),
+        ("Read", {"file_path": str(ROOT / ".venv" / "pyvenv.cfg")}),
+        ("Read", {"file_path": "deploy/server.pem"}),
+        ("Grep", {"pattern": "LLM_API_KEY", "path": ".env"}),
+        ("Grep", {"pattern": "x", "path": "data"}),
+        ("Grep", {"pattern": "x", "glob": "*.pem"}),
+        ("Glob", {"pattern": "**/.env*"}),
+        ("Glob", {"pattern": "../**"}),
+        ("Glob", {"pattern": "*", "path": "/"}),
+    ]:
+        assert _decision(asker, tool, **inp) == "deny", (tool, inp)
+    for tool, inp in [
+        ("Read", {"file_path": "xuzhi/privacy.py"}),
+        ("Read", {"file_path": str(ROOT / "xuzhi" / "privacy.py")}),
+        ("Grep", {"pattern": "password|token", "path": str(ROOT)}),   # 搜正文里的词不等于读凭据文件
+        ("Grep", {"pattern": "Redactor", "glob": "*.py"}),
+        ("Glob", {"pattern": "**/*.py"}),
+        ("Glob", {"pattern": "../*.py", "path": "xuzhi/pipeline"}),
+    ]:
+        assert _decision(asker, tool, **inp) == "allow", (tool, inp)
+
+
+def test_guard_sees_through_symlinks(tmp_path):
+    from xuzhi.channels.wecom.askcode import CodeAsker
+
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "a.py").write_text("x = 1", encoding="utf-8")
+    (repo / "outside").symlink_to(tmp_path)
+    a = CodeAsker(repo)
+    assert _decision(a, "Read", file_path=str(repo / "src" / "a.py")) == "allow"
+    assert _decision(a, "Read", file_path="outside/secret.txt") == "deny"
 
 
 def test_progress_and_footer(sdk, asker):

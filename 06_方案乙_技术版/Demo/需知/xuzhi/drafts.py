@@ -1272,6 +1272,8 @@ def draft_context_for_llm(
 ) -> dict:
     """问清 / 定架 / 出样共用：HTML 底稿 + Git 前后端代码摘录。
     所有 html / excerpt 都先过隐盾（redact_material）再返回；mapping 给出时累计标签→原文，供调用方还原模型输出。
+    文件名、路径、目录树、仓库地址、表头、摘要也脱敏（db/migrate/20240101123456_x.rb 这类时间戳会被认成账号，
+    不脱敏就会被出站拒发策略拦下），但不进 mapping：每段各自从 _1 编号，进了会盖掉正文里同名标签的原文。
     凭据类文件（.env、*.pem、*secret* …）直接跳过。"""
     drafts = list(drafts or [])
     repos = list(repos or [])
@@ -1285,11 +1287,11 @@ def draft_context_for_llm(
     for i, d in enumerate(ordered[:4]):
         share = remain_html if i == 0 else min(6000, max(1500, remain_html // max(1, 4 - i)))
         html_briefs.append({
-            "name": d.name,
+            "name": redact_material(d.name),
             "source": d.source,
             "title": redact_material(d.title, mapping),
             "headings": [redact_material(h, mapping) for h in d.headings[:8]],
-            "table_headers": d.table_headers[:20],
+            "table_headers": [redact_material(h) for h in d.table_headers[:20]],
             "html": redact_material(_trim_html(d.html, share), mapping),
         })
         remain_html = max(0, remain_html - len(html_briefs[-1]["html"]))
@@ -1308,19 +1310,19 @@ def draft_context_for_llm(
                 continue
             share = min(4000, remain_code)
             excerpt = redact_material(_trim_text(f.text, share), mapping)
-            repo_files.append({"path": f.path, "kind": f.kind, "excerpt": excerpt})
+            repo_files.append({"path": redact_material(f.path), "kind": f.kind, "excerpt": excerpt})
             remain_code -= len(excerpt)
         code_briefs.append({
-            "url": repo.url,
-            "tree": repo.tree[:80],
-            "note": repo.note,
+            "url": redact_material(repo.url),
+            "tree": [redact_material(p) for p in repo.tree[:80]],
+            "note": redact_material(repo.note),
             "files": repo_files,
         })
 
     return {
         "draft_count": len(drafts),
         "repo_count": len(repos),
-        "summary": summarize(drafts, repos),
+        "summary": redact_material(summarize(drafts, repos)),
         "html_drafts": html_briefs,
         "repos": code_briefs,
         # 兼容旧字段名

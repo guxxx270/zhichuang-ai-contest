@@ -398,7 +398,7 @@ def refine_with_llm(
     """api 模式：润色标题/功能点并补问题；有 HTML/仓库代码时一并读懂。失败则原样返回。"""
     if llm.mode != "api":
         return card, questions
-    from ..drafts import draft_context_for_llm, summarize
+    from ..drafts import draft_context_for_llm, redact_material, summarize
 
     has_materials = bool(drafts or repos)
     system = load_prompt("intake_refine") or "你是需求分析师。只输出 JSON。有材料时按材料提问，勿套期货模板。"
@@ -421,7 +421,8 @@ def refine_with_llm(
             code_limit=22000,
             keywords=card.keywords() | set(card.indicators) | set(card.features),
         )
-        payload["材料摘要"] = summarize(list(drafts or []), list(repos or []))
+        # 摘要里有文件名、仓库名：同样先脱敏，否则出站拒发策略会把这步拦下
+        payload["材料摘要"] = redact_material(summarize(list(drafts or []), list(repos or [])))
     user = json.dumps(payload, ensure_ascii=False)
     try:
         llm.current_purpose = "问清润色"   # 审计用途；假客户端也能接住

@@ -23,10 +23,13 @@ from .streaming import StreamReply
 
 log = logging.getLogger(__name__)
 
+# 企微只展示问清与工时：模型只做问清润色和估时，写单润色、出样改稿留给 Web，少两次串行调用、不易超时
+MODEL_STAGES = frozenset({"intake", "estimate"})
+
 _STAGES = [
     "🛡 隐盾脱敏 → 拆解需求…",
     "❓ 正在想该和业务确认什么…",
-    "⏱ 正在比历史需求、估工时…",
+    "⏱ 正在估以前 / 现在的工时…",
     "🧭 正在梳理数据来源与 IT 决策点…",
     "✍️ 正在收拢结论…",
 ]
@@ -150,17 +153,17 @@ class WecomHandler:
 
     async def _answer(self, m: Inbound, session, text: str) -> None:
         numbers = parse_answers(text)
-        applied = 0
+        receipt = []
         for num, ans in numbers.items():
             qid = session.qid_for(num)
             if qid:
                 session.answers[qid] = ans
-                applied += 1
-        if not applied:
+                receipt.append((num, ans))
+        if not receipt:
             await self._reply_once(m, "没认出是在回答哪一题。用「1 你的答复」这样的编号开头，编号对应上一条消息里的题号。")
             return
         session.touch()
-        await self._run(m, session, answered=applied)
+        await self._run(m, session, answered=len(receipt), receipt=receipt)
 
     async def _ask(self, m: Inbound, session, question: str) -> None:
         """问码：不跑需求流水线，让 Agent 去翻需知自己的代码。"""
@@ -186,7 +189,7 @@ class WecomHandler:
         finally:
             self.sem.release()
 
-    async def _run(self, m: Inbound, session, answered: int) -> None:
+    async def _run(self, m: Inbound, session, answered: int, receipt=None) -> None:
         try:
             await asyncio.wait_for(self.sem.acquire(), timeout=self.cfg.limits.queue_wait_seconds)
         except asyncio.TimeoutError:
@@ -205,7 +208,7 @@ class WecomHandler:
                     )
                 except asyncio.TimeoutError:
                     log.warning("analyze 超时（%ss）", self.cfg.limits.analyze_timeout_seconds)
-                    await sr.finish("⏱ 这条需求处理超时了。可以拆短一点再发，或者去需知 Web 端跑完整流程。")
+                    await sr.finish("⏱ 模型响应慢，这次没等到结果；可稍后发 /重估，或去 Web 端查看规则初稿")
                     return
                 except Exception as e:  # noqa: BLE001
                     log.exception("跑需知流水线失败")
@@ -217,30 +220,51 @@ class WecomHandler:
                 session.turns += 1
                 session.remember_questions(list(getattr(analysis, "questions", None) or []))
                 self._bookkeep(session, analysis, answered)
-                await sr.finish(render_analysis(analysis, answered=answered))
+                await sr.finish(render_analysis(analysis, answered=answered, receipt=receipt))
                 self.handled += 1
         finally:
             self.sem.release()
 
     def _analyze_blocking(self, session) -> Any:
         """在线程里跑。answers 为空时就是第一遍，有答复时按答复重算。"""
+        from ...audit import track
         from ...llm import LLM   # 用服务端 .env 的模型；渠道记为「企微」，模型调用审计里能分清入口
 
+        llm = LLM(channel="企微")
+        llm.req_id = int(session.req_id or 0)   # 已记账的需求：审计行直接带编号
+        # 首轮还没有编号：记下这几行审计，记账后回填
+        session.audit_sink = None if session.req_id else track(llm)
         return self.analyze(
             session.raw_text,
             source_hint="企业微信",
-            llm=LLM(channel="企微"),
+            llm=llm,
             answers=dict(session.answers) or None,
             memory=self.memory,
+            model_stages=MODEL_STAGES,
+            count_memory_hits=not session.req_id,   # 同一条需求重算不再重复累计「记忆省问」
         )
 
     def _bookkeep(self, session, analysis: Any, answered: int) -> None:
-        """一本账 + 追问记忆：首轮记一条；答复重算则更新答复数并把口径记进记忆。任何失败只记日志。"""
+        """一本账 + 追问记忆：首轮记一条；答复重算则更新答复数并把口径记进记忆；
+        /重估（已有编号、没有新答复）只在拿到模型估时后存版本。任何失败只记日志。"""
         ledger, memory = self.ledger, self.memory
         try:
             if ledger is not None and not session.req_id:
                 session.req_id = int(ledger.log_analysis(analysis))
                 ledger.event(session.req_id, "企微受理", f"{session.key}")
+                sink, session.audit_sink = getattr(session, "audit_sink", None), None
+                if sink is not None:
+                    sink.assign(session.req_id)   # 首轮的模型调用审计补上需求编号
+            elif ledger is not None and not answered:
+                est = analysis.estimate
+                status = getattr(est, "status", "")
+                if status == "ready":
+                    ledger.update_estimate(session.req_id, est)
+                    ledger.add_version(session.req_id, analysis, "模型估时")
+                elif status == "failed":
+                    ledger.update_estimate(session.req_id, est)
+                ledger.event(session.req_id, "企微重估",
+                             {"ready": "已更新模型估时", "failed": "模型估时未成功"}.get(status, "暂无模型估时，未改动"))
             elif ledger is not None and answered:
                 qs = list(getattr(analysis, "questions", None) or [])
                 ledger.event(session.req_id, "业务答复重算", f"{answered} 条（企微）")
@@ -275,6 +299,8 @@ class WecomHandler:
             await self._reply_once(m, f"userid={m.userid}\nchattype={m.chattype}\nchatid={m.chatid}")
         elif cmd in ("/模式", "/mode"):
             await self._switch_mode(m, text)
+        elif cmd in ("/重估", "/retry"):
+            await self._retry(m)
         elif cmd in ("/reset", "/重来", "/换需求"):
             self.sessions.reset(m.session_key)
             await self._reply_once(m, "已清空上一条需求，把新的需求发过来吧。")
@@ -284,6 +310,15 @@ class WecomHandler:
             await self._memory_cmd(m, text)
         else:
             await self._reply_once(m, f"没有 {cmd} 这个命令。\n\n{HELP_TEXT}")
+
+    async def _retry(self, m: Inbound) -> None:
+        """/重估：模型估时失败或超时后，用原话、已给的答复、原编号再跑一遍（一本账在同一条上更新）。"""
+        session = self.sessions.get(m.session_key)
+        if not session.raw_text:
+            await self._reply_once(m, "还没有可以重估的需求：先把需求原话发过来。")
+            return
+        session.touch()
+        await self._run(m, session, answered=0)
 
     async def _switch_mode(self, m: Inbound, text: str) -> None:
         session = self.sessions.get(m.session_key)

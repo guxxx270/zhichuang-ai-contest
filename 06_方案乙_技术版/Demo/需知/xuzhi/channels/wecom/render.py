@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import re
 from collections import Counter
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Sequence, Tuple
+
+from ...privacy import Redactor
 
 __all__ = ["render_analysis", "render_guide", "HELP_TEXT", "GUIDE_TEXT"]
 
@@ -24,6 +26,7 @@ HELP_TEXT = (
     "- 单条：`/问 隐盾的脱敏规则在哪实现的`\n"
     "- 连着问：`/模式 问码` 切过去，之后直接发问题；`/模式 需求` 切回来\n\n"
     "**命令**：/help 帮助 · /模式 看或切模式 · /whoami 查 userid · /reset 换一个需求 · /ping 存活检查\n"
+    "/重估 模型估时失败或超时后，按原需求和已给的答复再估一次\n"
     "/摘要 一本账催办摘要（待确认超期 / 待对账 / 本周受理）· /记忆 追问记忆统计与清理"
 )
 
@@ -60,6 +63,12 @@ def _redact_summary(analysis: Any) -> str:
     return f"🛡 隐盾：进模型前脱敏 {total} 处" + (f"（{detail}）" if detail else "")
 
 
+def _failure_reason(error: str) -> str:
+    """估时失败原因：去掉「请…重新分析」这类 Web 端操作提示（企微里用 /重估），句末标点交给后面的分号。"""
+    s = re.sub(r"[。.]?\s*请[^。]*重新分析[。.]?\s*$", "", (error or "").strip())
+    return _clip(s.rstrip("。. "), 120)
+
+
 def _num(v: Any) -> str:
     try:
         f = float(v)
@@ -68,8 +77,10 @@ def _num(v: Any) -> str:
     return str(int(f)) if abs(f - round(f)) < 0.05 else f"{f:.1f}"
 
 
-def render_analysis(analysis: Any, *, answered: int = 0, max_questions: int = 4) -> str:
-    """analysis 为 xuzhi.pipeline.Analysis。用 getattr 取值，字段缺失时降级而不是报错。"""
+def render_analysis(analysis: Any, *, answered: int = 0, max_questions: int = 4,
+                    receipt: Optional[Sequence[Tuple[int, str]]] = None) -> str:
+    """analysis 为 xuzhi.pipeline.Analysis。用 getattr 取值，字段缺失时降级而不是报错。
+    receipt：本轮答复 [(题号, 答复)]，逐条回执，方便发现把新需求误当成了答复。"""
     card = getattr(analysis, "card", None)
     est = getattr(analysis, "estimate", None)
     arch = getattr(analysis, "architecture", None)
@@ -122,23 +133,35 @@ def render_analysis(analysis: Any, *, answered: int = 0, max_questions: int = 4)
             out.append(f"   · {head}？→ {_clip(getattr(q, 'answer', ''), 30)}")
     if answered:
         out.append(f"_已收到 {answered} 条答复，以下结论已按答复重算_")
+        if receipt:
+            red = Redactor()   # 回执不回显明文手机号、账号（sandbox.yaml wecom.reply_plain_sensitive）
+            for num, ans in list(receipt)[:8]:
+                out.append(f"   · 第 {num} 题 → {_clip(red.redact(str(ans)).text, 30)}")
+            out.append("   如果这是一条新需求，请先发 /reset")
     out.append("")
 
     # ---- 估量（双轨）----
+    references = getattr(est, "references", {}) or {}
     if est is not None and getattr(est, "status", "unavailable") != "ready":
-        state = "估算失败" if getattr(est, "status", "") == "failed" else "未估时"
-        reason = getattr(est, "error", "") or getattr(est, "summary", "") or "请接入模型后估算，以前和现在均无工时结果。"
-        out.append(f"**工时**：模型{state}。{reason}")
+        if getattr(est, "status", "") == "failed":
+            reason = _failure_reason(getattr(est, "error", "")) or "模型没有返回可用结果"
+            out.append(f"**工时**：模型估时未成功：{reason}；发 /重估 再试")
+        else:
+            out.append("**工时**：暂无模型估时（未接入模型）" + ("，规则与历史参考如下" if references else ""))
         out.append("")
     elif est is not None:
         mid, low, high = (_num(getattr(est, field) * 8) for field in ("mid", "low", "high"))
         line = f"**工时**：模型估算，以前 {mid} 小时（{low}~{high}）"
         ai_mid = getattr(est, "ai_mid", None)
         if ai_mid:
-            saving = getattr(est, "saving_pct", 0) or 0
+            saving = float(getattr(est, "saving_pct", 0) or 0)
             line += f" ｜ 现在 **{_num(ai_mid * 8)} 小时**"
-            if saving:
+            if saving > 0:
                 line += f"，省 {_num(saving)}%"
+            elif saving < 0:   # 现在比以前慢，不写「省 -25%」
+                line += f"，多 {_num(-saving)}%"
+        if getattr(est, "basis", "") != "code_excerpt":
+            line += "（粗估：未核对代码）"
         out.append(line)
         conf = getattr(est, "confidence", "")
         if conf:
@@ -152,7 +175,6 @@ def render_analysis(analysis: Any, *, answered: int = 0, max_questions: int = 4)
             out.append("　" + "；".join(bits))
         out.append("")
 
-    references = getattr(est, "references", {}) or {}
     rule = references.get("rule", {})
     if rule.get("status") == "ready":
         before, after = rule["before"], rule["after"]

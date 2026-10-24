@@ -18,7 +18,7 @@ from xuzhi.pipeline.split import split_requirements
 def main() -> None:
     n = sys.argv[1] if len(sys.argv) > 1 else "1"
     path = next(config.SAMPLES_DIR.glob(f"{int(n):02d}_*.md"))
-    llm = LLM()
+    llm = LLM(channel="命令行")   # 模型调用审计里能分清入口
     print(f"{config.PRODUCT_NAME} · {config.PRODUCT_SLOGAN}")
     print(f"LLM 模式：{llm.mode}（{'已接入 ' + config.LLM_MODEL if llm.mode == 'api' else (llm.note or '未配置 key，规则引擎兜底')}）\n样例：{path.name}\n")
     text = path.read_text(encoding="utf-8")

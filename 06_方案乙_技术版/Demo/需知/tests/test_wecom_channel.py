@@ -17,10 +17,12 @@ from xuzhi.channels.wecom.config import AuthConfig, BotConfig, Limits, WecomConf
 from xuzhi.channels.wecom.connection import WeComLongConnection
 from xuzhi.channels.wecom.handler import WecomHandler
 from xuzhi.channels.wecom.parsing import looks_like_answers, parse_answers, strip_mention
-from xuzhi.channels.wecom.render import render_analysis
+from xuzhi.channels.wecom.render import HELP_TEXT, render_analysis
 
 BOT, SECRET = "bot-test", "secret-test"
 REQ = "机构部说想每天早上看到各品种持仓排名，按合约和客户两个维度，能导出 Excel，最好月底前上线"
+# 审计原报告里的复现：会话里接着用编号列表发了一条新需求
+NUMBERED_NEW_REQ = "1、研究所想要一个基差监控页面，螺纹和铁矿的期现基差\n2、盘中每5分钟刷新\n3、超过阈值要提醒研究员"
 
 
 # ---------------------------------------------------------------- 解析
@@ -49,6 +51,23 @@ def test_looks_like_answers():
     assert looks_like_answers("1 按合约", 0) is False          # 上轮没问过题
     assert looks_like_answers("9 越界题号", 3) is False
     assert looks_like_answers(REQ, 3) is False                 # 一整段需求不是答复
+
+
+def test_numbered_new_requirement_is_not_an_answer():
+    assert looks_like_answers(NUMBERED_NEW_REQ, 5) is False    # 编号列表发来的新需求
+    # 真实答复照常算答复：长一点、提到页面 / 提醒都不误伤
+    assert looks_like_answers("1 以上一交易日结算价为基准，不复权", 5) is True
+    assert looks_like_answers("1 以上一交易日结算价为基准，净值为单位净值不复权，另给累计净值\n2 客户版隐去内部字段", 5) is True
+    assert looks_like_answers("1 需要一个提醒\n2 页面上加个导出按钮", 5) is True
+    # 「加一个 / 做个…功能」在答复里很常见，带几句细节也还是答复，不能把会话当新需求清掉
+    for reply in ("1 加一个导出功能，导出时带水印，只有部门负责人能导出",
+                  "3 做个看板给领导看就行，不用导出，每天早上 8 点前出数",
+                  "1 按合约维度\n2 需要一个提醒，超过阈值时推送到企微群，周末不用推",
+                  "1 以上一交易日结算价为基准\n2 按合约和品种两个维度都要\n3 加一个导出功能就行，导出带水印"):
+        assert looks_like_answers(reply, 5) is True, reply
+    # 用这些说法写成一整条的新需求，照样认出来
+    assert looks_like_answers("1、交易部需要一个保证金监控看板，按客户和品种两个维度展示，盘中实时刷新\n"
+                              "2、超过 80% 推送提醒\n3、能导出 Excel", 5) is False
 
 
 # ---------------------------------------------------------------- 渲染
@@ -127,6 +146,7 @@ def test_render_has_all_sections():
     assert "1. [高] 持仓按合约还是按品种汇总？" in out
     assert "未答就按：按日终口径" in out
     assert "以前 64 小时" in out and "现在 **36 小时**" in out and "省 44%" in out
+    assert "（粗估：未核对代码）" in out                # 没有代码依据就标粗估
     assert "把握度 中" in out and "2 个高影响问题未答" in out
     assert "需要 IT 拍板" in out and "复用数据中台日终快照" in out
     assert "可复用" in out and "报表平台" in out
@@ -140,6 +160,33 @@ def test_render_survives_missing_fields():
     out = render_analysis(Bare())
     assert "未命名需求" in out
     assert out.strip()
+
+
+def test_render_estimate_copy():
+    a = FakeAnalysis()
+    a.estimate.basis = "code_excerpt"
+    assert "粗估" not in render_analysis(a)
+    a.estimate.saving_pct = -25.0                      # 现在比以前慢
+    out = render_analysis(a)
+    assert "多 25%" in out and "省 -" not in out
+    a.estimate.saving_pct = 0
+    out = render_analysis(a)
+    assert "，省" not in out and "，多" not in out
+    a.estimate = FakeEst(status="failed")
+    a.estimate.error = "模型估时调用失败，尚未生成工时。请检查模型连接后重新分析。"
+    out = render_analysis(a)
+    assert "**工时**：模型估时未成功：模型估时调用失败，尚未生成工时；发 /重估 再试" in out
+    assert "重新分析" not in out                       # 企微里没有这个操作，改提示 /重估
+    a.estimate = FakeEst(status="unavailable")
+    a.estimate.references = {"history": {"summary": "暂无记录"}}
+    out = render_analysis(a)
+    assert "**工时**：暂无模型估时（未接入模型），规则与历史参考如下" in out and "None" not in out
+
+
+def test_render_answer_receipt_hides_plain_sensitive():
+    out = render_analysis(FakeAnalysis(), answered=2, receipt=[(1, "按合约"), (3, "有疑问打 13812345678")])
+    assert "第 1 题 → 按合约" in out and "第 3 题 → 有疑问打 <手机_1>" in out
+    assert "13812345678" not in out and "如果这是一条新需求，请先发 /reset" in out
 
 
 def test_render_marks_answered_and_all_answered():
@@ -304,9 +351,55 @@ def test_new_requirement_then_answer():
         await mock.push("m3", "025058", "1 按合约\n3 只有部门负责人")
         final2 = await mock.wait_final("m3")
         assert "已收到 2 条答复" in final2
+        assert "第 1 题 → 按合约" in final2 and "第 3 题 → 只有部门负责人" in final2 and "/reset" in final2
         assert rec.calls[1]["answers"] == {"q1": "按合约", "q3": "只有部门负责人"}
         assert rec.calls[1]["text"] == REQ                       # 需求原话沿用上一轮
     run(body)
+
+
+def test_numbered_new_requirement_starts_over():
+    async def body(rig):
+        mock, rec = rig.mock, rig.rec
+        await mock.push("n1", "025058", REQ)
+        await mock.wait_final("n1")
+        await mock.push("n2", "025058", NUMBERED_NEW_REQ)
+        await mock.wait_final("n2")
+        assert len(rec.calls) == 2
+        assert rec.calls[1]["text"] == NUMBERED_NEW_REQ and rec.calls[1]["answers"] is None   # 按新需求跑，不重算上一条
+    run(body)
+
+
+def test_detailed_answer_still_recomputes_same_requirement():
+    """答复里说「加一个导出功能」并带细节：仍按答复重算上一条，不把会话当新需求清掉。"""
+    reply = "1 加一个导出功能，导出时带水印，只有部门负责人能导出"
+
+    async def body(rig):
+        mock, rec = rig.mock, rig.rec
+        await mock.push("d1", "025058", REQ)
+        await mock.wait_final("d1")
+        await mock.push("d2", "025058", reply)
+        assert "已收到 1 条答复" in await mock.wait_final("d2")
+        assert rec.calls[1]["text"] == REQ and rec.calls[1]["answers"] == {"q1": reply[2:]}
+    run(body)
+
+
+def test_retry_command():
+    async def body(rig):
+        mock, rec = rig.mock, rig.rec
+        await mock.push("r1", "025058", "/重估")
+        assert "还没有可以重估的需求" in await mock.wait_final("r1")
+        assert rec.calls == []
+        await mock.push("r2", "025058", REQ)
+        await mock.wait_final("r2")
+        await mock.push("r3", "025058", "1 按合约")
+        await mock.wait_final("r3")
+        await mock.push("r4", "025058", "/retry")
+        final = await mock.wait_final("r4")
+        assert "先和业务确认" in final and "已收到" not in final
+        assert len(rec.calls) == 3
+        assert rec.calls[2]["text"] == REQ and rec.calls[2]["answers"] == {"q1": "按合约"}   # 原话与已给的答复都保留
+    run(body)
+    assert "/重估" in HELP_TEXT
 
 
 def test_answer_without_question_and_short_text():
@@ -365,7 +458,7 @@ def test_analyze_timeout_is_reported():
         rig.handler.cfg.limits.analyze_timeout_seconds = 1
         await rig.mock.push("m12", "025058", REQ)
         final = await rig.mock.wait_final("m12", timeout=10)
-        assert "超时" in final and "Web 端" in final
+        assert "没等到结果" in final and "/重估" in final and "Web 端" in final
     run(body)
 
 
@@ -388,7 +481,7 @@ def test_render_against_real_pipeline():
     assert "隐盾" in out and "手机 1" in out and "账号 1" in out      # 真的脱敏了
     assert "13800138000" not in out and "6225880123456789" not in out  # 明文没漏出去
     assert "先和业务确认" in out and "未答就按：" in out
-    assert "**工时**" in out and "未估时" in out and "None" not in out
+    assert "**工时**" in out and "暂无模型估时（未接入模型）" in out and "None" not in out
     assert "需要 IT 拍板" in out
     assert len(out.encode("utf-8")) < 20000
 
@@ -490,3 +583,32 @@ def test_help_mentions_both_modes():
         out = await rig.mock.wait_final("f1")
         assert "需求分析" in out and "问码" in out and "/模式" in out
     run_with_asker(body)
+
+
+# ---------------------------------------------------------------- 配置：sandbox.yaml 是上限
+def test_env_cannot_loosen_sandbox(monkeypatch):
+    from xuzhi import config as xuzhi_config, sandbox
+    from xuzhi.channels.wecom.config import load_wecom_config
+
+    monkeypatch.setenv("WECOM_AUTH_MODE", "allow_all")
+    monkeypatch.setenv("WECOM_ASK_MAX_TURNS", "200")
+    monkeypatch.setenv("WECOM_ASK_TIMEOUT", "9999")
+    monkeypatch.setenv("WECOM_ASK_REPO", "/")
+    cfg = load_wecom_config()
+    assert cfg.auth.mode == "whitelist"
+    assert cfg.ask.max_turns == 20 and cfg.ask.timeout_seconds == 240
+    assert cfg.ask.repo_path == ""                     # 回到需知 Demo 目录
+    assert cfg.limits.stream_max_bytes == 20000
+    # 收紧照常生效
+    monkeypatch.setenv("WECOM_ASK_MAX_TURNS", "5")
+    monkeypatch.setenv("WECOM_ASK_TIMEOUT", "60")
+    monkeypatch.setenv("WECOM_ASK_REPO", str(xuzhi_config.ROOT / "xuzhi"))
+    cfg = load_wecom_config()
+    assert cfg.ask.max_turns == 5 and cfg.ask.timeout_seconds == 60 and cfg.ask.repo_path.endswith("xuzhi")
+    # 策略本身放开才认 .env 的 allow_all；字节上限不超过企微官方上限
+    monkeypatch.setitem(sandbox.policy()["wecom"], "auth_mode", "allow_all")
+    monkeypatch.setitem(sandbox.policy()["wecom"], "stream_max_bytes", 50000)
+    cfg = load_wecom_config()
+    assert cfg.auth.mode == "allow_all" and cfg.limits.stream_max_bytes == 20000
+    monkeypatch.setitem(sandbox.policy()["wecom"], "stream_max_bytes", 8000)
+    assert load_wecom_config().limits.stream_max_bytes == 8000
