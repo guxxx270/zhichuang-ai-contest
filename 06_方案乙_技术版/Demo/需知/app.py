@@ -532,7 +532,7 @@ def render_ledger(ledger: Ledger, memory: Memory, audit: Audit, *, req_id: int =
         from xuzhi import reminders
 
         _dg = reminders.build_digest(ledger)
-        st.code(reminders.render_digest(_dg), language=None)
+        st.code(reminders.render_digest(_dg), language=None, wrap_lines=True)
         _pe, _why = reminders.push_enabled()
         st.caption(("推送已开启（企微群机器人 webhook）。" if _pe else f"推送关闭：{_why}。")
                    + " 拉取方式：企微里发 /摘要、命令行 `python -m xuzhi.reminders --print`、接口 GET /api/v1/digest。内容只有数量、标题、天数。")
@@ -1493,7 +1493,7 @@ with tabs[0]:
             st.rerun()
     with right:
         st.markdown("**发给业务的确认消息**（一键复制到企业微信）")
-        st.code(a.message, language=None)
+        st.code(a.message, language=None, wrap_lines=True)   # 长句自动换行，投屏时不截断；右上角按钮一键复制
         st.download_button("下载确认消息 .txt", a.message, file_name=f"确认消息_{card.title}.txt")
         st.markdown('<div class="xz-foot">清单来自期货 IT 需求追问知识库 + 通用检查项；没答的按默认假设写进需求单。</div>', unsafe_allow_html=True)
 
@@ -1677,7 +1677,7 @@ with tabs[2]:
                     location = " · ".join(str(item.get(key, "")) for key in ("source", "file") if item.get(key))
                     st.caption(location or "依据片段")
                     if item.get("quote"):
-                        st.code(str(item["quote"]), language=None)
+                        st.code(str(item["quote"]), language=None, wrap_lines=True)
         if est.phases or est.ai_phases:
             st.markdown("**按阶段对比（小时）**")
             phase_frame = pd.DataFrame({
@@ -1732,7 +1732,7 @@ with tabs[2]:
                 st.caption("这条匹配的是已有计算口径小改模板，按固定工作项加总，不打功能点、数据接入、界面、权限、性能、合规这六分。")
             if rule_reference.get("formula"):
                 st.markdown("**计算公式**")
-                st.code(rule_reference["formula"], language=None)
+                st.code(rule_reference["formula"], language=None, wrap_lines=True)
             rule_tasks = rule_reference.get("tasks") or []
             if rule_tasks:
                 st.dataframe(pd.DataFrame([{
