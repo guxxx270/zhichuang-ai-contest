@@ -364,6 +364,9 @@ def _d3_detection(card: Card, text: str) -> Decision:
     if re.search(r"下单前|报单前", text):
         options.append(("事件驱动（下单前同步校验）", "下单当时就给结果", "要接交易系统下单事件，对延迟敏感"))
         rec, why = "事件驱动（下单前同步校验）", "原话要在下单前给出结果，必须随下单同步校验"
+    elif m := re.search(r"每隔?\s*(?:\d+|[一两三五十半几])?\s*个?\s*(?:分钟|小时)", text):
+        # 「盘中每半小时查一次」已经给了检查间隔，按间隔轮询，不必上事件驱动
+        rec, why = "分钟级轮询", f"原话给了检查间隔（{m.group(0)}），按这个间隔轮询即可"
     elif card.frequency in ("实时", "事件后限时") or re.search(r"秒级", text):
         rec, why = "事件驱动（行情 / 公告推送触发）", f"原话要求{'实时' if card.frequency == '实时' else '事件发生后限时完成'}，轮询赶不上时效"
     elif card.frequency in ("每日", "每周", "每月", "结算后"):

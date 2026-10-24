@@ -72,6 +72,7 @@ def test_feature_cues_cover_delivery_and_column_edits():
     assert "核对结果发到我邮箱" in card.features
     assert not any(f.endswith(("：", ":")) or f == "开户资料核对工具" for f in card.features)
     assert not any("经常出错" in f for f in card.features)
+    assert "历史要能查" in extract_card(CASES["E06"]["text"]).features   # 短句也是真需求，只丢冒号收尾的引导语
     for text in ("资管运营：净值日报把回撤这一列去掉吧，没人看。", "净值日报把集中度改名为持仓集中度"):
         assert extract_card(text).features, text
     assert textutil.find_removed_columns("净值日报把回撤这一列去掉吧") == ["回撤"]
@@ -101,6 +102,8 @@ def test_frequency_deadline_and_trigger(runs):
     assert runs["05"].card.frequency == "每周"
     hr = analyze(HR, llm_polish=False).card
     assert hr.frequency == "每月" and hr.trigger == "定时"
+    assert extract_card("下个月要上线：每月初提醒部门负责人当月过生日的员工。").deadline == "下个月"
+    assert extract_card("提醒部门负责人下个月过生日的员工，发企业微信。").deadline == ""   # 说的是内容，不是上线时间
     assert analyze(CASES["E06"]["text"], llm_polish=False).card.frequency == "每日"
     assert analyze(CASES["E20"]["text"], llm_polish=False).card.frequency == "每日"
     dims, reasons = score_dims(runs["04"].card, runs["04"].redacted_text)   # 事件后限时仍按实时计规则参考（实时 4 + 五家交易所 1）
@@ -122,9 +125,18 @@ def test_titles_from_subject_and_first_clause(runs):
     assert runs["05"].card.title != "单位净值、较上周变动报表" and "较上周变动" in runs["05"].card.title
     e19 = analyze(CASES["E19"]["text"], llm_polish=False).card.title
     assert e19 == "各部门每个月提了多少需求、完成多少、平均多久"
+    # 句首的提出方不是标题；「…要追保的时候」这种条件分句也不当标题
+    assert extract_card("人力资源部：每月把考勤异常的员工名单导出来，发给部门负责人。").title == "每月把考勤异常的员工名单导出来"
+    assert extract_card("风控部李经理提出：客户风险度超过 100% 要追保的时候，能不能自动提醒对应的客户经理和风控部？"
+                        "盘中每半小时查一次，夜盘也要，企业微信提醒就行。").title == "风险度、追保提醒"
     # 苹果、玻璃在没有期货语境时是日常用词，不算品种
     assert extract_card("年会要采购一批苹果手机和玻璃奖杯，能不能做个页面登记大家的领取情况。").symbols == []
     assert extract_card("苹果主力合约和玻璃期货的价差做个监控").symbols == ["苹果", "玻璃"]
+    # 仓单、跨期价差、同句的锌、紧跟的「价」都是期货语境；黄金周不是
+    assert textutil.find_symbols("白糖、棉花、玉米的仓单日报") == ["白糖", "棉花", "玉米"]
+    assert textutil.find_symbols("铜铝锌的跨期价差监控") == ["沪铜", "沪铝", "沪锌"]
+    assert textutil.find_symbols("能不能做个铜价和铝价的日报") == ["沪铜", "沪铝"]
+    assert textutil.find_symbols("黄金周值班表做个页面") == []
 
 
 # ---------------- 问清：追问 ----------------
@@ -143,6 +155,9 @@ def test_weekly_report_asks_weekly_baseline(runs):
     ids5 = _ids(runs["05"])
     assert "T05W" in ids5 and "T05" not in ids5 and "T05" in _ids(runs["01"])
     assert "T05W" not in _ids(analyze(CASES["E05"]["text"], llm_polish=False))   # 仓单库存周报没有净值基准可问
+    # 品种的周报也会问到 T05W：问法不能只说单位净值
+    q = next(q for q in analyze("每周五出一份各品种涨跌幅的周报，发到研究群。", llm_polish=False).questions if q.id == "T05W")
+    assert "结算价" in q.question and "结算价" in q.default
 
 
 @pytest.mark.parametrize("key, min_highs", [("E10", 2), ("E11", 3), ("E19", 3), ("HR", 2)])
@@ -163,6 +178,20 @@ def test_vague_one_liner_asks_what_and_why_first(runs):
     for k, run in runs.items():
         assert "Q_VAGUE" not in _ids(run), k
     assert "Q_VAGUE" not in _ids(analyze("每月初提醒部门负责人下个月过生日的员工，发企业微信。", llm_polish=False))
+    assert "Q_VAGUE" not in _ids(analyze("那个，帮我做个员工生日提醒，每月初发企业微信。", llm_polish=False))   # 「那个，」是口头禅
+
+
+def test_vague_question_is_not_recalled_for_another_request(tmp_path):
+    """「具体是哪张报表」的答复只对这一条需求有效：同一提出方下一条含糊需求不能沿用。"""
+    from xuzhi.memory import Memory
+
+    mem = Memory(tmp_path / "mem.db")
+    head = "来源：企业微信 · 资管运营 小周 → 技术部\n\n"
+    a = analyze(head + VAGUE, llm_polish=False, answers={"Q_VAGUE": "净值日报，导出太慢"}, memory=mem)
+    mem.learn(a.card, a.questions, 1)
+    b = analyze(head + "那个页面能不能改一下，太难用了。", llm_polish=False, memory=mem)
+    vague = next(q for q in b.questions if q.id == "Q_VAGUE")
+    assert not vague.recalled and not vague.answer.strip()
 
 
 def test_sign_color_follows_red_up_green_down():
@@ -180,12 +209,26 @@ def test_spec_is_built_from_this_demand(runs):
     assert "较上周变动" in weekly and "上周" in weekly["较上周变动"] and "较上一交易日变动" not in weekly
     daily = {cn: tp for cn, _f, tp in runs["01"].spec.fields}
     assert "上一交易日" in daily["较上一交易日变动"]
+    # 不是「加一列」的说法也要有变动字段（「日报里要有…」「增加…和回撤」）
+    for text in ("净值日报里要有较上一交易日变动，放在单位净值旁边", "净值日报增加较上一交易日变动和回撤"):
+        fields = {cn: tp for cn, _f, tp in analyze(text, llm_polish=False).spec.fields}
+        assert "上一交易日" in fields.get("较上一交易日变动", ""), (text, fields)
     acc = [x for s in runs["01"].spec.stories for x in s.acceptance]
     assert any("报表含「较上一交易日变动」列" in x for x in acc)
     assert any("还可下" in x for s in runs["03"].spec.stories for x in s.acceptance)
+    can_order = next(s for s in runs["03"].spec.stories if "还能下多少手" in s.want)
+    assert any("还可下" in x for x in can_order.acceptance)
 
 
 # ---------------- 定架 ----------------
+def test_explicit_check_interval_means_polling():
+    """纪要直通车样例⑥第 2 条「盘中每半小时查一次」：原话给了检查间隔，D3 按间隔轮询，不推事件驱动。"""
+    a = analyze("风控部李经理提出：客户风险度超过 100% 要追保的时候，能不能自动提醒对应的客户经理和风控部？"
+                "盘中每半小时查一次，夜盘也要，企业微信提醒就行。", llm_polish=False)
+    d3 = _decision(a, "D3")
+    assert d3.recommended == "分钟级轮询" and "每半小时" in d3.reason
+
+
 def test_architecture_app_layer_uses_short_labels(runs):
     for k, a in runs.items():
         boxes = a.architecture.layers["应用"]

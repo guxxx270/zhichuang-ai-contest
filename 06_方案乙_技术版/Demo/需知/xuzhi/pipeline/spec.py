@@ -69,7 +69,7 @@ def _acceptance(card: Card, feat: str, futures: bool = True) -> list[str]:
     # 本条功能点自己的验收放最前，不被类型模板挤掉
     where = "报表" if t == "报表" else "页面"
     own = [f"Given {sample}，When 打开{where}，Then {where}含「{col}」列，按展示格式口径显示" for col in find_added_columns(feat)]
-    if re.search(r"限仓|超限|可下", feat):
+    if re.search(r"限仓|超限|可下|能下多少", feat):   # 「还能下多少手」说的也是还可下
         own.append("Given 持仓 N、限仓 M，When 拟下 K 手且 N+K>M，Then 下单前提示超限并显示还可下 M−N 手")
     if re.search(r"提醒|预警|通知", feat) and t != "提醒":
         base.append("Given 异常条件满足，When 检测运行，Then 在约定时限内推送提醒")
@@ -123,6 +123,11 @@ def build_fields(card: Card) -> list[tuple[str, str, str]]:
     for n, col in enumerate(cols, 1):
         if not any(same_label(col, cn) for cn, _f, _t in out):
             out.append(_column_field(col, n, futures))
+    # 点名了变动、却不是「加一列」的说法（「日报里要有较上一交易日变动」）：照样给字段，基准跟着说法走
+    if not any(re.search(r"变动|较上", cn) for cn, _f, _t in out):
+        m = re.search(r"较上[^\s，,。；;、和与及]{1,8}?(?:变动|涨跌幅?|变化)", " ".join([*card.features, *card.raw_features]))
+        if m:
+            out.append(_column_field(m.group(0), len(cols) + 1, futures))
     return out
 
 

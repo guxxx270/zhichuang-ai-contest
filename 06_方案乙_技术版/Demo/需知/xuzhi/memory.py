@@ -14,8 +14,8 @@ from datetime import datetime
 
 from . import config
 
-# 不进记忆的题：位置类（每条需求不同）、模型临时补问（id 不稳定）
-_NO_MEMORY_IDS = {"C_POS"}
+# 不进记忆的题：位置类与「原话信息不足」的对象题（每条需求不同）、模型临时补问（id 不稳定）
+_NO_MEMORY_IDS = {"C_POS", "Q_VAGUE"}
 _NO_MEMORY_PREFIX = ("L",)
 
 

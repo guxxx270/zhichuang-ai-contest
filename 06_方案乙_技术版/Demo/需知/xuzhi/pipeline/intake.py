@@ -22,8 +22,9 @@ TRIGGER_RULES = [(r"公告|发布后|拒单|下单|报单|指令|异动|变动�
 FREQ_RULES = [(r"实时|盘中|下单前|报单前|秒级", "实时"), (r"公告发布后|\d+\s*分钟内", "事件后限时"), (r"分钟", "分钟级"),
               (r"每周|每个周", "每周"), (r"每天|每日|每个?交易日", "每日"), (r"每月|每个月|月初", "每月"), (r"周报", "每周"),
               (r"日报", "每日"), (r"月报", "每月"), (r"结算后|日终", "结算后"), (r".*", "按需")]
-# 「30 分钟内」是时效不是上线时间；单独的「之前」也不是
-DEADLINE_RE = re.compile(r"(下周|本周|下个?月|月底|年底|\d+\s*(?:天|日|工作日|周|个月)内|\d{1,2}\s*月\s*\d{1,2}\s*[日号]?\s*之?前|尽快|越快越好|周会)")
+# 「30 分钟内」是时效不是上线时间；单独的「之前」也不是；「下个月过生日 / 到期 / 交割」说的是内容，不是上线时间
+DEADLINE_RE = re.compile(r"(下周|本周|下个?月(?!的|过|到期|交割|生日)|月底|年底|\d+\s*(?:天|日|工作日|周|个月)内"
+                         r"|\d{1,2}\s*月\s*\d{1,2}\s*[日号]?\s*之?前|尽快|越快越好|周会)")
 NONFUNC_RULES = [(textutil.MOBILE + r"|移动|随时|出差", "手机端可看"), (r"留痕|事后查询|审计", "全程留痕可查"), (r"脱敏|信息安全|不该给的|客户版", "客户信息脱敏"),
                  (r"夜间|夜盘", "夜间 / 夜盘时段可用"), (r"\d+\s*分钟内|实时|盘中", "时效要求（实时 / 限时）"), (r"权限|只能看|谁能看", "数据权限控制"),
                  (r"排序|按风险", "结果按风险排序"), (r"导出|下载", "支持导出"), (r"部署|机器上|服务器", "部署环境约束")]
@@ -128,6 +129,8 @@ _SUBJECT_RE = re.compile(r"^\s*(?:主题|标题)[:：]\s*(.+?)\s*$", re.M)
 _GENERIC_SUBJECT = re.compile(r"^(?:[一二两三四五六七八九十几多]+[项个件条点]|若干)|^(?:系统|需求|问题|事项|申请|系统需求)$")
 _GENERIC_CLAUSE = re.compile(r"^(?:页面|报表|看板|接口|功能|工具|系统|日报|周报|月报|提醒|流程|查询页面|监控页面)$")
 _DELIVERABLE = re.compile(r"报表|日报|周报|月报|页面|看板|提醒|接口|流程|工具|清单|名单|台账|简报|查询|统计|比对|核对|电子化")
+# 「…要追保的时候」「如果…」是条件分句，当标题读不通
+_SUBORDINATE = re.compile(r"^(?:如果|假如|一旦|每当)|时候$")
 
 
 def _subject_title(raw: str) -> str:
@@ -142,8 +145,12 @@ def _subject_title(raw: str) -> str:
 
 
 def _clause_title(feature: str) -> str:
-    """功能点的第一个分句做标题：去掉问句与「我们想做个」这类说法，按标点截断。"""
-    s = re.split(r"[，,。；;！!？?：:]", feature or "")[0]
+    """功能点的第一个分句做标题：去掉句首的「人力资源部：」、问句与「我们想做个」这类说法，按标点截断。"""
+    s = feature or ""
+    lead = re.match(r"([^，,。；;：:！!？?]{1,10})[：:]\s*(?=\S)", s)
+    if lead and not _DELIVERABLE.search(lead.group(1)):   # 「核对工具：…」冒号前就是交付物，留着
+        s = s[lead.end():]
+    s = re.split(r"[，,。；;！!？?：:]", s)[0]
     s = re.sub(r"(?:能不能|可不可以|能否|可否)(?:帮忙)?(?:做|搞|弄)?一?个?|我们想做一?个|希望做一?个|想做一?个", "", s)
     s = re.sub(r"^(?:想要|需要|要)?一?个", "", s)
     s = re.sub(r"[\"“”「」'‘’]", "", s)
@@ -185,7 +192,7 @@ def _title(text: str, req_type: str, card: Card, raw: str = "") -> str:
     # 有指标 / 品种时，分句里得说到它们或交付物才当标题（「开盘前 5 分钟」只是时点）
     names = [*card.indicators, *card.symbols]
     telling = not names or any(n in clause for n in names) or bool(_DELIVERABLE.search(clause))
-    if 4 <= len(clause) <= 24 and not _GENERIC_CLAUSE.match(clause) and telling:
+    if 4 <= len(clause) <= 24 and not _GENERIC_CLAUSE.match(clause) and telling and not _SUBORDINATE.search(clause):
         return clause
     if obj:
         return f"{obj}{noun}"
@@ -305,8 +312,9 @@ def extract_card(text: str, source_hint: str = "") -> Card:
         if textutil.match_rules(core, NONFUNC_RULES) and not textutil.ACTION_CUES.search(core):
             continue   # 只有时效、夜间、信息安全这类约束：已记进非功能，不当「要做什么」
         f = textutil.clean_feature(core)
-        # 长度影响展示，不应决定是否丢弃事实；长句常含公式、适用范围和否定约束。只丢以冒号收尾的引导语和过短的残句。
-        if len(f) >= 6 and not f.rstrip().endswith(("：", ":")) and f not in card.features:
+        # 长度影响展示，不应决定是否丢弃事实；长句常含公式、适用范围和否定约束。只丢以冒号收尾的引导语
+        # （「核对工具：」）和不足 4 字的残句；「历史要能查」这类短句是真需求，要留。
+        if len(f) >= 4 and not f.rstrip().endswith(("：", ":")) and f not in card.features:
             card.features.append(f)
             card.raw_features.append(s)
     card.features, card.raw_features = card.features[:12], card.raw_features[:12]
@@ -413,7 +421,8 @@ def _column_display_questions(
     return qs
 
 
-_VAGUE_WORDS = re.compile(r"那个|这个|优化|改进|完善|改一下|弄一下|调一下|处理一下|看一下|看看|搞一下")
+# 「那个，」「这个月」是口头禅和时间说法，不算含糊；含糊的是只说要改、不说改成什么
+_VAGUE_WORDS = re.compile(r"优化|改进|完善|改一下|弄一下|调一下|处理一下|看一下|看看|搞一下")
 
 
 def _too_vague(body: str, card: Card) -> bool:

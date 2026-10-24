@@ -1852,8 +1852,9 @@ def _generated_page(card: Card, client_view: bool = False, demand_text: str = ""
     )
     if announcement:
         body = _impact(card, rng)
-    elif t != "接口" and re.search(r"限仓|超限|下单前|报单前", blob):
-        body = _pretrade_check(card, rng)   # 下单前限仓：要的是还能下多少手，不是行情异动列表
+    elif t not in ("接口", "报表") and re.search(r"限仓|超限|下单前|报单前", blob):
+        # 下单前限仓：要的是还能下多少手，不是行情异动列表；「限仓使用率日报」这类报表仍出表格
+        body = _pretrade_check(card, rng)
     elif t == "提醒":
         from .intake import looks_futures_domain
 

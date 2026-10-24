@@ -16,7 +16,8 @@ SYMBOLS: dict[str, str] = {
 SYMBOL_RE = re.compile("|".join(sorted(map(re.escape, SYMBOLS), key=len, reverse=True)))
 # 这些别名也是日常用词（苹果手机、玻璃奖杯），原话里有期货语境才算品种
 _AMBIGUOUS_SYMBOLS = {"苹果", "玻璃", "铜", "铝", "黄金", "白银", "玉米", "棉花", "白糖", "生猪", "橡胶"}
-_SYMBOL_CONTEXT = re.compile(r"期货|合约|主力|品种|盘面")
+# 期货语境：除了「期货 / 合约」，仓单、跨期价差、持仓这些说法也只出现在期货需求里
+_SYMBOL_CONTEXT = re.compile(r"期货|合约|主力|品种|盘面|持仓|仓单|交割|保证金|夜盘|基差|升贴水|期现|跨期|价差|行情|涨跌|K ?线|开仓|平仓|限仓")
 
 # 常见姓氏：隐盾认姓名、问清剥称呼共用（「小李，」「王总，」），不在表里的字不当姓
 SURNAMES = "王李张刘陈杨赵黄周吴徐孙胡朱高林何郭马罗梁宋郑谢韩唐冯于董萧程曹袁邓许傅沈曾彭吕苏卢蒋蔡贾丁魏薛叶阎余潘杜戴夏钟汪田任姜范方石姚谭廖邹熊金陆郝孔白崔康毛邱秦江史顾侯邵孟龙万段雷钱汤尹黎易常武乔贺赖龚文"
@@ -103,9 +104,12 @@ def detect_source(text: str, hint: str = "") -> str:
 
 def find_symbols(text: str) -> list[str]:
     seen: list[str] = []
-    futures_ctx = bool(_SYMBOL_CONTEXT.search(text or ""))
-    for m in SYMBOL_RE.finditer(text or ""):
-        if m.group(0) in _AMBIGUOUS_SYMBOLS and not futures_ctx:
+    text = text or ""
+    matches = list(SYMBOL_RE.finditer(text))
+    # 同句还有螺纹、锌这类不歧义的品种，或别名紧跟「价」（铜价、白糖价格），也算期货语境
+    futures_ctx = bool(_SYMBOL_CONTEXT.search(text)) or any(m.group(0) not in _AMBIGUOUS_SYMBOLS for m in matches)
+    for m in matches:
+        if m.group(0) in _AMBIGUOUS_SYMBOLS and not futures_ctx and text[m.end():m.end() + 1] != "价":
             continue
         name = SYMBOLS[m.group(0)]
         if name not in seen:

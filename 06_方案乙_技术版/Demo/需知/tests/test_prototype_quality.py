@@ -30,6 +30,9 @@ def test_pretrade_limit_page_shows_what_can_still_be_ordered(pages):
     heads = _heads(page)
     assert {"当前持仓（手）", "交易所限仓", "公司限额", "下单后占用", "还可下（手）", "状态"} <= set(heads)
     assert "价格异动" not in page
+    # 讲限仓的报表仍出报表，不套下单前校验的表单
+    report = analyze("每天结算后出一张各产品限仓使用率的日报，超过 80% 的标红", llm_polish=False).prototype_html
+    assert "下单前校验" not in report and "拟下单（手）" not in _heads(report) and "限仓" in _heads(report)
 
 
 def test_non_futures_reminder_has_no_futures_wording():
