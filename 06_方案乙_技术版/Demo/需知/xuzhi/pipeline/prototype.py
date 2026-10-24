@@ -1074,13 +1074,14 @@ def _fake_like_neighbors(cells: list[str], rng: random.Random) -> str:
 
 
 def _hide_client_columns(html_src: str) -> str:
-    """客户版去掉内部列：表头含集中度 / 杠杆 / 保证金占用即去（模型做的页面常写成「集中度预警」「持仓集中度(%)」），每张表都处理。"""
+    """客户版去掉内部列：表头含集中度 / 杠杆 / 保证金占用即去（模型做的页面常写成「集中度预警」「持仓集中度(%)」），
+    页面自己在表头标了「内部」的列也去；每张表都处理。"""
     return re.sub(r"<table\b[^>]*>.*?</table>", lambda m: _hide_client_columns_in(m.group(0)), html_src, flags=re.I | re.S)
 
 
 def _hide_client_columns_in(table: str) -> str:
     headers = [_strip_cell(x) for x in re.findall(r"<th[^>]*>(.*?)</th>", table, flags=re.I | re.S)]
-    drop = {i for i, h in enumerate(headers) if any(k in h for k in _HIDE_CLIENT)}
+    drop = {i for i, h in enumerate(headers) if any(k in h for k in _HIDE_CLIENT) or "内部" in h}
     if not drop:
         return table
 

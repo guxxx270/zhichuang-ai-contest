@@ -46,12 +46,13 @@ def test_polished_nav_features_do_not_pull_in_trading_system(nav):
 
 
 def test_client_view_drops_internal_columns_in_model_pages():
-    page = ("<html><body><table><tr><th>产品</th><th>单位净值</th><th>集中度预警</th><th>持仓集中度(%)</th></tr>"
-            "<tr><td>甲</td><td>1.0213</td><td>高</td><td>31.2%</td></tr></table>"
+    page = ("<html><body><table><tr><th>产品</th><th>单位净值</th><th>集中度预警</th><th>持仓集中度(%)</th>"
+            "<th>持仓占比 <span class=\"tag\">内部</span></th></tr>"
+            "<tr><td>甲</td><td>1.0213</td><td>高</td><td>31.2%</td><td>78.5%</td></tr></table>"
             "<table><tr><th>产品</th><th>杠杆率</th><th>保证金占用</th></tr><tr><td>甲</td><td>1.3</td><td>12%</td></tr></table>"
             "</body></html>")
     out = apply_prototype_view(page, client_view=True)
-    assert not re.search(r"集中度|杠杆|保证金占用", out)
+    assert not re.search(r"集中度|杠杆|保证金占用|持仓占比|内部", out)
     assert "单位净值" in out and "1.0213" in out and out.count("<td>") == 3
 
 
