@@ -21,6 +21,8 @@ from xuzhi.llm import LLM
 APP_PATH = Path(__file__).resolve().parents[1] / "app.py"
 BEFORE = "以前（人工开发）"
 AFTER = "现在（AI协同）"
+# st.status 只会用这三种图标；AppTest 把带 icon 的 st.expander（如「模型与参考材料（可选）」）也归进 app.status。
+STATUS_ICONS = {"spinner", ":material/check:", ":material/error:"}
 
 
 class CallGate:
@@ -90,6 +92,11 @@ def _by_label(elements, label):
     return matches[0]
 
 
+def _model_statuses(app):
+    """只取真正的 st.status 状态块，不把带图标的设置折叠区当成模型状态。"""
+    return [block for block in app.status if block.icon in STATUS_ICONS]
+
+
 def _run(app):
     app.run()
     assert not app.exception, [error.message for error in app.exception]
@@ -134,7 +141,7 @@ def _assert_fast_results_visible(app):
 
 
 def _assert_running_status(app, job):
-    statuses = [status for status in app.status if "模型正在分析" in status.label]
+    statuses = [status for status in _model_statuses(app) if "模型正在分析" in status.label]
     assert len(statuses) == 1
     status = statuses[0]
     assert status.state == "running"
@@ -207,7 +214,7 @@ def test_no_model_keeps_model_unestimated_and_shows_separate_rule_reference(ui):
     assert "尚未调用模型" in _visible_text(ui.app)
     assert any("尚无模型估时" in message.value for message in tab.info)
     assert "模型正在分析" not in _visible_text(ui.app)
-    assert not [status for status in ui.app.status if "模型正在分析" in status.label]
+    assert not _model_statuses(ui.app)
     assert "暂无模型统计" in _visible_text(ui.app)
     assert _current_job(ui.app) is None
     assert not tab.metric, "规则参考不能冒充模型的工时指标"
@@ -335,7 +342,7 @@ def test_retry_without_key_clears_previous_completed_status(ui):
 
     assert app.session_state["analysis"].estimate.status == "unavailable"
     assert not _estimate_tab(app).metric
-    assert not [status for status in app.status if "模型正在分析" in status.label]
+    assert not _model_statuses(app)
     assert _state(app, "_model_last_status") is None
     assert "模型分析已完成" not in _visible_text(app)
     assert "尚未调用模型" in _visible_text(app)
@@ -461,7 +468,7 @@ def test_full_background_failure_keeps_fast_outputs_and_shows_terminal_status(ui
     assert app.session_state["analysis"].prototype_html == prototype_before
     assert app.session_state["analysis"].estimate.status == "failed"
     assert not _estimate_tab(app).metric
-    assert not [status for status in app.status if "模型正在分析" in status.label]
+    assert not _model_statuses(app)
     assert _state(app, "_model_last_status")["status"] == "failed"
     assert "模型分析未完全成功" in _visible_text(app)
     assert "模型正在分析" not in _visible_text(app)
