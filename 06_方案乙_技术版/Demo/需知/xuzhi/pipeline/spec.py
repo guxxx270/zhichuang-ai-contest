@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass, field
 
 from ..llm import LLM, load_prompt
+from ..privacy import Redactor
 from ..textutil import markdown_literal
 from .intake import Card, Question
 
@@ -170,9 +171,11 @@ def _polish(spec: Spec, card: Card, llm: LLM) -> Spec:
     system = load_prompt("spec_polish") or "你是期货公司技术部的需求分析师，把需求单润色得简洁、专业、可签字。保持 Markdown 结构与所有条目，只改措辞。只输出 Markdown。"
     try:
         llm.current_purpose = "写单润色"
-        out = llm.chat(system, spec.business_md, temperature=0.2)
-        if out and _polish_ok(spec.business_md, out):
-            spec.business_md = out
+        # 业务版里有业务答复原文（页面 / 企微直接填写，没经过隐盾）：出站前同样脱敏，回来再还原
+        red = Redactor().redact(spec.business_md)
+        out = llm.chat(system, red.text, temperature=0.2)
+        if out and _polish_ok(red.text, out):
+            spec.business_md = Redactor.restore(out, red.mapping)
             spec.engine = "规则 + 模型"
     except Exception:
         pass

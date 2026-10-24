@@ -224,9 +224,12 @@ class WecomHandler:
 
     def _analyze_blocking(self, session) -> Any:
         """在线程里跑。answers 为空时就是第一遍，有答复时按答复重算。"""
+        from ...llm import LLM   # 用服务端 .env 的模型；渠道记为「企微」，模型调用审计里能分清入口
+
         return self.analyze(
             session.raw_text,
             source_hint="企业微信",
+            llm=LLM(channel="企微"),
             answers=dict(session.answers) or None,
             memory=self.memory,
         )

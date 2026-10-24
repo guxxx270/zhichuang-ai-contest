@@ -30,6 +30,7 @@ def test_env_custom_gateway_is_preselected_and_prefilled(monkeypatch, fresh_reso
     monkeypatch.setattr(config, "LLM_API_BASE", GATEWAY)
     monkeypatch.setattr(config, "LLM_MODEL", "company-model-1")
     monkeypatch.setattr(config, "LLM_API_KEY", "sk-test-not-real")
+    monkeypatch.setattr(config, "LLM_MODE", "auto")   # conftest 默认 mock；这里模拟正常部署
     app = _run(AppTest.from_file(str(APP_PATH), default_timeout=20))
 
     assert app.session_state["model_preset"].startswith("自定义网关")
@@ -43,6 +44,7 @@ def test_page_edits_win_over_env_after_first_render(monkeypatch, fresh_resources
     monkeypatch.setattr(config, "LLM_API_BASE", GATEWAY)
     monkeypatch.setattr(config, "LLM_MODEL", "company-model-1")
     monkeypatch.setattr(config, "LLM_API_KEY", "sk-test-not-real")
+    monkeypatch.setattr(config, "LLM_MODE", "auto")   # conftest 默认 mock；这里模拟正常部署
     app = _run(AppTest.from_file(str(APP_PATH), default_timeout=20))
     [model_box] = [box for box in app.text_input if box.key == "custom_model_custom"]
     model_box.input("company-model-2")
@@ -66,4 +68,15 @@ def test_no_env_gateway_keeps_first_preset_and_rule_engine(fresh_resources):
     app = _run(AppTest.from_file(str(APP_PATH), default_timeout=20))
 
     assert not app.session_state["model_preset"].startswith("自定义网关")
+    assert not any("模型已配置" in element.value for element in app.markdown)
+
+
+def test_llm_mode_mock_does_not_prefill_the_key(monkeypatch, fresh_resources):
+    monkeypatch.setattr(config, "LLM_API_BASE", GATEWAY)
+    monkeypatch.setattr(config, "LLM_MODEL", "company-model-1")
+    monkeypatch.setattr(config, "LLM_API_KEY", "sk-test-not-real")
+    monkeypatch.setattr(config, "LLM_MODE", "mock")
+    app = _run(AppTest.from_file(str(APP_PATH), default_timeout=20))
+
+    assert not app.session_state["api_key_input_custom"]
     assert not any("模型已配置" in element.value for element in app.markdown)

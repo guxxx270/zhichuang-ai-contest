@@ -8,7 +8,7 @@
   claude mcp add xuzhi -- python /path/to/需知/mcp_server.py
 Cursor / Claude Desktop 的 mcpServers：{"xuzhi": {"command": "python", "args": ["/path/to/需知/mcp_server.py"]}}
 
-约定：工具默认走规则引擎（毫秒级、可复现、不调模型）；polish=true 才用服务端 .env 里的模型润色。
+约定：工具默认走规则引擎（毫秒级、可复现、不调模型）；polish=true 才用服务端 .env 里的模型补追问、润色并独立估时。
 每次调用同样进一本账（渠道 MCP）。
 """
 from __future__ import annotations
@@ -34,7 +34,8 @@ mcp = FastMCP(
         "拿到业务答复后用 answers 重算；xuzhi_estimate 给双轨工时（传统 vs AI 协同）；xuzhi_architect 给数据地图与 IT 决策；"
         "xuzhi_spec 出双版需求单；一段会议纪要里有几条需求时先用 xuzhi_split 拆开、逐条受理；"
         "需求改了就带同一 req_id 重发，xuzhi_diff 看两版差异与需重新确认项。"
-        "所有数字由程序算，模型只组织语言。原话进入前已本地脱敏。"
+        "默认只跑规则：出初稿与规则模板、历史两路参考；polish=true 时模型独立估时，程序校验汇总，与规则参考并列不混算。"
+        "原话进入前已本地脱敏。"
     ),
 )
 
@@ -73,8 +74,9 @@ def xuzhi_clarify(text: str, answers: dict[str, str] | None = None, req_id: int 
 
 @mcp.tool()
 def xuzhi_estimate(text: str, answers: dict[str, str] | None = None, req_id: int = 0) -> str:
-    """估量（双轨）：六维复杂度 + 历史需求类比 → 传统人天；任务逐项标 AI 能做 / AI 做人审 / 人必须做 → AI 协同人天、
-    省时比例、建议交付方式（技术部主做 vs 业务在 AI 平台自建）。纯程序计算。"""
+    """估量参考：规则模板（六维复杂度 × 手写权重 → 以前 / 现在 小时，附公式、模板工作项与前提）与历史记录
+    （相似需求当时的估算、实际工时与开发方式），两路各自说明依据、不加权混合。本工具只跑规则、不调模型，
+    estimate.status 为 unavailable（没有模型估时）；要模型独立估时用 xuzhi_analyze(polish=true)。单位小时，8 小时 = 1 人天。"""
     res = _run(text, answers, req_id, polish=False)
     d = service.to_dict(res.analysis, req_id=res.req_id, include_spec=False, include_adr=False)
     return _dump({"req_id": d["req_id"], "title": d["card"]["title"], "estimate": d["estimate"]})

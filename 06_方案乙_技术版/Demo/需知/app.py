@@ -868,7 +868,8 @@ def _render_model_secrets(
 
     key_state = f"api_key_input_{provider_id}"
     env_custom = provider_id == "custom" and _env_custom_gateway()
-    if key_state not in st.session_state and config.LLM_API_KEY and (
+    # LLM_MODE=mock（现场网络不稳时）不自动带出 Key：开工只跑规则，页面上手填的照常可用
+    if key_state not in st.session_state and config.LLM_API_KEY and config.LLM_MODE != "mock" and (
             (api_base_sel and api_base_sel == config.LLM_API_BASE) or env_custom):
         st.session_state[key_state] = config.LLM_API_KEY
     if env_custom:   # 首次进页带出 .env 的网关与模型；之后以页面上的修改为准

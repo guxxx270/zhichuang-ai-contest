@@ -228,7 +228,7 @@ class Recorder:
         self.calls: List[dict] = []
 
     def __call__(self, text: str, source_hint: str = "", answers: Dict[str, str] | None = None, **kw: Any) -> FakeAnalysis:
-        self.calls.append({"text": text, "source_hint": source_hint, "answers": answers})
+        self.calls.append({"text": text, "source_hint": source_hint, "answers": answers, "llm": kw.get("llm")})
         a = FakeAnalysis()
         if answers:
             for q in a.questions:
@@ -295,6 +295,7 @@ def test_new_requirement_then_answer():
         assert "@需知" not in final                              # @前缀已剥掉
         assert rec.calls[0]["text"] == REQ
         assert rec.calls[0]["source_hint"] == "企业微信"
+        assert getattr(rec.calls[0].get("llm"), "channel", "") == "企微"   # 审计里能分清入口
         assert rec.calls[0]["answers"] is None
         frames = mock.streams("m2")
         assert any(not f["body"]["stream"]["finish"] for f in frames)   # 有中间进度
