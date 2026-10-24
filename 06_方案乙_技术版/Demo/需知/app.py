@@ -790,7 +790,7 @@ def _settle_model_job(ledger: Ledger) -> bool:
         "kind": meta["kind"], "error": snapshot.get("error") or current.estimate.error,
     }
     ledger.event(rid, "后台模型分析", "失败或部分未成功" if failed else "已完成")
-    _refresh_ledger_grid()   # 台账明细的状态下拉按库里的新值重画
+    # 这里不重画台账明细：归并不改状态（下拉的键已带当前状态），重画会让用户刚改、刚提交的状态作废
     # 结果是后台归并的，用户可能停在别的页签：弹一条提示
     if meta["kind"] == "analysis":
         if failed:

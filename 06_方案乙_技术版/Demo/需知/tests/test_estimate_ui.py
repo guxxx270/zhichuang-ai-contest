@@ -604,9 +604,18 @@ def test_model_tasks_show_division_of_labour_and_extra_hours_read_as_increase(ui
     assert list(task_table["分工"]) == [task.who for task in estimate.tasks]
     chips = next(block.value for block in tab.markdown if block.value.startswith("**分工**"))
     assert all(f"{name} {round(share * 100)}%" in chips for name, share in estimate.who.items())
-    # 「以前与现在比较相同交付范围」是口径说明：只放 caption，不当成「建议交付方式」
-    assert not any(block.value.startswith("**建议交付方式**") for block in tab.markdown)
-    assert "以前与现在比较相同交付范围；两边均为预计投入工时，不含排期和等待时间。" in [c.value for c in tab.caption]
+    # 「以前与现在比较相同交付范围」是口径说明：只放 caption，不当成「建议交付方式」；真正的交付建议照常显示。
+    # delivery 由测试指定，不依赖估时模块现在写的是口径句还是建议句
+    scope_note = "以前与现在比较相同交付范围；两边均为预计投入工时，不含排期和等待时间。"
+    advice = "技术部主做；AI 协同只省样板代码"
+    for delivery, shown in ((scope_note, []), (advice, [f"**建议交付方式**：{advice}"])):
+        analysis = app.session_state["analysis"]
+        analysis.estimate.delivery = delivery
+        app.session_state["analysis"] = analysis
+        _run(app)
+        tab = _estimate_tab(app)
+        assert [block.value for block in tab.markdown if block.value.startswith("**建议交付方式**")] == shown
+        assert scope_note in [caption.value for caption in tab.caption]
 
 
 def test_complexity_rule_reference_shows_six_dimensions_without_model_numbers(ui):
@@ -635,3 +644,31 @@ def test_complexity_rule_reference_shows_six_dimensions_without_model_numbers(ui
     assert len(hour_texts) >= 4
     for number in (n for text in hour_texts for n in re.findall(r"\d+(?:\.\d+)?", text)):
         assert re.fullmatch(r"\d+(\.\d)?", number) and ("." not in number or float(number) < 10), number
+
+
+def test_background_settle_keeps_a_grid_status_save_made_in_the_same_run(ui):
+    app = ui.app
+    _start_without_model(app)
+    first = app.session_state["req_id"]
+    _configure_fake_model(app)
+    gate = ui.fake.block_next_call()
+    _by_label(app.text_area, "原话").input(EQUITY_REQUIREMENT + "\n另起一条：验收范围仅限当前报送日。")
+    _by_label(app.button, "需知，开工").click()
+    _run(app)
+    assert gate.entered.wait(3)
+    job = _current_job(app)
+    gate.release.set()
+    assert job.wait(timeout=5)
+
+    # 用户在台账明细里改了第一条并点保存；后台结果恰好在这一轮开头归并
+    grid = next(box for box in app.selectbox if str(box.key).startswith(f"ledger_grid_status_{first}_"))
+    grid.select("开发中")
+    app.button(key="ledger_save_top").click()
+    _run(app)
+
+    assert _state(app, "_model_job") is None and app.session_state["analysis"].estimate.status == "ready"
+    ledger = Ledger()
+    try:
+        assert ledger.get(first)["status"] == "开发中", "后台归并不能让同一轮提交的状态修改作废"
+    finally:
+        ledger.conn.close()
