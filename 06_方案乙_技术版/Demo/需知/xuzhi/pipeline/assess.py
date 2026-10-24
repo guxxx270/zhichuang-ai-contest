@@ -5,7 +5,7 @@
 - 复杂度看技术六维：改动规模、涉及系统、数据与口径、接口与性能、测试与验收、风险与依赖；
 - 工时 = 类型基线 + 六维加权（规则模型），再用已完成工单的实际耗时校准（团队系数 + 相似工单类比）；
 - AI 编码工时只算编码阶段（编码、单测、自测联调、代码评审；缺陷另含定位排查），全流程另列；
-- 有故事点 / 原始预估的，和需知的估算对比，偏差大的标出来。
+- 有故事点 / 原始预估的，和需知的估算对比，偏差大的标出来；只有历史回测（留一法）里需知比 Jira 原估准，才说原估偏乐观 / 偏保守。
 系数均为示例值，按公司 AI 编码工具的实际使用情况校准。"""
 from __future__ import annotations
 
@@ -23,17 +23,24 @@ KIND_BASE = {"缺陷": 0.6, "任务": 1.0, "需求": 1.5, "改造": 2.5}       #
 KIND_SCALE = {"缺陷": 0.5, "任务": 0.8, "需求": 1.0, "改造": 1.2}      # 六维加权对该类型的放大
 CODING = "编码"
 
-_TRADING = re.compile(r"下单|报单|撤单|柜台|指令|事前风控|阻断|拒单")
-_CUSTOMER = re.compile(r"客户|投资者|资金账号|脱敏|适当性|合规|监管|报送")
+_TRADING = re.compile(r"下单|报单|撤单|柜台|(?:交易|报单|下单)指令|事前风控|阻断|拒单")   # 「企微 /摘要 指令」不是交易指令
+_CUSTOMER = re.compile(r"客户(?!端|经理|版)|投资者|资金账号|脱敏|适当性|合规|监管|报送")   # 客户端、客户经理不是客户数据
+_CLIENT_VER = re.compile(r"客户版")   # 对外的客户版：不一定碰客户数据，但要合规审阅，风险照样算
 _EXTERNAL = re.compile(r"第三方|托管行|外部接口|外部系统|其他团队|依赖|抓取")   # 「按交易所日历」不算外部依赖
+# 否定说法：「不修改表结构」「表结构不变」「无外部依赖」「不重构、不迁移」——匹配规模 / 依赖 / 表结构之前先删掉
+_NEGATED = re.compile(r"(?:不需要|不涉及|无需|无须|不用|不|无)\s*(?:修改|改动|变更|改|动|做|涉及)?\s*"
+                      r"(?:外部依赖|依赖(?:其他系统|外部系统|外部接口|第三方|托管行|其他团队)?|表结构(?:变更|变化|改动)?|DDL"
+                      r"|重构|(?:数据)?迁移(?:历史数据)?|回填|回刷|历史数据)|表结构不变")
 _ONLINE = re.compile(r"线上|生产|紧急|P0|故障")
 _FUTURES_TERMS = ("结算", "夜盘", "交易日", "节假日", "换月", "主力合约", "限仓", "保证金", "涨跌停", "复权", "净值", "交割")
 _EDGE_TERMS = ("夜盘", "节假日", "跨月", "换月", "涨跌停", "极端", "断线")
 _PERF_METRIC = re.compile(r"P9[59]|\d+\s*(?:ms|毫秒|秒)|QPS|TPS|并发|吞吐")
 _PERF_VAGUE = re.compile(r"要快|尽快返回|性能好|别卡|流畅")
-_SMALL = re.compile(r"新增字段|增加字段|加字段|加一列|增加.{0,8}列|新增.{0,8}列|改样式|改文案|格式|显示|配置项|调整阈值|千分位|小数")
+_SMALL = re.compile(r"新增字段|增加字段|加字段|加一列|增加.{0,8}列|新增.{0,8}列|改样式|改文案|文案|格式|显示|配置项|调整阈值|千分位|小数")
 _LARGE = re.compile(r"新服务|新模块|新系统|重构|迁移|升级|改造|全量|批量|自动抓取|自动解析")
 _BOILER = re.compile(r"页面|报表|导出|Excel|CRUD|字段|配置|看板|筛选|列")
+DEVIATION_FLAG = 0.4   # 与原估差 ≥ 40% 才标出来
+BACKTEST_MAX = 200     # 历史回测最多取的条数
 
 
 @dataclass
@@ -54,6 +61,22 @@ class Calibration:
     days_per_sp: float | None = None
     samples: list[tuple[JiraIssue, float]] = field(default_factory=list)   # (已完成工单, 规则模型人天)
     note: str = "没有已完成工单可校准，按规则模型"
+    # 历史回测（留一法）：已完成且有原估的工单逐条「用其余工单校准再估」，和 Jira 原估比谁离实际近
+    backtest_mape: float | None = None    # 需知估 vs 实际的平均相对误差
+    orig_mape: float | None = None        # 同一批工单 Jira 原估 vs 实际
+    backtest_n: int = 0
+
+    @property
+    def beats_original(self) -> bool:
+        """回测至少 3 条、且需知误差低于原估，才有底气说原估偏乐观 / 偏保守。"""
+        return self.backtest_n >= 3 and self.backtest_mape is not None and self.orig_mape is not None \
+            and self.backtest_mape < self.orig_mape
+
+    @property
+    def backtest_line(self) -> str:
+        if not self.backtest_n:
+            return ""
+        return f"历史回测（留一法，{self.backtest_n} 条）：需知 MAPE {self.backtest_mape:.0%} / Jira 原估 {self.orig_mape:.0%}"
 
 
 @dataclass
@@ -80,6 +103,10 @@ class Assessment:
     jira_basis: str = ""
     deviation: float | None = None
     deviation_note: str = ""
+    # 取整前的编码阶段人工 / AI 与全流程 AI：省时百分比按它们算（小单取整后 0.56→0.32 会显示成 0.6→0.3、省 50%）
+    coding_trad_raw: float | None = None
+    coding_ai_raw: float | None = None
+    full_ai_raw: float | None = None
 
     @property
     def total(self) -> int:
@@ -87,28 +114,43 @@ class Assessment:
 
     @property
     def coding_saving_pct(self) -> int:
-        return round(100 * (1 - self.coding_ai / self.coding_trad)) if self.coding_trad else 0
+        trad, ai = (self.coding_trad_raw, self.coding_ai_raw) if self.coding_trad_raw else (self.coding_trad, self.coding_ai)
+        return round(100 * (1 - ai / trad)) if trad else 0
 
     @property
     def full_saving_pct(self) -> int:
-        return round(100 * (1 - self.full_ai / self.mid)) if self.mid else 0
+        ai = self.full_ai_raw if self.full_ai_raw is not None else self.full_ai
+        return round(100 * (1 - ai / self.mid)) if self.mid else 0
 
 
 def _clip(v: int) -> int:
     return max(1, min(5, v))
 
 
+def is_epic(issue: JiraIssue) -> bool:
+    return bool(re.search(r"epic|史诗", issue.issue_type or "", re.I))
+
+
+def _strip_negated(text: str) -> str:
+    return _NEGATED.sub(" ", text)
+
+
 def kind_of(issue: JiraIssue) -> str:
     t = (issue.issue_type or "").lower()
     if re.search(r"bug|缺陷|故障", t):
         return "缺陷"
-    if re.search(r"improvement|改进|优化|重构|技术债", t) or (re.search(r"task|任务", t) and _LARGE.search(issue.summary or "")):
+    if re.search(r"improvement|改进|优化", t):
+        # 改进 / 优化里也有「按钮文案改成保存」这种 2 小时的小单：只有明显是小改动才按任务算，其余仍按改造
+        text = issue.text
+        small = _SMALL.search(text) and not _LARGE.search(_strip_negated(text)) and len(issue.acceptance) <= 2
+        return "任务" if small else "改造"
+    if re.search(r"重构|技术债", t) or (re.search(r"task|任务", t) and _LARGE.search(_strip_negated(issue.summary or ""))):
         return "改造"
     if re.search(r"story|故事|需求|feature|新功能|epic|史诗", t):
         return "需求"
     if re.search(r"task|任务", t):
         return "任务"
-    return "缺陷" if issue.repro or issue.expected else "需求"
+    return "缺陷" if issue.repro else "需求"   # 没写类型：有复现步骤才是缺陷，「期望：每天 8 点前推送」是需求
 
 
 def _without_systems(text: str) -> str:
@@ -129,23 +171,24 @@ def _systems_in(issue: JiraIssue) -> list[str]:
 
 def score_dims(issue: JiraIssue, kind: str) -> tuple[dict[str, int], dict[str, str]]:
     text = issue.text
+    plain = _strip_negated(text)   # 「不重构」「无外部依赖」「表结构不变」不算
     ac = len(issue.acceptance)
     # 改动规模
     scope = {"缺陷": 1, "任务": 2, "需求": 2, "改造": 3}[kind]
-    small, large = bool(_SMALL.search(text)), bool(_LARGE.search(text))
+    small, large = bool(_SMALL.search(text)), bool(_LARGE.search(plain))
     scope += (1 if large else 0) - (1 if small and not large else 0) + (1 if ac >= 5 else 0) + (1 if ac >= 8 else 0)
-    if re.search(r"epic|史诗", issue.issue_type or "", re.I):
+    if is_epic(issue):
         scope += 2
     scope_r = f"{kind}" + (f"；验收 {ac} 条" if ac else "") + ("；以加字段 / 改显示为主" if small and not large else "") + ("；含新建 / 重构 / 批量类改动" if large else "")
     # 涉及系统
     systems = _systems_in(issue)
-    cross = bool(re.search(r"对接|联调|调用|同步给|推送给|提供.{0,6}接口", text))
+    cross = bool(re.search(r"对接|联调|调用(?!方)|同步给|推送给|提供.{0,6}接口", text))   # 「老调用方不受影响」不是要对接
+    external = bool(_EXTERNAL.search(plain))
     sys_n = len(systems)
-    sysd = (1 if sys_n <= 1 else 2 if sys_n == 2 else 3 if sys_n == 3 else 4) + (1 if cross else 0) + (1 if _EXTERNAL.search(text) else 0)
-    sys_r = ("、".join(systems[:4]) if systems else "未写明模块 / 系统") + ("；需跨系统对接" if cross else "") + ("；有外部依赖" if _EXTERNAL.search(text) else "")
+    sysd = (1 if sys_n <= 1 else 2 if sys_n == 2 else 3 if sys_n == 3 else 4) + (1 if cross else 0) + (1 if external else 0)
+    sys_r = ("、".join(systems[:4]) if systems else "未写明模块 / 系统") + ("；需跨系统对接" if cross else "") + ("；有外部依赖" if external else "")
     # 数据与口径
     terms = [t for t in _FUTURES_TERMS if t in _without_systems(text)]
-    plain = re.sub(r"(?:不|无需|无须|不涉及|不用)(?:改|动|涉及|做)?(?:表结构|DDL|数据迁移|历史数据)", "", text)   # 「不改表结构」不算
     ddl = bool(re.search(r"表结构|DDL|新增.{0,4}表|数据迁移|回填|回刷|历史数据", plain))
     data = 1 + min(3, len(terms)) + (1 if ddl else 0)
     data_r = ("期货口径：" + "、".join(terms[:4]) if terms else "无特殊业务口径") + ("；含表结构 / 历史数据处理" if ddl else "")
@@ -162,12 +205,13 @@ def score_dims(issue: JiraIssue, kind: str) -> tuple[dict[str, int], dict[str, s
     test = (1 if ac <= 2 else 2 if ac <= 4 else 3 if ac <= 7 else 4) + (1 if test_cues else 0) + (1 if len(edges) >= 2 else 0)
     test_r = f"验收 {ac} 条" + ("；明确要求单测 / 回归 / 比对" if test_cues else "") + (f"；边界场景：{'、'.join(edges)}" if edges else "")
     # 风险与依赖
-    trading, customer = bool(_TRADING.search(text)), bool(_CUSTOMER.search(text))
+    trading, customer, client_ver = bool(_TRADING.search(text)), bool(_CUSTOMER.search(text)), bool(_CLIENT_VER.search(text))
     online = kind == "缺陷" and bool(_ONLINE.search(text + " ".join(issue.labels) + (issue.priority or "")))
     no_ac = kind in ("需求", "改造") and not ac
-    risk = 1 + (2 if trading else 0) + (1 if customer else 0) + (1 if _EXTERNAL.search(text) else 0) + (1 if online else 0) + (1 if no_ac else 0)
-    risk_r = "，".join(x for x in (("触及交易链路" if trading else ""), ("涉及客户数据 / 合规" if customer else ""),
-                                   ("有外部依赖" if _EXTERNAL.search(text) else ""), ("线上问题" if online else ""),
+    risk = 1 + (2 if trading else 0) + (1 if customer or client_ver else 0) + (1 if external else 0) + (1 if online else 0) + (1 if no_ac else 0)
+    risk_r = "，".join(x for x in (("触及交易链路" if trading else ""),
+                                   ("涉及客户数据 / 合规" if customer else "有客户版，需合规审阅" if client_ver else ""),
+                                   ("有外部依赖" if external else ""), ("线上问题" if online else ""),
                                    ("缺验收标准" if no_ac else "")) if x) or "常规"
     dims = {"改动规模": _clip(scope), "涉及系统": _clip(sysd), "数据与口径": _clip(data), "接口与性能": _clip(perf),
             "测试与验收": _clip(test), "风险与依赖": _clip(risk)}
@@ -187,21 +231,30 @@ def _terms(issue: JiraIssue) -> set[str]:
     return {w for w in vocab if w in text} | set(issue.components)
 
 
-def similarity(a: JiraIssue, b: JiraIssue) -> float:
-    ta, tb = _terms(a), _terms(b)
+def _match(a: JiraIssue, ta: set[str], b: JiraIssue) -> tuple[float, set[str]]:
+    """(相似度, 共享的业务名词)。候选已按同类型筛过，不再给「同类型」加分；系统名 / 模块名不算业务名词。"""
+    tb = _terms(b)
     jac = len(ta & tb) / len(ta | tb) if (ta | tb) else 0.0
-    same_kind = kind_of(a) == kind_of(b)
     comp = bool(set(a.components) & set(b.components))
-    return round(0.25 * same_kind + 0.2 * comp + 0.55 * jac, 2)
+    names = {s.name for s in knowledge.systems()} | set(a.components) | set(b.components)
+    return round(0.25 * comp + 0.75 * jac, 2), (ta & tb) - names
 
 
-def calibrate(done: list[JiraIssue]) -> Calibration:
-    """用已完成工单（有实际耗时）算团队系数：实际人天 ÷ 规则模型人天 的中位数；以及每个故事点折多少人天。"""
-    samples = []
+def similarity(a: JiraIssue, b: JiraIssue) -> float:
+    return _match(a, _terms(a), b)[0]
+
+
+def _samples(done: list[JiraIssue]) -> list[tuple[JiraIssue, float]]:
+    """可当校准样本的已完成工单：有实际耗时、不是史诗（史诗粒度太大，不拿来算团队系数，也不拿来类比）。"""
+    out = []
     for it in done:
-        if it.done and it.spent_days:
+        if it.done and it.spent_days and not is_epic(it):
             k = kind_of(it)
-            samples.append((it, model_days(score_dims(it, k)[0], k)))
+            out.append((it, model_days(score_dims(it, k)[0], k)))
+    return out
+
+
+def _calibration(samples: list[tuple[JiraIssue, float]]) -> Calibration:
     if len(samples) < 3:
         return Calibration(samples=samples, note=f"已完成工单只有 {len(samples)} 条，不足 3 条，按规则模型（不校准）")
     factor = max(0.5, min(2.0, median(it.spent_days / m for it, m in samples)))
@@ -212,6 +265,49 @@ def calibrate(done: list[JiraIssue]) -> Calibration:
                        + (f"，1 个故事点 ≈ {dps} 人天" if dps else ""))
 
 
+def _leave_one_out(samples: list[tuple[JiraIssue, float]], ids: set[int] | None = None) -> dict[int, "Assessment"]:
+    """留一法：每条已完成工单用「其余工单」校准后再估。回测用它，批量表里的已完成行也用它——不拿自己校准自己。
+    ids 给定时只估这几条（按 id(工单)）。"""
+    return {id(it): assess(it, _calibration(samples[:i] + samples[i + 1:]))
+            for i, (it, _) in enumerate(samples) if ids is None or id(it) in ids}
+
+
+def _backtest_ids(samples) -> set[int]:
+    # 留一法是 n² 的：回测最多取最后 BACKTEST_MAX 条（一本账、本次批量排在后面，较新），历史导出再多也不拖慢页面
+    return {id(it) for it, _ in samples[-BACKTEST_MAX:]}
+
+
+def _mape(pairs: list[tuple[float, float]]) -> float:
+    return round(sum(abs(est - act) / act for est, act in pairs) / len(pairs), 3)
+
+
+def _backtest(samples, loo) -> tuple[float | None, float | None, int]:
+    rows = [(loo[id(it)].mid, it.original_h / HOURS_PER_DAY, it.spent_days)
+            for it, _ in samples[-BACKTEST_MAX:] if it.original_h and id(it) in loo]
+    if not rows:
+        return None, None, 0
+    return _mape([(m, act) for m, _, act in rows]), _mape([(o, act) for _, o, act in rows]), len(rows)
+
+
+def backtest(pool: list[JiraIssue]) -> tuple[float | None, float | None, int]:
+    """历史回测：已完成且有原估的工单逐条留一法估算。返回 (需知 MAPE, Jira 原估 MAPE, 条数)，没有可回测的返回 (None, None, 0)。"""
+    samples = _samples(pool)
+    return _backtest(samples, _leave_one_out(samples, _backtest_ids(samples)))
+
+
+def _with_backtest(samples, loo) -> Calibration:
+    calib = _calibration(samples)
+    calib.backtest_mape, calib.orig_mape, calib.backtest_n = _backtest(samples, loo)
+    return calib
+
+
+def calibrate(done: list[JiraIssue]) -> Calibration:
+    """用已完成工单（有实际耗时）算团队系数：实际人天 ÷ 规则模型人天 的中位数；以及每个故事点折多少人天。
+    同时做历史回测，决定和原估对比时能不能说「偏乐观 / 偏保守」。"""
+    samples = _samples(done)
+    return _with_backtest(samples, _leave_one_out(samples, _backtest_ids(samples)))
+
+
 def _tasks(issue: JiraIssue, kind: str, dims: dict[str, int]) -> list[CodeTask]:
     text = issue.text
     trading = bool(_TRADING.search(text))
@@ -219,10 +315,12 @@ def _tasks(issue: JiraIssue, kind: str, dims: dict[str, int]) -> list[CodeTask]:
     def who(c: float) -> str:
         return AI_DO if c <= 0.45 else AI_REVIEW if c <= 0.75 else HUMAN
 
+    # 第 6 项是分工覆盖：交易链路的编码系数 0.8 按档位会落到「人必须做」，但口径是「AI 写草稿、逐行人审」
+    review = AI_REVIEW if trading else None
     if kind == "缺陷":
         spec = [
             ("问题定位与根因分析", CODING, 0.35, 0.65, "AI 读日志、读代码给怀疑点，结论要人确认"),
-            ("修复编码", CODING, 0.20, 0.8 if trading else 0.5, "交易链路上的修复 AI 只写草稿" if trading else "改动点明确，AI 直接给补丁"),
+            ("修复编码", CODING, 0.20, 0.8 if trading else 0.5, "交易链路上的修复 AI 只写草稿" if trading else "改动点明确，AI 直接给补丁", review),
             ("补充单元测试", CODING, 0.10, 0.35, "按复现步骤生成回归用例"),
             ("代码评审与修改", CODING, 0.05, 0.7, "AI 先审一遍，人做最终评审"),
             ("回归测试", "测试", 0.20, 0.6, "AI 出回归用例，跑与判定靠人"),
@@ -238,14 +336,14 @@ def _tasks(issue: JiraIssue, kind: str, dims: dict[str, int]) -> list[CodeTask]:
             ("方案与技术设计", "设计", design_share, 0.7, "AI 出方案草稿与接口定义，人拍板"),
             ("编码实现", CODING, code_share, code,
              "交易链路：AI 写草稿，逐行人审" if trading else ("业务口径多，AI 生成后要逐条核对口径" if dims["数据与口径"] >= 3
-                                                   else "标准化代码为主（接口 / 页面 / 报表 / 配置），AI 生成为主")),
+                                                   else "标准化代码为主（接口 / 页面 / 报表 / 配置），AI 生成为主"), review),
             ("单元测试", CODING, 0.12, 0.35, "AI 按验收标准与边界场景（夜盘、节假日、换月）生成"),
             ("自测与联调", CODING, 0.14, link, "跨系统联调靠人，AI 帮写联调脚本与造数" if dims["涉及系统"] >= 3 else "AI 帮造测试数据，自测靠人"),
             ("代码评审与修改", CODING, 0.06, 0.7, "AI 先审一遍，人做最终评审"),
             ("提测与回归", "测试", 0.12, 0.6, "AI 出测试用例，执行与判定靠人"),
             ("发布上线与验证", "上线", 0.06, 0.9, "按变更流程走，基本省不了"),
         ]
-    return [CodeTask(n, ph, who(c), sh, round(c, 2), note) for n, ph, sh, c, note in spec]
+    return [CodeTask(n, ph, (w[0] if w and w[0] else who(c)), sh, round(c, 2), note) for n, ph, sh, c, note, *w in spec]
 
 
 def _risks(issue: JiraIssue, kind: str, mid: float) -> list[tuple[str, str]]:
@@ -266,13 +364,15 @@ def _risks(issue: JiraIssue, kind: str, mid: float) -> list[tuple[str, str]]:
         out.append(("高", "触及交易链路：须走变更评审与下单回归，编码只按「AI 做人审」折算"))
     if _CUSTOMER.search(text):
         out.append(("中", "涉及客户数据：注意脱敏与权限，测试数据不能用真实客户"))
+    elif _CLIENT_VER.search(text):
+        out.append(("中", "有对外的客户版：上线前按合规要求审阅对客字段与口径"))
     if _PERF_VAGUE.search(text) and not _PERF_METRIC.search(text):
         out.append(("中", "提了性能但没给指标（如 P99 ≤ 200ms）"))
     ac_text = " ".join(issue.acceptance)
     missing = [t for t in ("夜盘", "节假日", "换月", "结算") if t in _without_systems(text) and t not in ac_text]
     if missing and ac:
         out.append(("中", f"提到{'、'.join(missing)}，但验收标准里没有对应场景"))
-    if re.search(r"epic|史诗", issue.issue_type or "", re.I):
+    if is_epic(issue):
         out.append(("中", "史诗（Epic）粒度太大，建议先拆成故事再估"))
     elif mid > 10:
         out.append(("中", f"单条估到 {mid} 人天，建议拆分"))
@@ -285,11 +385,17 @@ def assess(issue: JiraIssue, calib: Calibration | None = None) -> Assessment:
     dims, reasons = score_dims(issue, kind)
     m = model_days(dims, kind)
     base = m * calib.factor
-    # 只和同类型的已完成工单类比（缺陷不拿需求比）；史诗粒度太大，不做类比
-    epic = bool(re.search(r"epic|史诗", issue.issue_type or "", re.I))
-    sims = sorted(((it, similarity(issue, it)) for it, _ in calib.samples
-                   if it.key != issue.key and kind_of(it) == kind and not epic), key=lambda x: -x[1])
-    sims = [(it, s) for it, s in sims if s >= 0.35][:3]
+    # 只和同类型的已完成工单类比（缺陷不拿需求比）；史诗粒度太大，不做类比（样本里也没有史诗）。
+    # 至少共享 2 个业务名词才算相似：只共享一个「风控系统」不能拿来类比，也撑不起「置信度 高」
+    sims = []
+    if not is_epic(issue):
+        ta = _terms(issue)
+        for it, _ in calib.samples:
+            if it.key != issue.key and kind_of(it) == kind:
+                s, shared = _match(issue, ta, it)
+                if s >= 0.35 and len(shared) >= 2:
+                    sims.append((it, s))
+    sims = sorted(sims, key=lambda x: -x[1])[:3]
     if sims and sims[0][1] >= 0.5:
         knn = sum(it.spent_days * s for it, s in sims) / sum(s for _, s in sims)
         mid = 0.5 * knn + 0.5 * base
@@ -303,12 +409,14 @@ def assess(issue: JiraIssue, calib: Calibration | None = None) -> Assessment:
 
     tasks = _tasks(issue, kind, dims)
     s = sum(t.share for t in tasks)
-    for t in tasks:
-        t.trad_days = round(mid * t.share / s, 2)
+    raw = [(t, mid * t.share / s) for t in tasks]
+    for t, trad in raw:
+        t.trad_days = round(trad, 2)
         t.ai_days = round(t.trad_days * t.coef, 2)
-    coding_trad = round(sum(t.trad_days for t in tasks if t.phase == CODING), 1)
-    coding_ai = round(sum(t.ai_days for t in tasks if t.phase == CODING), 1)
-    full_ai = round(sum(t.ai_days for t in tasks), 1)
+    coding_trad_raw = sum(trad for t, trad in raw if t.phase == CODING)
+    coding_ai_raw = sum(trad * t.coef for t, trad in raw if t.phase == CODING)
+    full_ai_raw = sum(trad * t.coef for t, trad in raw)
+    coding_trad, coding_ai, full_ai = round(coding_trad_raw, 1), round(coding_ai_raw, 1), round(full_ai_raw, 1)
 
     total = sum(dims.values())
     level = "低" if total <= 10 else "中" if total <= 14 else "高" if total <= 19 else "很高"
@@ -330,15 +438,34 @@ def assess(issue: JiraIssue, calib: Calibration | None = None) -> Assessment:
     dev = note = None
     if jira_days:
         dev = round((mid - jira_days) / jira_days, 2)
-        note = (f"原估偏乐观：需知估得多 {dev:+.0%}" if dev >= 0.4 else f"原估偏保守：需知估得少 {dev:+.0%}" if dev <= -0.4
-                else f"与原估基本一致（{dev:+.0%}）")
+        note = _deviation_note(dev, jira_days, mid, calib, "原估" if issue.original_h else "点数折算")
     return Assessment(issue, kind, dims, reasons, level, round(m, 1), mid, low, high, calib.note, tasks, coding_trad, coding_ai,
-                      full_ai, risks, conf, why, sims, jira_days, basis, dev, note or "")
+                      full_ai, risks, conf, why, sims, jira_days, basis, dev, note or "",
+                      coding_trad_raw, coding_ai_raw, full_ai_raw)
+
+
+def _deviation_note(dev: float, jira_days: float, mid: float, calib: Calibration, what: str) -> str:
+    """差得多也不轻易下结论：小单（原估不到 1 天、需知估不到 1.5 天）只报差值；
+    只有历史回测里需知比 Jira 原估准，才说「原估偏乐观 / 偏保守」，否则写中性的差值并附回测误差。"""
+    if abs(dev) < DEVIATION_FLAG:
+        return f"与{what}基本一致（{dev:+.0%}）"
+    if jira_days < 1 and mid < 1.5:
+        return f"与{what}差 {dev:+.0%}"
+    if what == "原估" and calib.beats_original:
+        return f"原估偏乐观：需知估得多 {dev:+.0%}" if dev > 0 else f"原估偏保守：需知估得少 {dev:+.0%}"
+    if what != "原估":
+        return f"与{what}差 {dev:+.0%}"
+    if calib.backtest_n:
+        return f"与原估差 {dev:+.0%}（历史回测：需知误差 {calib.backtest_mape:.0%}，原估 {calib.orig_mape:.0%}）"
+    return f"与原估差 {dev:+.0%}（暂无历史回测，不判断偏乐观 / 偏保守）"
 
 
 def assess_many(issues: list[JiraIssue], history: list[JiraIssue] | None = None) -> tuple[list[Assessment], Calibration]:
-    """批量评估：同批里已完成的工单 + 历史工单一起当校准样本；已完成的工单本身也评一遍（可看估得准不准）。"""
+    """批量评估：同批里已完成的工单 + 历史工单一起当校准样本。已完成的工单本身也评一遍（可看估得准不准），
+    但用留一法：它自己不进自己的校准样本，否则「对照需知估与实际」就是拿答案对答案。"""
     pool = {it.key or it.summary: it for it in (history or []) if it.done}
     pool.update({it.key or it.summary: it for it in issues if it.done})
-    calib = calibrate(list(pool.values()))
-    return [assess(it, calib) for it in issues], calib
+    samples = _samples(list(pool.values()))
+    loo = _leave_one_out(samples, _backtest_ids(samples) | {id(it) for it in issues})
+    calib = _with_backtest(samples, loo)
+    return [loo.get(id(it)) or assess(it, calib) for it in issues], calib
