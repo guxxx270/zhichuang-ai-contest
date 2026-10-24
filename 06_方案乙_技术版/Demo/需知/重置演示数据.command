@@ -4,4 +4,4 @@
 cd "$(dirname "$0")" || exit 1
 if [ ! -d .venv ]; then echo "首次运行，安装依赖……"; python3 -m venv .venv && ./.venv/bin/pip install -q -r requirements.txt; fi
 ./.venv/bin/python tools/demo_seed.py "$@"
-echo; echo "（需知页面开着的话刷新一下即可；按回车关闭）"; read -r
+echo; echo "请关闭需知后重新打开（旧页面里的需求编号已失效）；按回车关闭本窗口。"; read -r

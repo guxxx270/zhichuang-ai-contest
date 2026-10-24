@@ -8,6 +8,7 @@ from .. import knowledge
 from .incremental import build_change_work, calculation_change_scope
 from .intake import Card, Question
 from .rule_reference import WEIGHTS, build_tasks, score_dims
+from .tasks import AI_DO, AI_REVIEW, HUMAN, delivery_mode
 
 
 _RULE_LABEL = "固定规则参考（未校准）"
@@ -36,7 +37,18 @@ def _unavailable_rule(summary: str) -> dict:
     return {
         "status": "unavailable", "label": _RULE_LABEL, "method": "unavailable", "summary": summary,
         "before": _track(), "after": _track(), "assumptions": list(_RULE_LIMITS), "formula": "", "tasks": [],
+        "who_split": {}, "delivery": "",
     }
+
+
+def _with_split(rule: dict, card: Card, text: str) -> dict:
+    """规则任务的分工占比（按以前参考小时加权，与模型结果的 who_split 同口径）及据此给的交付建议。"""
+    hours = [(task["who"], float(task["before"]["mid"])) for task in rule["tasks"]]
+    total = sum(h for _, h in hours)
+    split = ({who: round(sum(h for w, h in hours if w == who) / total, 3) for who in (AI_DO, AI_REVIEW, HUMAN)}
+             if total > 0 else {})
+    rule.update(who_split=split, delivery=delivery_mode(card, split, text))
+    return rule
 
 
 def _task(task, before: dict, after: dict) -> dict:
@@ -66,14 +78,14 @@ def _rule_reference(card: Card, text: str, questions: list[Question]) -> dict:
             assumptions.append("母子关系、筛选标记和本母层明细市值按可复用假设计入，尚未核对真实字段。")
         if scope.price_ratio_in_field:
             assumptions.append("原话明确价格比已包含在现有字段，模板不重复计入价格调整；具体映射仍待核对。")
-        return {
+        return _with_split({
             "status": "ready", "label": _RULE_LABEL, "method": "incremental",
             "summary": "已有计算口径修改：将匹配的固定工作项逐项相加，作为未校准参考。",
             "before": _sum_tasks(tasks, "before"), "after": _sum_tasks(tasks, "after"),
             "assumptions": assumptions,
             "formula": "以前/现在的下界、参考值、上界分别 = 对应固定任务小时之和；任务系数 = 现在参考小时 ÷ 以前参考小时，仅解释预设比值。",
             "tasks": tasks,
-        }
+        }, card, text)
 
     dims, reasons = score_dims(card, text)
     added = {key: Decimal(str(WEIGHTS[key])) * (Decimal(dims[key]) - 1) for key in WEIGHTS if key in dims}
@@ -104,11 +116,11 @@ def _rule_reference(card: Card, text: str, questions: list[Question]) -> dict:
         tasks.append(entry)
     assumptions += [
         "匹配一般需求复杂度模板；功能点、数据源与界面等来自文本抽取，不能据此确认真实新增工作量。",
-        "接入、权限和页面等为模板预留项，不表示本次必须新建；实际能力可复用时，应人工删减相应工作后重新评估。",
+        "接入、权限和页面等为模板预留项，不表示本次必须新建；可复用的部分请在评审时人工扣除（本页不提供调整入口）。",
         "历史参考完全独立，未对这些规则数字做加权、平均或校准。",
         "任务占比和 AI 协同系数为旧模板固定配置，尚未用本项目实测数据校准。",
     ]
-    return {
+    return _with_split({
         "status": "ready", "label": _RULE_LABEL, "method": "complexity",
         "summary": "一般需求：六维固定加权后按任务占比分配，再用各任务固定系数计算现在的参考工时。",
         "before": _sum_tasks(tasks, "before"), "after": _sum_tasks(tasks, "after"),
@@ -121,7 +133,7 @@ def _rule_reference(card: Card, text: str, questions: list[Question]) -> dict:
             "按小时保留两位小数，末项补齐分配余数；无历史加权。"
         ),
         "tasks": tasks,
-    }
+    }, card, text)
 
 
 def _history_hours(value) -> float | None:

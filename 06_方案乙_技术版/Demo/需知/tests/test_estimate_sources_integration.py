@@ -54,8 +54,8 @@ def test_api_ledger_and_reestimate_keep_independent_sources_out_of_model_dashboa
         analysis.estimate = estimate(analysis.card, analysis.redacted_text, analysis.questions, llm=FakeLLM())
         ledger.update_estimate(req_id, analysis.estimate)
         ready = json.loads(ledger.get(req_id)["payload"])["estimate"]
-        assert ledger.dashboard()["trad_days"] == pytest.approx(9 / 8)
-        assert ledger.dashboard()["ai_days"] == pytest.approx(6 / 8)
+        assert ledger.dashboard()["trad_days"] == round(9 / 8, 1)   # 看板取一位小数
+        assert ledger.dashboard()["ai_days"] == round(6 / 8, 1)
 
         analysis.estimate = estimate(analysis.card, analysis.redacted_text, analysis.questions,
                                      llm=FakeLLM(error=RuntimeError("test")))

@@ -9,4 +9,5 @@ if not exist ".venv\Scripts\python.exe" (
   exit /b 1
 )
 ".venv\Scripts\python.exe" tools\demo_seed.py %*
+echo 请关闭需知后重新打开（旧页面里的需求编号已失效）。
 pause

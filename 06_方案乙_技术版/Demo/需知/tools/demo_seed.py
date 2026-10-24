@@ -37,6 +37,7 @@ from xuzhi.memory import Memory  # noqa: E402
 from xuzhi.pipeline import analyze  # noqa: E402
 
 NOTE = "演示数据（虚构）"
+REOPEN = "请关闭需知后重新打开（旧页面里的需求编号已失效）。"   # 与 README「先关掉需知」一致：刷新救不回旧会话里的编号
 
 # 评测集之外补几条，让研究所 / 风控部 / 资管部 / 合规部 / 投资部的量更像真实分布（全部虚构）
 EXTRA = {
@@ -90,7 +91,8 @@ def backup() -> Path | None:
     files = [p for p in (config.LEDGER_DB, config.HISTORY_LEARNED_PATH) if p.exists()]
     if not files:
         return None
-    dest = config.LEDGER_DB.parent / "backup" / datetime.now().strftime("%Y%m%d-%H%M%S")
+    # 带微秒：同一秒连跑两次也各备一份，不互相覆盖
+    dest = config.LEDGER_DB.parent / "backup" / datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     dest.mkdir(parents=True, exist_ok=True)
     for p in files:
         if p.suffix == ".sqlite3":   # 用 SQLite 自带备份，页面开着也能拿到一致的副本
@@ -133,9 +135,11 @@ def seed(now: datetime | None = None) -> dict:
         rid = ledger.log_analysis(a)
         if n_ans:
             picked = [q for q in a.questions if q.id != "C_POS" and not q.id.startswith("L") and not q.recalled][:n_ans]
-            answers = {q.id: q.default for q in picked}
+            # 已沿用记忆的题照页面那样随答复带上：不带的话重算时会再 recall 一遍，「记忆省问」重复计数
+            answers = {q.id: q.answer for q in a.questions if q.recalled}
+            answers.update({q.id: q.default for q in picked})
             a = analyze(text, llm=llm, answers=answers, memory=memory)
-            ledger.event(rid, "业务答复重算", f"{len(answers)} 条")
+            ledger.event(rid, "业务答复重算", f"{len(picked)} 条")
             ledger.update_answers(rid, sum(1 for q in a.questions if q.answer.strip()), int(getattr(a.estimate, "unanswered_high", 0) or 0))
             ledger.update_estimate(rid, a.estimate)
             ledger.add_version(rid, a, "业务答复重算")
@@ -182,14 +186,17 @@ def main(argv: list[str] | None = None) -> int:
     print(f"已备份到 {dest}" if dest else "当前没有一本账数据，无需备份")
     clear()
     if args.empty:
-        print("一本账已清空（未预置）。")
+        print("一本账已清空（未预置）。" + REOPEN)
         return 0
     out = seed()
     d, m = out["dashboard"], out["memory"]
     print(f"已预置 {out['count']} 条虚构需求：{d['depts']} 个部门；状态 " + " / ".join(f"{k} {v}" for k, v in d["by_status"].items()))
+    # 规则模板参考不调模型也有，看板会单列它与实际的偏差；这里只说模型那一套没生成
+    rule = f"（规则模板参考偏差 {d['rule_mape']}%，{d['rule_count']} 条，另列）" if d.get("rule_mape") is not None else ""
     print(f"看板：平均追问 {d['avg_questions']} 条，平均澄清 {d['avg_rounds']} 轮，已记录实际工时 {d['closed']} 条；"
-          f"未调用模型，工时预测与偏差均未生成；追问记忆 {m['entries']} 条口径、省问 {m['hits']} 次")
-    print("模型调用审计为空（只记真实调用）；样例 ① 与资管运营的追问记忆保持全新。需知页面开着的话，刷新一下即可。")
+          f"未调用模型，模型工时与模型偏差均未生成{rule}；追问记忆 {m['entries']} 条口径、省问 {m['hits']} 次")
+    print("模型调用审计为空（只记真实调用）；样例 ① 与资管运营的追问记忆保持全新。")
+    print(REOPEN)
     print("提醒：以上均为虚构演示数据，不要当作试运行成绩讲。")
     return 0
 

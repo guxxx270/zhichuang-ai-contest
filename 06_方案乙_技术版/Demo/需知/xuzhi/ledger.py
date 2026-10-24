@@ -1,19 +1,23 @@
 """需求一本账（台账）：SQLite 记录每一次分析（卡片 / 清单 / 估算 / 决策）、业务答复、状态流转、对账与反馈。
-既是审计留痕，也是估算飞轮的数据：对账回写实际人天 → 追加到历史需求库 → 下次估量自动校准；看板按部门 / 类型 / 状态汇总。
+既是审计留痕，也是对账数据：对账回写实际人天；有有效两轨估算时计算偏差，并追加到历史记录参考（不自动校准模型）；
+看板按部门 / 类型 / 状态汇总。
 每条需求另存版本快照（versions 表）：受理、答复重算、模型增强、需求变更各一版，供版本对比（xuzhi/versions.py）。"""
 from __future__ import annotations
 
 import dataclasses
+import functools
 import json
 import re
 
 import math
 import sqlite3
+import threading
 from dataclasses import asdict, is_dataclass
 from datetime import datetime
 
 from . import config, versions
 from .jira import DONE_STATUSES, HOURS_PER_DAY, JiraIssue
+from .privacy import Redactor
 
 MINUTES_SAVED = {"问清": 60, "写单": 90, "估量": 30, "定架": 60, "出样": 120}   # 与人工相比的估计节省，方案文档里需校准
 
@@ -24,6 +28,35 @@ _NOT_JIRA = f"COALESCE(source,'') != '{JIRA_SOURCE}'"
 # 纪要直通车拆开后的整段那行：保留原文与流水，但看板、催办不再把它算成一条需求（各条已各记一行）
 _NOT_SPLIT = "COALESCE(split_into,'') = ''"
 _SPLIT_IDS = "SELECT id FROM requirements WHERE COALESCE(split_into,'') != ''"
+
+
+def _locked(method):
+    """REST / MCP / 页面各会话多线程共用同一个连接：一次只让一个方法用它（可重入，方法里互相调用不会卡住）。"""
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+    return wrapper
+
+
+def _redacted_issue(issue: JiraIssue) -> JiraIssue:
+    """工单原文进一本账前过隐盾：客户姓名、资金账号、手机等只存标签。同样的原文脱敏结果相同，没有单号时仍能按摘要去重。"""
+    redactor = Redactor()
+
+    def clean(text: str) -> str:
+        return redactor.redact(text).text if text else text
+
+    return dataclasses.replace(
+        issue, summary=clean(issue.summary), description=clean(issue.description), tech_notes=clean(issue.tech_notes),
+        repro=clean(issue.repro), expected=clean(issue.expected), acceptance=[clean(item) for item in issue.acceptance])
+
+
+def _snapshot_of(payload) -> dict:
+    try:
+        snapshot = json.loads(payload or "{}").get("estimate") or {}
+    except (ValueError, TypeError, AttributeError):
+        snapshot = {}
+    return snapshot if isinstance(snapshot, dict) else {}
 
 
 def _jira_status(issue: JiraIssue) -> str:
@@ -51,6 +84,10 @@ def _number(value) -> float | None:
     except (TypeError, ValueError):
         return None
     return number if math.isfinite(number) else None
+
+
+def _mean_pct(values: list[float]) -> int | None:
+    return round(100 * sum(values) / len(values)) if values else None
 
 
 def estimate_snapshot(estimate) -> dict:
@@ -96,7 +133,9 @@ def estimate_snapshot(estimate) -> dict:
 class Ledger:
     def __init__(self, path=None) -> None:
         self.path = str(path or config.LEDGER_DB)
-        self.conn = sqlite3.connect(self.path, check_same_thread=False)
+        self._lock = threading.RLock()
+        # 不开 WAL（库常放在同步盘目录）；别的连接（追问记忆、审计）正在写时多等一会，不直接报「database is locked」
+        self.conn = sqlite3.connect(self.path, check_same_thread=False, timeout=30)
         self.conn.executescript("""
         CREATE TABLE IF NOT EXISTS requirements(
             id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, title TEXT, source TEXT, req_type TEXT, requester TEXT,
@@ -119,6 +158,7 @@ class Ledger:
         self.conn.commit()
 
     # ---------- 写 ----------
+    @_locked
     def log_analysis(self, a) -> int:
         est = estimate_snapshot(a.estimate)
         cur = self.conn.execute(
@@ -136,10 +176,12 @@ class Ledger:
         self.add_version(rid, a, "受理")
         return rid
 
+    @_locked
     def log_jira(self, a, origin: str = "粘贴") -> tuple[int, bool]:
         """记一条 Jira 评估（xuzhi.pipeline.assess.Assessment）。同一单号再评只更新数字、记「Jira 重新评估」，不重复建账；
-        Jira 里已完成且有耗费时间的，直接按实际耗时对账。返回 (编号, 是否新建)。"""
-        it = a.issue
+        已对账的那行不再覆盖（标题、内容与实际耗时是一套校准样本）；Jira 里已完成且有耗费时间的，直接按实际耗时对账。
+        工单原文脱敏后再存。返回 (编号, 是否新建)。"""
+        it = _redacted_issue(a.issue)
         key = it.key or f"摘要:{it.summary[:40]}"
         title = f"{it.key} {it.summary}".strip() or "未命名工单"
         payload = json.dumps({
@@ -151,6 +193,11 @@ class Ledger:
         detail = (f"传统 {a.mid} 人天 · AI 编码 {a.coding_ai}（编码阶段 {a.coding_trad}）· 全流程 AI {a.full_ai} · "
                   f"复杂度 {a.level} {a.total} · 来源 Jira {origin}")
         found = self.conn.execute("SELECT id, status FROM requirements WHERE ext_key=?", (key,)).fetchone()
+        if found and found[1] == "已对账":
+            # 单号串号或工单改写后再导入：已对账那行的内容和实际耗时要对得上，只留痕不覆盖
+            rid = int(found[0])
+            self.event(rid, "Jira 重新评估（已对账，未覆盖）", detail)
+            return rid, False
         if found:
             rid, cur_status, created = int(found[0]), found[1] or "受理", False
             self.conn.execute(
@@ -174,6 +221,7 @@ class Ledger:
             self.reconcile(rid, it.spent_days, note="Jira 耗费时间回填")
         return rid, created
 
+    @_locked
     def attach_jira(self, req_id: int, a) -> None:
         """零散需求那条转成 Jira 工单评估后，把编码阶段人工 / AI 挂回原来那行账（不另开一行）。"""
         if not self.get(req_id):
@@ -182,12 +230,15 @@ class Ledger:
         self.conn.commit()
         self.event(req_id, "转 Jira 评估", f"传统 {a.mid} 人天 · AI 编码 {a.coding_ai}（编码阶段 {a.coding_trad}）· 复杂度 {a.level} {a.total}")
 
+    @_locked
     def jira_done_issues(self) -> list[JiraIssue]:
-        """对过账的 Jira 工单 → 下次评估的校准样本（Jira 自己的估算飞轮，不混进零散需求的历史库）。"""
+        """对过账的 Jira 工单 → 下次评估的校准样本（Jira 自己的估算飞轮，不混进零散需求的历史库）。
+        对账时勾了「用了 AI 协同」的不算：校准的是传统实际耗时，AI 做完的耗时会把团队系数拉低。"""
         out = []
         fields = {f.name for f in dataclasses.fields(JiraIssue)}
         for payload, actual in self.conn.execute(
-                f"SELECT payload, actual_days FROM requirements WHERE source='{JIRA_SOURCE}' AND actual_days IS NOT NULL AND actual_days>0"):
+                f"SELECT payload, actual_days FROM requirements WHERE source='{JIRA_SOURCE}' AND actual_days IS NOT NULL AND actual_days>0 "
+                "AND COALESCE(ai_assisted,0)=0"):
             try:
                 d = (json.loads(payload or "{}").get("jira") or {})
             except json.JSONDecodeError:
@@ -197,6 +248,7 @@ class Ledger:
             out.append(it)
         return out
 
+    @_locked
     def update_estimate(self, req_id: int, estimate) -> None:
         row = self.get(req_id)
         if not row:
@@ -205,6 +257,9 @@ class Ledger:
         previous = payload.get("estimate")
         current = estimate_snapshot(estimate)
         payload["estimate"] = current
+        # 前后都没有模型工时、原因也一样（如规则模式下每次答复重算都是「未估时」）：只更新行，不往流水里刷一条
+        unchanged = (isinstance(previous, dict) and previous.get("status") == current.get("status") != "ready"
+                     and (previous.get("error") or "") == (current.get("error") or ""))
         # 当前结果与事件历史一起提交，既清掉失败后的旧数字，也保留重算前快照。
         with self.conn:
             self.conn.execute(
@@ -212,12 +267,14 @@ class Ledger:
                 (current.get("mid"), current.get("ai_mid"), current.get("confidence", ""),
                  json.dumps(payload, ensure_ascii=False), req_id),
             )
-            self.conn.execute(
-                "INSERT INTO events(ts,req_id,action,detail) VALUES(?,?,?,?)",
-                (datetime.now().isoformat(timespec="seconds"), req_id, "估量重算",
-                 json.dumps({"previous": previous, "current": current}, ensure_ascii=False)),
-            )
+            if not unchanged:
+                self.conn.execute(
+                    "INSERT INTO events(ts,req_id,action,detail) VALUES(?,?,?,?)",
+                    (datetime.now().isoformat(timespec="seconds"), req_id, "估量重算",
+                     json.dumps({"previous": previous, "current": current}, ensure_ascii=False)),
+                )
 
+    @_locked
     def update_analysis(self, req_id: int, analysis, label: str = "模型增强") -> int:
         """把后台增强结果更新到同一条需求，保留其状态和审计记录；另存一版（内容没变不另存）。返回最新版本号。"""
         self.update_estimate(req_id, analysis.estimate)
@@ -235,6 +292,7 @@ class Ledger:
             )
         return self.add_version(req_id, analysis, label)
 
+    @_locked
     def record_change(self, req_id: int, analysis, channel: str = "") -> int:
         """需求变更：原话改了，同一编号换成新原话的分析，记「需求变更」流水并存一版。返回最新版本号。
         受理时间、来源、提出方与状态不动（还是这条需求）；类型与脱敏处数跟着新原话走。"""
@@ -257,6 +315,7 @@ class Ledger:
         self.event(req_id, "需求变更", detail + (f"（{channel}）" if channel else ""))
         return n
 
+    @_locked
     def add_version(self, req_id: int, analysis, label: str = "") -> int:
         """存一版分析快照（analysis 也可直接给快照 dict）。和最新一版比不出差别（顺序变化不算）就不另存。
         返回本条最新的版本号（从 1 起）；台账里没有这条需求、或它是 Jira 工单（走「Jira 重新评估」）返回 0。"""
@@ -278,6 +337,7 @@ class Ledger:
                               (req_id, datetime.now().isoformat(timespec="seconds"), label, body))
         return int(count) + 1
 
+    @_locked
     def mark_split(self, req_id: int, children: list[int]) -> None:
         """纪要直通车：整段纪要那行拆成了几条。那行保留原文与流水，看板、催办不再把它算成一条需求。"""
         ids = " ".join(f"#{int(c)}" for c in children)
@@ -285,39 +345,59 @@ class Ledger:
         self.conn.commit()
         self.event(req_id, "纪要拆分", f"已拆分为 {ids}")
 
+    @_locked
     def event(self, req_id: int, action: str, detail: str = "") -> None:
         self.conn.execute("INSERT INTO events(ts,req_id,action,detail) VALUES(?,?,?,?)", (datetime.now().isoformat(timespec="seconds"), req_id, action, detail))
         self.conn.commit()
 
+    @_locked
     def feedback(self, req_id: int, skill: str, score: int, note: str = "") -> None:
         self.conn.execute("INSERT INTO feedback(ts,req_id,skill,score,note) VALUES(?,?,?,?,?)", (datetime.now().isoformat(timespec="seconds"), req_id, skill, score, note))
         self.conn.commit()
 
+    @_locked
     def update_answers(self, req_id: int, n_answered: int, n_high_open: int) -> None:
         """业务答复重算后同步已答复数与未答复高影响数；受理 → 已确认。"""
         self.conn.execute("UPDATE requirements SET n_answered=?, n_high_open=?, status=CASE WHEN status='受理' AND ?>0 THEN '已确认' ELSE status END WHERE id=?",
                           (n_answered, n_high_open, n_answered, req_id))
         self.conn.commit()
 
+    @_locked
     def set_status(self, req_id: int, status: str) -> None:
+        """改状态。从「已对账」改回别的状态即撤销对账：清掉实际人天与对账时间、移出历史记录参考，漏斗与偏差统计才对得上。"""
         if status not in STATUSES:
             raise ValueError(f"未知状态：{status}")
-        self.conn.execute("UPDATE requirements SET status=? WHERE id=?", (status, req_id))
+        row = self.get(req_id) or {}
+        undo = row.get("status") == "已对账" and status != "已对账"
+        if undo:
+            self.conn.execute("UPDATE requirements SET status=?, actual_days=NULL, closed_ts=NULL, ai_assisted=NULL, ai_share=NULL "
+                              "WHERE id=?", (status, req_id))
+        else:
+            self.conn.execute("UPDATE requirements SET status=? WHERE id=?", (status, req_id))
         self.conn.commit()
+        if undo:
+            removed, actual = self._remove_history(req_id), row.get("actual_days")
+            self.event(req_id, "撤销对账", f"状态改回「{status}」" + (f"，已清空实际 {actual} 人天" if actual else "")
+                       + (f"，并从历史记录参考移除 {removed}" if removed else ""))
         self.event(req_id, "状态", status)
 
+    @_locked
     def reconcile(self, req_id: int, actual_days: float, ai_assisted: bool = False, ai_share: float = 0.0, note: str = "",
                   write_history: bool = True) -> dict:
-        """对账：回写实际人天 → 状态"已对账" → 追加到历史需求库（估算飞轮）。返回偏差信息。"""
+        """对账：回写实际人天，状态改为「已对账」；有有效两轨估算时计算偏差，并追加到历史记录参考（不自动校准模型）。
+        返回偏差信息。"""
         row = self.get(req_id)
         if not row:
             raise ValueError(f"台账里没有编号 {req_id}")
         actual = float(actual_days)
         if not math.isfinite(actual) or actual <= 0:
             raise ValueError("实际工时必须是大于 0 的有限数值")
+        share = float(ai_share or 0.0)
+        if not 0 <= share <= 1:   # NaN 也过不了
+            raise ValueError("AI 参与度须在 0～1 之间")
         self.conn.execute(
             "UPDATE requirements SET actual_days=?, ai_assisted=?, ai_share=?, closed_ts=?, close_note=?, status='已对账' WHERE id=?",
-            (actual, 1 if ai_assisted else 0, float(ai_share or 0.0), datetime.now().isoformat(timespec="seconds"), note or "", req_id))
+            (actual, 1 if ai_assisted else 0, share, datetime.now().isoformat(timespec="seconds"), note or "", req_id))
         self.conn.commit()
         trad, ai = _number(row.get("mid_days")), _number(row.get("ai_days"))
         valid = trad is not None and trad > 0 and ai is not None and ai > 0
@@ -328,18 +408,20 @@ class Ledger:
         self.event(req_id, "对账", detail + ("，AI 协同" if ai_assisted else ""))
         hist_id = ""
         if write_history and valid and row.get("source") != JIRA_SOURCE:   # Jira 工单走自己的校准样本（jira_done_issues），不写零散需求的历史库
-            hist_id = self._append_history(row, actual, ai_assisted, ai_share, note)
+            hist_id = self._append_history(row, actual, ai_assisted, share, note)
         return {"estimate": est, "actual": actual, "deviation": dev, "history_id": hist_id}
 
     def _append_history(self, row: dict, actual: float, ai_assisted: bool, ai_share: float, note: str) -> str:
-        """把对账后的需求追加进 history_learned.json（与样本库合并加载，样本文件不动），并清缓存让下次估量即刻用上。"""
+        """把对账后的需求追加进 history_learned.json（与样本库合并加载，样本文件不动），并清缓存：
+        下次估量的历史参考即可列出它（只并列展示，不参与估时）。"""
         from . import knowledge
 
         path = config.HISTORY_LEARNED_PATH
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
-            data = {"_说明": "需知台账对账回写的真实需求（估算飞轮）；与 history_requirements.json 合并使用，同 id 以本文件为准。", "items": []}
+            data = {"_说明": "需知台账对账回写的实际人天；有有效两轨估算时计算偏差，并追加到历史记录参考（不自动校准模型）；"
+                             "与 history_requirements.json 合并使用，同 id 以本文件为准。", "items": []}
         items = data.setdefault("items", [])
         try:
             payload = json.loads(row.get("payload") or "{}")
@@ -351,10 +433,13 @@ class Ledger:
         kws = [k for k in kws if k][:10]
         hid = f"L{int(row['id']):03d}"
         items = [h for h in items if h.get("id") != hid]
+        trad, ai = _number(row.get("mid_days")), _number(row.get("ai_days"))
         items.append({
             "id": hid, "year": datetime.now().year, "title": row.get("title") or "", "type": row.get("req_type") or "",
             "dept": row.get("dept") or _dept_of(row.get("requester") or ""), "keywords": kws,
-            "estimate_days": float(row.get("mid_days") or 0.0), "actual_days": float(actual),
+            # 「当时估算」与实际同一口径：用了 AI 协同的取 AI 轨，没用的取传统轨；两轨另存备查
+            "estimate_days": float((ai if ai_assisted else trad) or 0.0), "actual_days": float(actual),
+            "estimate_trad_days": trad, "estimate_ai_days": ai,
             "note": (note or "") + ("　" if note else "") + "来源：需知台账对账", "ai_assisted": bool(ai_assisted), "ai_share": float(ai_share or 0.0),
             "source": "台账对账",
         })
@@ -363,7 +448,29 @@ class Ledger:
         knowledge.history.cache_clear()
         return hid
 
+    def _remove_history(self, req_id: int) -> str:
+        """撤销对账：把这条从 history_learned.json 拿掉并清缓存。返回移除的编号（没有这条返回空串）。"""
+        from . import knowledge
+
+        path = config.HISTORY_LEARNED_PATH
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return ""
+        items = data.get("items") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            return ""
+        hid = f"L{int(req_id):03d}"
+        kept = [h for h in items if not (isinstance(h, dict) and h.get("id") == hid)]
+        if len(kept) == len(items):
+            return ""
+        data["items"] = kept
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        knowledge.history.cache_clear()
+        return hid
+
     # ---------- 读 ----------
+    @_locked
     def get(self, req_id: int) -> dict | None:
         cur = self.conn.execute("SELECT * FROM requirements WHERE id=?", (req_id,))
         r = cur.fetchone()
@@ -371,6 +478,7 @@ class Ledger:
             return None
         return dict(zip([c[0] for c in cur.description], r))
 
+    @_locked
     def recent(self, n: int = 20) -> list[dict]:
         cur = self.conn.execute(
             "SELECT id,ts,title,dept,source,req_type,requester,engine,status,n_questions,n_answered,n_high_open,mid_days,ai_days,coding_ai,actual_days,close_note,ai_share,confidence,redacted,ext_key,split_into "
@@ -378,10 +486,18 @@ class Ledger:
         cols = [c[0] for c in cur.description]
         return [dict(zip(cols, r)) for r in cur.fetchall()]
 
+    @_locked
     def events_of(self, req_id: int) -> list[dict]:
         cur = self.conn.execute("SELECT ts,action,detail FROM events WHERE req_id=? ORDER BY id", (req_id,))
         return [{"ts": t, "action": a, "detail": d} for t, a, d in cur.fetchall()]
 
+    @_locked
+    def delivered_ts(self) -> dict[int, str]:
+        """各条最近一次改成「已交付」的时间（催办摘要按它算「交付后 N 天」，不按受理时间）。"""
+        return {int(rid): ts for rid, ts in self.conn.execute(
+            "SELECT req_id, MAX(ts) FROM events WHERE action='状态' AND detail='已交付' GROUP BY req_id") if rid is not None}
+
+    @_locked
     def versions_of(self, req_id: int) -> list[dict]:
         """本条全部版本（旧 → 新）：版本号（1 起）、时间、动作、快照。"""
         out = []
@@ -394,10 +510,12 @@ class Ledger:
             out.append({"version": n, "ts": ts or "", "label": label or "", "snapshot": snap if isinstance(snap, dict) else {}})
         return out
 
+    @_locked
     def latest_version(self, req_id: int) -> dict | None:
         found = self.versions_of(req_id)
         return found[-1] if found else None
 
+    @_locked
     def export_rows(self) -> list[dict]:
         """审计导出：全部需求行（不含 payload 原文）。"""
         cur = self.conn.execute(
@@ -406,13 +524,16 @@ class Ledger:
         cols = [c[0] for c in cur.description]
         return [dict(zip(cols, r)) for r in cur.fetchall()]
 
+    @_locked
     def stats(self) -> dict:
         n, q, ans, red = self.conn.execute("SELECT COUNT(*), COALESCE(SUM(n_questions),0), COALESCE(SUM(n_answered),0), COALESCE(SUM(redacted),0) "
                                            f"FROM requirements WHERE {_NOT_SPLIT}").fetchone()
         return {"count": n, "questions": q, "answered": ans, "redacted": red, "minutes_saved": n * sum(MINUTES_SAVED.values())}
 
+    @_locked
     def dashboard(self) -> dict:
-        """经营看板：需求量（部门 / 类型 / 月份 / 状态）、澄清效率、估算偏差、AI 协同省时、反馈。全部由台账算出。"""
+        """经营看板：需求量（部门 / 类型 / 月份 / 状态）、澄清效率、估算偏差、AI 协同省时、反馈。全部由台账算出。
+        估算偏差三套口径分开：mape*（只比有效模型估算）、jira_mape（Jira 规则评估）、rule_*（规则模板参考，不调模型也有）。"""
         c = self.conn
         n = c.execute(f"SELECT COUNT(*) FROM requirements WHERE {_NOT_SPLIT}").fetchone()[0]
         out: dict = {"count": n, "by_dept": {}, "by_type": {}, "by_month": {}, "by_status": {s: 0 for s in STATUSES}}
@@ -421,7 +542,9 @@ class Ledger:
                         "trad_days": None, "ai_days": None, "saved_days": None, "saving_pct": None,
                         "estimated_count": 0, "unestimated_count": 0, "legacy_count": 0,
                         "jira_count": 0, "jira_coding_trad": 0.0, "jira_coding_ai": 0.0, "jira_by_kind": {},
-                        "closed": 0, "comparable_count": 0, "mape": None, "mape_trad": None, "mape_ai": None, "bias_trad": None, "thumbs_up": 0, "thumbs_down": 0, "depts": 0})
+                        "closed": 0, "comparable_count": 0, "mape": None, "mape_trad": None, "mape_ai": None, "bias_trad": None,
+                        "jira_closed": 0, "jira_mape": None, "rule_count": 0, "rule_mape": None, "rule_bias": None,
+                        "thumbs_up": 0, "thumbs_down": 0, "depts": 0})
             return out
         # 部门与类型分布只算零散需求：Jira 工单没有提出部门，类型（需求 / 缺陷…）也和业务类型（报表 / 页面…）不是一个口径
         for dept, k in c.execute(f"SELECT COALESCE(NULLIF(dept,''),'未注明'), COUNT(*) FROM requirements WHERE {_NOT_JIRA} AND {_NOT_SPLIT} GROUP BY 1 ORDER BY 2 DESC"):
@@ -434,28 +557,28 @@ class Ledger:
             out["by_month"][m] = k
         for s, k in c.execute(f"SELECT COALESCE(NULLIF(status,''),'受理'), COUNT(*) FROM requirements WHERE {_NOT_SPLIT} GROUP BY 1"):
             out["by_status"][s] = out["by_status"].get(s, 0) + k
-        # 追问 / 澄清 / 出稿用时只算零散需求（Jira 工单已写好，不追问）；工时与省时全算
+        # 追问 / 澄清 / 出稿用时与模型估算汇总都只算零散需求（Jira 工单已写好、不追问，工时是规则评估，另记 jira_*）
         n_free = c.execute(f"SELECT COUNT(*) FROM requirements WHERE {_NOT_JIRA} AND {_NOT_SPLIT}").fetchone()[0]
         aq, sa, sq, ho, sec = c.execute(
             "SELECT AVG(n_questions), SUM(n_answered), SUM(n_questions), SUM(COALESCE(n_high_open,0)), AVG(COALESCE(seconds,0)) "
             f"FROM requirements WHERE {_NOT_JIRA} AND {_NOT_SPLIT}").fetchone()
         valid_estimates: list[tuple[float, float]] = []
+        valid_ids: set[int] = set()
         legacy_count = 0
-        for before, after, payload in c.execute(f"SELECT mid_days, ai_days, payload FROM requirements WHERE {_NOT_SPLIT}"):
+        for rid, before, after, payload in c.execute(
+                f"SELECT id, mid_days, ai_days, payload FROM requirements WHERE {_NOT_JIRA} AND {_NOT_SPLIT}"):
             before, after = _number(before), _number(after)
             if before is None or before <= 0 or after is None or after <= 0:
                 continue
-            try:
-                snapshot = json.loads(payload or "{}").get("estimate") or {}
-            except (ValueError, TypeError):
-                snapshot = {}
+            snapshot = _snapshot_of(payload)
             if snapshot.get("method") == "llm" and snapshot.get("status") == "ready":
                 valid_estimates.append((before, after))
+                valid_ids.add(int(rid))
             elif snapshot.get("method") not in ("llm", "unavailable"):
                 legacy_count += 1
         out["estimated_count"] = len(valid_estimates)
         out["legacy_count"] = legacy_count
-        out["unestimated_count"] = n - len(valid_estimates) - legacy_count
+        out["unestimated_count"] = n_free - len(valid_estimates) - legacy_count
         trad = sum(pair[0] for pair in valid_estimates) if valid_estimates else None
         ai = sum(pair[1] for pair in valid_estimates) if valid_estimates else None
         rounds = c.execute(f"SELECT COUNT(*) FROM events WHERE action='业务答复重算' AND req_id NOT IN ({_SPLIT_IDS})").fetchone()[0]
@@ -467,29 +590,52 @@ class Ledger:
         out["avg_rounds"] = round(1 + rounds / n_free, 1) if n_free else 0.0   # 开工一轮 + 每次答复重算算一轮
         out["avg_seconds"] = round(sec or 0.0, 1)
         out["high_open_rate"] = round((ho or 0) / sq, 2) if sq else 0.0
-        out["trad_days"] = round(trad, 3) if trad is not None else None
-        out["ai_days"] = round(ai, 3) if ai is not None else None
-        out["saved_days"] = round(trad - ai, 3) if trad is not None and ai is not None else None
+        # 看板只展示一位小数（人天），三位小数投屏像假精度
+        out["trad_days"] = round(trad, 1) if trad is not None else None
+        out["ai_days"] = round(ai, 1) if ai is not None else None
+        out["saved_days"] = round(trad - ai, 1) if trad is not None and ai is not None else None
         out["saving_pct"] = round(100 * (trad - ai) / trad) if trad is not None and ai is not None else None
         out["depts"] = len(out["by_dept"])
-        closed = c.execute("SELECT mid_days, ai_days, actual_days, ai_assisted FROM requirements "
+        closed = c.execute("SELECT id, mid_days, ai_days, actual_days, ai_assisted, source, payload FROM requirements "
                            f"WHERE actual_days IS NOT NULL AND actual_days>0 AND {_NOT_SPLIT}").fetchall()
-        out["closed"] = len(closed)
-        if closed:
-            # 用了 AI 协同的比 AI 轨估算，没用的比传统轨：拿 AI 做完的实际人天去比传统估算，偏差会被夸大
-            comparable = [(m, ai, a, used) for m, ai, a, used in closed if m is not None and m > 0 and ai is not None and ai > 0]
-            out["comparable_count"] = len(comparable)
-            errs_t = [abs(m - a) / a for m, _, a, used in comparable if not used]
-            errs_a = [abs(ai - a) / a for _, ai, a, used in comparable if used]
-            bias = [(m - a) / a for m, _, a, used in comparable if not used]
-            both = errs_t + errs_a
-            out["mape"] = round(100 * sum(both) / len(both)) if both else None
-            out["mape_trad"] = round(100 * sum(errs_t) / len(errs_t)) if errs_t else None
-            out["mape_ai"] = round(100 * sum(errs_a) / len(errs_a)) if errs_a else None
-            out["bias_trad"] = round(100 * sum(bias) / len(bias)) if bias else None
-        else:
-            out["comparable_count"] = 0
-            out["mape"] = out["mape_trad"] = out["mape_ai"] = out["bias_trad"] = None
+        out["closed"] = len(closed)   # 全部已对账行（含 Jira、无有效估算的）；偏差按下面三套口径各算各的
+        # 模型估算偏差：只比有效模型估算。用了 AI 协同的比 AI 轨，没用的比传统轨：拿 AI 做完的实际人天去比传统估算，偏差会被夸大
+        comparable = [(m, ai, a, used) for rid, m, ai, a, used, _, _ in closed if rid in valid_ids]
+        out["comparable_count"] = len(comparable)
+        errs_t = [abs(m - a) / a for m, _, a, used in comparable if not used]
+        errs_a = [abs(ai - a) / a for _, ai, a, used in comparable if used]
+        bias = [(m - a) / a for m, _, a, used in comparable if not used]
+        out["mape"] = _mean_pct(errs_t + errs_a)
+        out["mape_trad"] = _mean_pct(errs_t)
+        out["mape_ai"] = _mean_pct(errs_a)
+        out["bias_trad"] = _mean_pct(bias)
+        # Jira 规则评估的偏差另算（勾了 AI 协同的比全流程 AI 工时），不混进模型偏差
+        jira_rows = [(m, ai, a, used) for _, m, ai, a, used, source, _ in closed if source == JIRA_SOURCE]
+        jira_errs = []
+        for jira_trad, jira_ai, actual, used in jira_rows:
+            est = _number(jira_ai if used else jira_trad)
+            if est is not None and est > 0:
+                jira_errs.append(abs(est - actual) / actual)
+        out["jira_closed"] = len(jira_rows)
+        out["jira_mape"] = _mean_pct(jira_errs)
+        # 规则模板参考（不调模型也有）与实际的偏差：可以复盘，但不进 mape
+        rule_errs, rule_bias = [], []
+        for _, _, _, a, used, source, payload in closed:
+            if source == JIRA_SOURCE:
+                continue
+            references = _snapshot_of(payload).get("references")
+            rule = references.get("rule") if isinstance(references, dict) else None
+            if not isinstance(rule, dict) or rule.get("status") != "ready":
+                continue
+            track = rule.get("after" if used else "before")
+            hours = _number(track.get("mid")) if isinstance(track, dict) else None
+            if hours is None or hours <= 0:
+                continue
+            rule_errs.append(abs(hours / 8 - a) / a)
+            rule_bias.append((hours / 8 - a) / a)
+        out["rule_count"] = len(rule_errs)
+        out["rule_mape"] = _mean_pct(rule_errs)
+        out["rule_bias"] = _mean_pct(rule_bias)
         up, down = c.execute("SELECT SUM(CASE WHEN score>0 THEN 1 ELSE 0 END), SUM(CASE WHEN score<0 THEN 1 ELSE 0 END) FROM feedback").fetchone()
         out["thumbs_up"], out["thumbs_down"] = int(up or 0), int(down or 0)
         return out

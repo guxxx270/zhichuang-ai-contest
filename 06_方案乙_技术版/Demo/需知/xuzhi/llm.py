@@ -18,6 +18,12 @@ from urllib.request import Request, urlopen
 from . import config, sandbox
 
 GATEWAY_COOLDOWN = 120   # 网关超时 / 连不上之后，这么多秒内的调用直接走规则引擎
+_JSON_STARTS = 64        # parse_json_loose 每种括号最多试几个起点
+_OBJECT_START = re.compile(r'\{\s*"')   # 像 JSON 对象的起点（{"键"…），区别于说明文字里的 {注意}
+
+
+class OutputTruncated(RuntimeError):
+    """模型输出被 max_tokens 截断（finish_reason=length）：内容不完整，不能当格式错误处理，也不该原样重问。"""
 
 
 def _gateway_down(e: BaseException | None) -> bool:
@@ -31,6 +37,11 @@ def _gateway_down(e: BaseException | None) -> bool:
     except ImportError:
         return False
     return isinstance(e, APIConnectionError)
+
+
+def gateway_unreachable(e: BaseException | None) -> bool:
+    """调用方区分「网关超时 / 连不上」与其他失败；chat() 包过一层的异常看它的 __cause__。"""
+    return _gateway_down(e) or _gateway_down(getattr(e, "__cause__", None))
 
 
 def list_openai_models(api_base: str, api_key: str) -> tuple[list[tuple[str, str]], str]:
@@ -191,6 +202,8 @@ class LLM:
         )
         if json_mode:
             kwargs["response_format"] = {"type": "json_object"}
+        if config.LLM_MAX_TOKENS > 0:
+            kwargs["max_tokens"] = config.LLM_MAX_TOKENS
         try:
             resp = self._client.chat.completions.create(**kwargs)
         except Exception as e:  # 网关不支持 json_object 时退回普通模式；超时 / 连不上就别再白等一轮
@@ -200,7 +213,10 @@ class LLM:
             else:
                 raise RuntimeError(f"LLM 调用失败：{e}") from e
         self.last_model = getattr(resp, "model", "") or self.model
-        return resp.choices[0].message.content or ""
+        choice = resp.choices[0]
+        if getattr(choice, "finish_reason", None) == "length":   # 半截输出：说清是截断，别让下游报成「格式不对」
+            raise OutputTruncated("模型输出被截断（finish_reason=length）")
+        return choice.message.content or ""
 
     def chat_json(self, system: str, user: str, purpose: str = "") -> Any:
         raw = self.chat(system, user, json_mode=True, purpose=purpose)
@@ -208,20 +224,37 @@ class LLM:
 
 
 def parse_json_loose(text: str) -> Any:
-    """从模型输出里尽量抠出 JSON（容忍 ```json 围栏与前后废话）。"""
+    """从模型输出里尽量抠出 JSON（容忍 ```json 围栏与前后废话）。
+    依次从每个「{」起用 raw_decode 解一个完整对象（前面的说明里带「[见下]」也不碍事），都不行才试「[」；
+    截断或中途写坏的 JSON 解不出来就返回 None，不从里面挑一个小对象充数（否则校验报的是「缺摘要」这类误导原因）；
+    也不再逐字截短重试（那是 O(n²)，长输出会卡住）。"""
     if not text:
         return None
     m = re.search(r"```(?:json)?\s*(.*?)```", text, re.S)
     candidate = m.group(1) if m else text
-    start = min([i for i in (candidate.find("{"), candidate.find("[")) if i >= 0], default=-1)
-    if start < 0:
-        return None
-    candidate = candidate[start:]
-    for end in range(len(candidate), 0, -1):
-        try:
-            return json.loads(candidate[:end])
-        except json.JSONDecodeError:
-            continue
+    decoder = json.JSONDecoder()
+    # 「{」解不出的区间：里面那些完整的小对象 / 列表不单拿出来。区间按起点递增、互不重叠。
+    # 像 JSON 对象的起点解不出（截断，或中途引号没转义），出错处之后的括号也可能还在它里面，区间一直算到末尾
+    failed: list[tuple[int, int]] = []
+    for opener in ("{", "["):
+        start, k, tries = candidate.find(opener), 0, 0
+        # 每种括号最多试 _JSON_STARTS 个起点：正常的说明文字里没这么多括号；每次出错都要从头数行号，起点多了会拖成平方级
+        while start >= 0 and tries < _JSON_STARTS:
+            while k < len(failed) and failed[k][1] <= start:
+                k += 1
+            if opener == "[" and k < len(failed) and failed[k][0] <= start:
+                start = candidate.find(opener, failed[k][1])
+                continue
+            tries += 1
+            try:
+                return decoder.raw_decode(candidate, start)[0]
+            except json.JSONDecodeError as exc:
+                end = len(candidate) if opener == "{" and _OBJECT_START.match(candidate, start) else max(start + 1, exc.pos)
+            except RecursionError:   # 嵌套深到解析器递归上限，不是正常输出；后面不再逐个起点重试
+                end = len(candidate)
+            if opener == "{":
+                failed.append((start, end))
+            start = candidate.find(opener, end)
     return None
 
 
