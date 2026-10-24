@@ -54,7 +54,9 @@ def calib_sources(ledger: Ledger, include_sample: bool = False) -> dict[str, tup
     else:
         base, label = [it for it in load_history()[0] if it.key not in keys], "历史导出"
     pool = {it.key or it.summary: (it, label) for it in base}
-    pool.update({it.key or it.summary: (it, "一本账") for it in ledger.jira_done_issues() if (it.key in keys) == include_sample})
+    # 一本账里对过账的示例单号也还是虚构的：说明行照样记「示例（虚构）」，不能写成「一本账」让人当成真实工单
+    pool.update({it.key or it.summary: (it, label if include_sample else "一本账")
+                 for it in ledger.jira_done_issues() if (it.key in keys) == include_sample})
     return pool
 
 

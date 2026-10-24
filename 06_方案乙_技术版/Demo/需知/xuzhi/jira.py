@@ -152,8 +152,9 @@ _NOT_KEY = {"UTF", "SHA", "AES", "RSA", "ISO", "GB", "RFC", "TLS", "SSL", "HTTP"
 _SEC_RE = re.compile(r"^\s*(?:h[1-6]\.|#{1,6})?\s*[*【\[]*\s*(" + "|".join(_SECTIONS.values())
                      + r")\s*(?:[（(][^）)]{0,12}[）)])?\s*[*】\]]*\s*(?:[:：]\s*(.*))?$", re.I)
 _LABEL_ONLY = re.compile(r"\s*([A-Za-z一-鿿 /]{1,24}?)\s*[:：]\s*")   # 「类型:」单独一行，值在下一行
-# 没有验收段时，描述里的 Given / When / Then 才算验收；「当前…」「当日…」「假设用户…」不算
-_GWT = re.compile(r"(?i)(?:given|when|then)\b|当(?!前|日|天|月|年).+时|假设.+[，,]")
+# 没有验收段时，描述里的 Given / When / Then 才算验收；「当前…」「当日…」「假设用户…」不算。
+# 中文 Gherkin 的「假设 / 当 / 那么」后面跟空格或冒号（「假设 用户已登录」「那么：显示交易日」）也算
+_GWT = re.compile(r"(?i)(?:given|when|then)\b|当(?!前|日|天|月|年).+时|假设.+[，,]|(?:假如|假设|假定|当|那么)(?:\s+|\s*[:：])\S")
 
 
 def _which(patterns: dict[str, str], label: str) -> str | None:
@@ -180,8 +181,19 @@ def _inline_fields(line: str) -> dict[str, str]:
     return found
 
 
-def _section_of(line: str) -> str | None:
+def _sec_match(line: str):
+    """段落标题的匹配结果，不是标题返回 None。Wiki 里「# 」开头是编号列表项：「# 期望：夜盘计入下一交易日」是一条验收，
+    不是「期望结果」段；「#」开头只有整行就是标题（「## 验收标准」）才按 Markdown 标题认。"""
     sm = _SEC_RE.match(line)
+    if not sm or not _which(_SECTIONS, sm.group(1)):
+        return None
+    if line.lstrip().startswith("#") and (sm.group(2) or "").strip():
+        return None
+    return sm
+
+
+def _section_of(line: str) -> str | None:
+    sm = _sec_match(line)
     return _which(_SECTIONS, sm.group(1)) if sm else None
 
 
@@ -236,8 +248,10 @@ def parse_issue_text(text: str, inline: bool = True) -> JiraIssue:
                 continue
         if inline:
             m = _LABEL_ONLY.fullmatch(ln)
-            if m and _field_label(m.group(1)):
-                label, current = _field_label(m.group(1)), None
+            # Jira Cloud 详情栏的人名字段连冒号都没有（「经办人」下一行是名字）：同样连名字一起丢掉
+            k = _field_label(m.group(1)) if m else _which(_PEOPLE, ln)
+            if k:
+                label, current = k, None
                 continue
             fields = _inline_fields(ln)
             if fields:
@@ -245,8 +259,8 @@ def parse_issue_text(text: str, inline: bool = True) -> JiraIssue:
                     _apply_inline(issue, k, v)
                 current = None
                 continue
-        sm = _SEC_RE.match(ln)
-        if sm and _which(_SECTIONS, sm.group(1)):
+        sm = _sec_match(ln)
+        if sm:
             current = _which(_SECTIONS, sm.group(1))
             if (sm.group(2) or "").strip():
                 sections.setdefault(current, []).append(sm.group(2).strip())
@@ -260,8 +274,9 @@ def parse_issue_text(text: str, inline: bool = True) -> JiraIssue:
     if not issue.summary:
         summary_idx = next((i for i, t in enumerate(titles) if t), None)
         issue.summary = titles[summary_idx] if summary_idx is not None else ""
-    # 只排除用作摘要的那一行（以及只有单号的行）；摘要来自「摘要：」字段时，正文第一行照样留在描述里
-    rest = [ln for i, ln in enumerate(head_lines) if i != summary_idx and titles[i] and ln.strip() != issue.summary]
+    # 只排除用作摘要的那一行、只有单号的行，以及去掉单号后就是摘要的标题行（「【JIRA】XZ-11 …」配「摘要：…」时）；
+    # 摘要来自「摘要：」字段时，正文第一行照样留在描述里
+    rest = [ln for i, ln in enumerate(head_lines) if i != summary_idx and titles[i] and titles[i] != issue.summary]
     issue.description = "\n".join(sections.get("description", []) + rest).strip()
     issue.acceptance = _items("\n".join(sections.get("acceptance", [])))
     if not issue.acceptance:   # 没有验收段：描述里 Given / When / Then 也算

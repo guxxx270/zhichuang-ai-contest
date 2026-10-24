@@ -73,7 +73,7 @@ def test_sample_export_batch():
     assert trading.tasks[1].who == AI_REVIEW                               # 和质量检查的「AI 做人审」一致，不是「人必须做」
     assert any("史诗" in m for _, m in epic.risks) and not epic.similar
     assert any("没有验收标准" in m for _, m in by["XZ-1043"].risks)
-    assert by["XZ-1040"].deviation is not None and by["XZ-1040"].deviation >= 0.4   # 原估 1 天，同类实际 2.5 天 → 偏乐观
+    assert by["XZ-1040"].deviation is not None and by["XZ-1040"].deviation >= 0.4   # 原估 1 天，需知估得多；回测撑不起「偏乐观」，只报差值
 
 
 def test_no_false_positive_terms():
@@ -219,6 +219,21 @@ def test_done_rows_are_estimated_leave_one_out():
             assert "不足 3 条" in a.calib_note and a.confidence != "高"
 
 
+def test_backtest_work_is_capped_by_the_window(monkeypatch):
+    from xuzhi.pipeline import assess as assess_mod
+
+    monkeypatch.setattr(assess_mod, "BACKTEST_MAX", 4)   # 历史比回测窗口多：回测只在最后 4 条之间互相留一
+    issues = _sample()
+    done = [i for i in issues if i.done]
+    window = assess_mod._backtest_loo(assess_mod._samples(done))
+    assert len(window) == 4 and all(a.calib_note.startswith("按 3 条") for a in window.values())
+    calib = calibrate(done)
+    assert calib.backtest_n == 4 and (calib.backtest_mape, calib.orig_mape, calib.backtest_n) == backtest(done)
+    results, batch_calib = assess_many(issues)
+    assert (batch_calib.backtest_mape, batch_calib.orig_mape, batch_calib.backtest_n) == backtest(done)
+    assert all(a.calib_note.startswith("按 7 条") for a in results if a.issue.done)   # 表里的已完成行仍用其余全部样本
+
+
 NEG_BASE = ("【JIRA】XZ-7 持仓查询接口增加字段\n类型：故事　模块：交易系统\n描述：持仓查询接口返回新增字段。{x}\n"
             "验收标准：\n1. 返回新增字段\n2. 老调用方不受影响\n3. 补充单元测试")
 
@@ -234,6 +249,12 @@ def test_negations_and_near_synonyms_change_nothing(phrase):
     ref = assess(parse_issue_text(NEG_BASE.format(x="")), calibrate([]))
     assert "需跨系统对接" not in ref.reasons["涉及系统"]                       # 「老调用方不受影响」不是要对接
     assert _profile(assess(parse_issue_text(NEG_BASE.format(x=phrase)), calibrate([]))) == _profile(ref)
+
+
+@pytest.mark.parametrize("phrase", ["现有持仓服务耦合严重，不得不重构。", "不能不迁移历史数据。"])
+def test_double_negation_still_counts(phrase):
+    a = assess(parse_issue_text(NEG_BASE.format(x=phrase)), calibrate([]))   # 「不得不」是必须做，不是不做
+    assert "含新建 / 重构 / 批量类改动" in a.reasons["改动规模"]
 
 
 def test_client_version_needs_review_but_is_not_customer_data():
@@ -308,6 +329,8 @@ def test_own_tickets_never_calibrate_with_the_fictional_sample(jledger):
     sample, keys = _sample(), app_jira.sample_keys()
     demo_before = [a.mid for a in assess_many(sample, app_jira.calib_pool(jledger, include_sample=True))[0]]
     app_jira._log_batch(jledger, assess_many(sample)[0])          # 示例里 8 条已完成的对过账，进了一本账
+    # 一本账里的示例单号还是虚构的：说明行不能写成「一本账」
+    assert app_jira.pool_note(app_jira.calib_sources(jledger, include_sample=True)) == "校准样本：示例（虚构） 8 条"
     own = [parse_issue_text(OWN) for _ in range(3)]
     for i, it in enumerate(own, 1):
         it.key, it.status, it.spent_h = f"HX-{i}", "完成", 8.0 * i

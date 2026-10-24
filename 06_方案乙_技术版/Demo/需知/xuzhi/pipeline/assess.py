@@ -27,8 +27,9 @@ _TRADING = re.compile(r"下单|报单|撤单|柜台|(?:交易|报单|下单)指�
 _CUSTOMER = re.compile(r"客户(?!端|经理|版)|投资者|资金账号|脱敏|适当性|合规|监管|报送")   # 客户端、客户经理不是客户数据
 _CLIENT_VER = re.compile(r"客户版")   # 对外的客户版：不一定碰客户数据，但要合规审阅，风险照样算
 _EXTERNAL = re.compile(r"第三方|托管行|外部接口|外部系统|其他团队|依赖|抓取")   # 「按交易所日历」不算外部依赖
-# 否定说法：「不修改表结构」「表结构不变」「无外部依赖」「不重构、不迁移」——匹配规模 / 依赖 / 表结构之前先删掉
-_NEGATED = re.compile(r"(?:不需要|不涉及|无需|无须|不用|不|无)\s*(?:修改|改动|变更|改|动|做|涉及)?\s*"
+# 否定说法：「不修改表结构」「表结构不变」「无外部依赖」「不重构、不迁移」——匹配规模 / 依赖 / 表结构之前先删掉；
+# 「不得不重构」「不能不迁移」是双重否定（必须做），不删
+_NEGATED = re.compile(r"(?<!不得)(?<!不能)(?:不需要|不涉及|无需|无须|不用|不|无)\s*(?:修改|改动|变更|改|动|做|涉及)?\s*"
                       r"(?:外部依赖|依赖(?:其他系统|外部系统|外部接口|第三方|托管行|其他团队)?|表结构(?:变更|变化|改动)?|DDL"
                       r"|重构|(?:数据)?迁移(?:历史数据)?|回填|回刷|历史数据)|表结构不变")
 _ONLINE = re.compile(r"线上|生产|紧急|P0|故障")
@@ -272,9 +273,11 @@ def _leave_one_out(samples: list[tuple[JiraIssue, float]], ids: set[int] | None 
             for i, (it, _) in enumerate(samples) if ids is None or id(it) in ids}
 
 
-def _backtest_ids(samples) -> set[int]:
-    # 留一法是 n² 的：回测最多取最后 BACKTEST_MAX 条（一本账、本次批量排在后面，较新），历史导出再多也不拖慢页面
-    return {id(it) for it, _ in samples[-BACKTEST_MAX:]}
+def _backtest_loo(samples: list[tuple[JiraIssue, float]]) -> dict[int, "Assessment"]:
+    """回测用的留一法：只在最后 BACKTEST_MAX 条（一本账、本次批量排在后面，较新）之间互相留一。
+    留一法是 n² 的，每条都拿全部历史校准的话，历史 3000 条时粘贴一条要等两三秒；这样历史导出再多，回测的工作量也封顶。
+    样本不超过 BACKTEST_MAX 条时，就是全部样本互相留一。"""
+    return _leave_one_out(samples[-BACKTEST_MAX:])
 
 
 def _mape(pairs: list[tuple[float, float]]) -> float:
@@ -290,9 +293,10 @@ def _backtest(samples, loo) -> tuple[float | None, float | None, int]:
 
 
 def backtest(pool: list[JiraIssue]) -> tuple[float | None, float | None, int]:
-    """历史回测：已完成且有原估的工单逐条留一法估算。返回 (需知 MAPE, Jira 原估 MAPE, 条数)，没有可回测的返回 (None, None, 0)。"""
+    """历史回测：最后 BACKTEST_MAX 条已完成工单之间留一法估算，有原估的拿来比。
+    返回 (需知 MAPE, Jira 原估 MAPE, 条数)，没有可回测的返回 (None, None, 0)。"""
     samples = _samples(pool)
-    return _backtest(samples, _leave_one_out(samples, _backtest_ids(samples)))
+    return _backtest(samples, _backtest_loo(samples))
 
 
 def _with_backtest(samples, loo) -> Calibration:
@@ -305,7 +309,7 @@ def calibrate(done: list[JiraIssue]) -> Calibration:
     """用已完成工单（有实际耗时）算团队系数：实际人天 ÷ 规则模型人天 的中位数；以及每个故事点折多少人天。
     同时做历史回测，决定和原估对比时能不能说「偏乐观 / 偏保守」。"""
     samples = _samples(done)
-    return _with_backtest(samples, _leave_one_out(samples, _backtest_ids(samples)))
+    return _with_backtest(samples, _backtest_loo(samples))
 
 
 def _tasks(issue: JiraIssue, kind: str, dims: dict[str, int]) -> list[CodeTask]:
@@ -466,6 +470,8 @@ def assess_many(issues: list[JiraIssue], history: list[JiraIssue] | None = None)
     pool = {it.key or it.summary: it for it in (history or []) if it.done}
     pool.update({it.key or it.summary: it for it in issues if it.done})
     samples = _samples(list(pool.values()))
-    loo = _leave_one_out(samples, _backtest_ids(samples) | {id(it) for it in issues})
-    calib = _with_backtest(samples, loo)
+    bt = _backtest_loo(samples)
+    # 本批已完成的行用其余全部样本校准；样本不超过 BACKTEST_MAX 条时回测那份就是，不用重算
+    loo = bt if len(samples) <= BACKTEST_MAX else _leave_one_out(samples, {id(it) for it in issues})
+    calib = _with_backtest(samples, bt)
     return [loo.get(id(it)) or assess(it, calib) for it in issues], calib

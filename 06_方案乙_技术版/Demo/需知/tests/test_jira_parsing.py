@@ -42,6 +42,9 @@ def test_people_fields_are_dropped_when_pasted():
                           "描述：风险度超 100% 时提醒\nAssignee:\nWang Wu\n验收标准：\n1. 超限提醒\n2. 留痕\n3. 夜盘也提醒")
     assert not any(name in it.text for name in ("张三", "李四", "Wang Wu"))
     assert it.issue_type == "故事" and it.description == "风险度超 100% 时提醒" and len(it.acceptance) == 3
+    cloud = parse_issue_text("XZ-8003\n风险度超限提醒\n描述\n风险度超 100% 时提醒\n验收标准\n1. 超限提醒\n2. 留痕\n"
+                             "经办人\n张三\n报告人\n李四\nAssignee\nWang Wu")   # Jira Cloud 详情栏：标签不带冒号
+    assert not any(name in cloud.text for name in ("张三", "李四", "Wang Wu")) and cloud.acceptance == ["超限提醒", "留痕"]
 
 
 def test_export_acceptance_column_needs_an_exact_header():
@@ -85,12 +88,25 @@ def test_acceptance_heading_variants(heading):
     assert it.acceptance == ["新增列", "导出一致", "首日显示—"] and not it.description
 
 
+def test_wiki_numbered_item_is_not_a_heading():
+    """Wiki 的「# 」是编号列表项：「# 期望：…」是一条验收，不能把整段验收挪进「期望结果」。"""
+    items = "# 期望：夜盘成交计入下一交易日\n# 节假日按日历归属\n# P99 ≤ 200ms"
+    it = parse_issue_text(f"【JIRA】XZ-4 持仓加交易日\n类型：故事\n验收标准：\n{items}")
+    exported = parse_export(_csv(["摘要", "问题关键字", "问题类型", "状态", "描述"],
+                                 ["持仓加交易日", "XZ-4", "故事", "待办", f"持仓接口加字段\nh3. 验收标准\n{items}"]), "x.csv")[0]
+    for x in (it, exported):
+        assert x.acceptance == ["期望：夜盘成交计入下一交易日", "节假日按日历归属", "P99 ≤ 200ms"] and not x.expected
+
+
 def test_gwt_fallback_only_takes_given_when_then():
     it = parse_issue_text("【JIRA】XZ-5 持仓页加字段\n类型：故事　模块：交易系统\n描述：\n当前持仓页没有交易日\n当日夜盘成交显示错误\n假设用户在夜盘下单")
     assert it.acceptance == [] and any("没有验收标准" in m for _, m in assess(it, calibrate([])).risks)
     gwt = parse_issue_text("【JIRA】XZ-5 持仓页加字段\n类型：故事\n描述：\nGiven 夜盘成交\nWhen 打开持仓页\nThen 交易日为下一交易日\n"
                            "当用户切换产品时，刷新持仓\n假设已登录，打开持仓页")
     assert len(gwt.acceptance) == 5
+    for sep in (" ", "："):   # 中文 Gherkin：关键词后跟空格或冒号
+        zh = parse_issue_text(f"【JIRA】XZ-5 持仓页加字段\n类型：故事\n描述：\n假设{sep}用户已登录\n当{sep}打开持仓页\n那么{sep}显示交易日列")
+        assert len(zh.acceptance) == 3
 
 
 def test_typeless_ticket_with_an_expectation_is_not_a_bug():
@@ -108,6 +124,8 @@ def test_summary_field_keeps_the_first_body_line():
                           "Risk team needs trade date on each row.\nAcceptance Criteria:\n1. a")
     assert en.summary == "Add trade date to position query" and en.description == "Risk team needs trade date on each row."
     assert en.issue_type == "Story" and en.components == ["交易系统"]
+    both = parse_issue_text("【JIRA】XZ-11 持仓查询加字段\n摘要：持仓查询加字段\n类型：故事\n风控要交易日")   # 标题行就是摘要：不进描述
+    assert both.key == "XZ-11" and both.description == "风控要交易日"
 
 
 # ---------------------------------------------------------------- 导出：描述原样、表头别名与单位
