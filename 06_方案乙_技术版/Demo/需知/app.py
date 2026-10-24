@@ -686,6 +686,14 @@ def _preset_row(p: tuple) -> tuple[str, str, str, str, str]:
     return label, mode, "legacy", "", model
 
 
+def _env_custom_gateway() -> bool:
+    """.env 配的网关不是任何预设（如公司 AI 平台）：页面默认选「自定义网关」并带出网关、模型与 Key。"""
+    if not (config.LLM_API_BASE and config.LLM_MODEL):
+        return False
+    presets = [_preset_row(tuple(p)) for p in getattr(config, "LLM_PRESETS", [])]
+    return not any(p[3] == config.LLM_API_BASE for p in presets)
+
+
 def _render_model_preset() -> tuple[str, str, str, str, str]:
     """选用模型（不含 Key）。页面不展示 mock；未填 Key 时开工自动回退规则。"""
     all_presets = [_preset_row(tuple(p)) for p in getattr(config, "LLM_PRESETS", [])]
@@ -704,6 +712,8 @@ def _render_model_preset() -> tuple[str, str, str, str, str]:
             ),
             None,
         )
+        if env_pick is None and _env_custom_gateway():
+            env_pick = next((p[0] for p in api_presets if p[2] == "custom"), None)
         st.session_state.model_preset = env_pick or labels[0]
     preset_label = st.selectbox("模型来源", labels, key="model_preset")
     return next(p for p in api_presets if p[0] == preset_label)
@@ -857,8 +867,13 @@ def _render_model_secrets(
         return api_key_sel, api_base_sel, model_sel, backend_sel, extra
 
     key_state = f"api_key_input_{provider_id}"
-    if key_state not in st.session_state and config.LLM_API_KEY and api_base_sel and api_base_sel == config.LLM_API_BASE:
+    env_custom = provider_id == "custom" and _env_custom_gateway()
+    if key_state not in st.session_state and config.LLM_API_KEY and (
+            (api_base_sel and api_base_sel == config.LLM_API_BASE) or env_custom):
         st.session_state[key_state] = config.LLM_API_KEY
+    if env_custom:   # 首次进页带出 .env 的网关与模型；之后以页面上的修改为准
+        st.session_state.setdefault("custom_api_base_custom", config.LLM_API_BASE)
+        st.session_state.setdefault("custom_model_custom", config.LLM_MODEL)
     with (key_slot or st.container()):
         api_key_sel = st.text_input(
             "API Key",
