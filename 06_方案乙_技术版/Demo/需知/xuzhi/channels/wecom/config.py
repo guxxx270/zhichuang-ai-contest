@@ -1,14 +1,22 @@
 """企微入口配置：机器人凭据与白名单来自 .env（已 gitignore），其余为带默认值的运行参数。
 
 沿用需知"密钥不进代码与仓库"的约定：本文件只读环境变量，不写死任何 key。
+访问边界以 sandbox.yaml 为准（白名单模式、问码轮数 / 墙钟 / 目录、单条字节上限）：.env 只能收紧，放宽的值忽略并告警。
 """
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
-from typing import Set
+from pathlib import Path
+from typing import Any, Set
 
 from ... import config as xuzhi_config   # 导入即触发 .env 加载
+from ... import sandbox
+
+log = logging.getLogger(__name__)
+
+WECOM_MAX_BYTES = 20000   # 企微单条 content 上限 20480 字节，留余量
 
 __all__ = ["BotConfig", "AuthConfig", "Limits", "AskConfig", "WecomConfig", "load_wecom_config"]
 
@@ -29,6 +37,49 @@ def _env_float(key: str, default: float) -> float:
         return float(_env(key) or default)
     except ValueError:
         return default
+
+
+def _positive_int(value: Any, default: int) -> int:
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return default
+    return n if n > 0 else default
+
+
+def _capped(key: str, cap: int) -> int:
+    """.env 的值只能调小，超过 sandbox.yaml 的上限按上限；没配或不合法就用上限。"""
+    n = _positive_int(_env(key), cap)
+    if n > cap:
+        log.warning("%s=%s 超过 sandbox.yaml 的上限 %s，按 %s", key, n, cap, cap)
+    return min(n, cap)
+
+
+def _inside_demo(path: str) -> bool:
+    try:
+        Path(path).expanduser().resolve().relative_to(xuzhi_config.ROOT.resolve())
+    except (ValueError, OSError):
+        return False
+    return True
+
+
+def _auth_mode() -> str:
+    """sandbox.yaml wecom.auth_mode 是默认值；只有它本身是 allow_all，.env 的 allow_all 才生效。"""
+    policy_mode = str(sandbox.get("wecom.auth_mode") or "whitelist").strip().lower()
+    mode = (_env("WECOM_AUTH_MODE") or policy_mode).lower()
+    if mode == "allow_all" and policy_mode != "allow_all":
+        log.warning("WECOM_AUTH_MODE=allow_all 未生效：sandbox.yaml wecom.auth_mode=%s，仍只放行白名单", policy_mode)
+        return "whitelist"
+    return mode if mode in ("whitelist", "allow_all") else "whitelist"
+
+
+def _ask_repo() -> str:
+    """问码目录：sandbox.yaml askcode.cwd_locked 为真时只能是需知 Demo 目录或其子目录，越出就忽略（回到 Demo 目录）。"""
+    repo = _env("WECOM_ASK_REPO")
+    if repo and sandbox.get("askcode.cwd_locked", True) and not _inside_demo(repo):
+        log.warning("WECOM_ASK_REPO=%s 在需知 Demo 目录之外（sandbox.yaml askcode.cwd_locked=true），已忽略", repo)
+        return ""
+    return repo
 
 
 def _env_set(key: str) -> Set[str]:
@@ -60,7 +111,7 @@ class Limits:
     queue_wait_seconds: int = 60
     stream_max_seconds: int = 330    # 企微流式上限 6 分钟，留余量
     stream_min_interval: float = 0.6
-    stream_max_bytes: int = 20000    # 官方单条 content 上限 20480 字节
+    stream_max_bytes: int = WECOM_MAX_BYTES   # 官方单条 content 上限 20480 字节
     session_ttl_minutes: int = 120
     session_max_turns: int = 12
     dedup_ttl_seconds: int = 600
@@ -92,7 +143,8 @@ class WecomConfig:
 
 
 def load_wecom_config() -> WecomConfig:
-    """从 .env 读取。缺 BotID/Secret 时返回的配置 configured=False，由入口给出友好提示。"""
+    """从 .env 读取。缺 BotID/Secret 时返回的配置 configured=False，由入口给出友好提示。
+    sandbox.yaml 里的边界是默认值和上限：.env 只能收紧。"""
     return WecomConfig(
         bot=BotConfig(
             bot_id=_env("WECOM_BOT_ID"),
@@ -103,7 +155,7 @@ def load_wecom_config() -> WecomConfig:
             ping_interval=_env_int("WECOM_PING_INTERVAL", 30),
         ),
         auth=AuthConfig(
-            mode=(_env("WECOM_AUTH_MODE") or "whitelist").lower(),
+            mode=_auth_mode(),
             users=_env_set("WECOM_ALLOW_USERS"),
             chats=_env_set("WECOM_ALLOW_CHATS"),
         ),
@@ -111,12 +163,13 @@ def load_wecom_config() -> WecomConfig:
             max_concurrent=_env_int("WECOM_MAX_CONCURRENT", 3),
             analyze_timeout_seconds=_env_int("WECOM_ANALYZE_TIMEOUT", 240),
             stream_min_interval=_env_float("WECOM_STREAM_MIN_INTERVAL", 0.6),
+            stream_max_bytes=min(_positive_int(sandbox.get("wecom.stream_max_bytes"), WECOM_MAX_BYTES), WECOM_MAX_BYTES),
         ),
         ask=AskConfig(
             enabled=_env("WECOM_ASK_ENABLED", "1") not in ("0", "false", "no"),
-            repo_path=_env("WECOM_ASK_REPO"),
-            max_turns=_env_int("WECOM_ASK_MAX_TURNS", 20),
-            timeout_seconds=_env_int("WECOM_ASK_TIMEOUT", 240),
+            repo_path=_ask_repo(),
+            max_turns=_capped("WECOM_ASK_MAX_TURNS", _positive_int(sandbox.get("askcode.max_turns"), 20)),
+            timeout_seconds=_capped("WECOM_ASK_TIMEOUT", _positive_int(sandbox.get("askcode.wall_clock_seconds"), 240)),
             model=_env("WECOM_ASK_MODEL"),
         ),
         default_mode="ask" if _env("WECOM_DEFAULT_MODE").lower() in ("ask", "问码", "问答") else "req",

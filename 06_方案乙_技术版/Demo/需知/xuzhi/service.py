@@ -1,11 +1,13 @@
 """服务层：给 REST API / MCP / 其它入口共用的"跑一遍流水线 + 记账 + 序列化"。
 
 Web（app.py）和企微入口各有自己的交互逻辑，这里只负责四件事：
-1. run()：跑 analyze()，按 record 决定是否进一本账（首轮记一条；带 req_id 的答复轮更新答复数并写追问记忆；每轮存一版）；
+1. run()：跑 analyze()，按 record 决定是否进一本账（首轮记一条；带 req_id 时：有答复才算一轮答复重算并写追问记忆，
+   原话改了记需求变更，没答复只在拿到模型估时后写回；已对账的只读）；
    split() / run_split()：纪要直通车，一段纪要拆成几条，逐条跑规则流水线、各记一行账；
 2. to_dict()：把 Analysis 序列化成纯 JSON（dataclass → dict），供接口返回；
 3. version_diff()：同一条需求两版对比（默认最近两版），供 REST / MCP；
-4. 模型：只用服务端 .env 的网关（sandbox.yaml api.accept_keys_in_request=false，请求体不接受 Key）。
+4. 模型：只用服务端 .env 的网关（sandbox.yaml api.accept_keys_in_request=false，请求体不接受 Key）；
+   stages 指定哪几步调模型，接口只要哪部分就只跑哪部分。
 """
 from __future__ import annotations
 
@@ -14,7 +16,8 @@ from dataclasses import asdict, dataclass, is_dataclass
 from typing import Any
 
 from . import config, versions
-from .ledger import Ledger, estimate_snapshot
+from .audit import RecordingSink, track
+from .ledger import JIRA_SOURCE, Ledger, estimate_snapshot
 from .llm import LLM
 from .memory import Memory
 from .pipeline import Analysis, analyze
@@ -41,10 +44,13 @@ def _plain(obj: Any) -> Any:
 
 
 def make_llm(polish: bool, channel: str) -> LLM | None:
-    """polish=True 时用服务端 .env 的模型（没配就自动 mock）；False 直接规则引擎。"""
+    """polish=True 时用服务端 .env 的模型（没配就自动 mock）；False 直接规则引擎。
+    审计包一层 RecordingSink：首轮调用时还没有需求编号，记账后把编号补进这几行审计。"""
     if not polish:
         return None
-    return LLM(channel=channel)
+    llm = LLM(channel=channel)
+    track(llm)
+    return llm
 
 
 def run(
@@ -60,40 +66,70 @@ def run(
     memory: Memory | None = None,
     mobile: bool = False,
     client_view: bool = False,
+    stages: set[str] | None = None,
 ) -> RunResult:
+    """stages：polish 时只让这几步调模型（intake / spec / estimate / prototype），None = 全部。
+    带 req_id 记账时：编号不存在抛 LookupError，Jira 工单抛 ValueError（走 Jira 评估页重评）。"""
     text = (text or "").strip()
     if not text:
         raise ValueError("原话不能为空")
     ledger = ledger if ledger is not None else (Ledger() if record else None)
     memory = memory if memory is not None else Memory()
+    req_id = int(req_id or 0)
+    row = None
+    if record and ledger is not None and req_id:
+        # 先校验再跑：不认识的编号不再静默新建一行，Jira 工单不被零散需求的流水线改写
+        row = ledger.get(req_id)
+        if not row:
+            raise LookupError(f"一本账里没有编号 {req_id}")
+        if row.get("source") == JIRA_SOURCE:
+            raise ValueError(f"#{req_id} 是 Jira 工单，请在 Jira 评估页重评")
     llm = make_llm(polish, channel)
+    if llm is not None and row:
+        llm.req_id = req_id   # 已有编号：模型调用审计直接记到这条需求上
     answers = {k: v for k, v in (answers or {}).items() if str(v or "").strip()}
-    a = analyze(text, source or channel, llm, answers=answers or None, mobile=mobile, client_view=client_view,
-                llm_polish=llm is not None, memory=memory)
-    res = RunResult(a, req_id=int(req_id or 0))
+    # 来源只用调用方给的（空串 = 按原话自动识别）；渠道记在「{channel}受理」事件里
+    a = analyze(text, source, llm, answers=answers or None, mobile=mobile, client_view=client_view,
+                llm_polish=llm is not None, memory=memory, model_stages=stages, count_memory_hits=not req_id)
+    res = RunResult(a, req_id=req_id)
     if not record or ledger is None:
         return res
-    if res.req_id and ledger.get(res.req_id):
-        n_ans = sum(1 for q in a.questions if q.answer.strip())
-        ledger.event(res.req_id, "业务答复重算", f"{len(answers)} 条（{channel}）")
-        ledger.update_answers(res.req_id, n_ans, int(getattr(a.estimate, "unanswered_high", 0) or 0))
-        if _text_changed(ledger, res.req_id, a):
-            # 带同一 req_id 发来改过的原话 = 需求变更：整条换成新分析，记「需求变更」并存一版
-            ledger.record_change(res.req_id, a, channel)
-        else:
-            ledger.update_estimate(res.req_id, a.estimate)
-            ledger.add_version(res.req_id, a, "业务答复重算" if answers else "重新分析")
-        if answers:
-            res.learned = memory.learn(a.card, a.questions, res.req_id)
-            if res.learned:
-                ledger.event(res.req_id, "追问记忆", f"记住 {res.learned} 条口径（{a.card.requester or '未注明'}）")
-    else:
-        res.req_id = ledger.log_analysis(a)
-        ledger.event(res.req_id, f"{channel}受理", "")
-        if answers:
-            ledger.update_answers(res.req_id, sum(1 for q in a.questions if q.answer.strip()), int(getattr(a.estimate, "unanswered_high", 0) or 0))
-            res.learned = memory.learn(a.card, a.questions, res.req_id)
+    if row:
+        _write_rerun(ledger, memory, res, row, answers, channel)
+        return res
+    res.req_id = ledger.log_analysis(a)
+    ledger.event(res.req_id, f"{channel}受理", "")
+    if llm is not None and isinstance(llm.audit, RecordingSink):
+        llm.audit.assign(res.req_id)
+    if answers:
+        ledger.update_answers(res.req_id, sum(1 for q in a.questions if q.answer.strip()), int(getattr(a.estimate, "unanswered_high", 0) or 0))
+        res.learned = memory.learn(a.card, a.questions, res.req_id)
     return res
+
+
+def _write_rerun(ledger: Ledger, memory: Memory, res: RunResult, row: dict, answers: dict[str, str], channel: str) -> None:
+    """带 req_id 重算后写回：有答复才算一轮「业务答复重算」（答复数、追问记忆）；原话改了记需求变更；
+    没答复时只在拿到模型估时后写回，不清掉已有估时、不抬高澄清轮次。已对账的需求只读。"""
+    a, rid = res.analysis, res.req_id
+    if row.get("status") == "已对账":
+        a.notes.append("该需求已对账，本次结果未写回一本账")
+        return
+    if answers:
+        ledger.event(rid, "业务答复重算", f"{len(answers)} 条（{channel}）")
+        ledger.update_answers(rid, sum(1 for q in a.questions if q.answer.strip()), int(getattr(a.estimate, "unanswered_high", 0) or 0))
+    if _text_changed(ledger, rid, a):
+        # 带同一 req_id 发来改过的原话 = 需求变更：整条换成新分析，记「需求变更」并存一版
+        ledger.record_change(rid, a, channel)
+    elif answers:
+        ledger.update_estimate(rid, a.estimate)
+        ledger.add_version(rid, a, "业务答复重算")
+    elif getattr(a.estimate, "status", "") == "ready":
+        ledger.update_estimate(rid, a.estimate)
+        ledger.add_version(rid, a, "模型估时")
+    if answers:
+        res.learned = memory.learn(a.card, a.questions, rid)
+        if res.learned:
+            ledger.event(rid, "追问记忆", f"记住 {res.learned} 条口径（{a.card.requester or '未注明'}）")
 
 
 def split(text: str) -> list[dict[str, Any]]:
@@ -175,10 +211,29 @@ def version_diff(ledger: Ledger, req_id: int, v_from: int = 0, v_to: int = 0) ->
             "markdown": versions.diff_markdown(d, title, old, new)}
 
 
+def _similar(item: dict) -> dict[str, Any]:
+    """旧字段 similar：改取历史参考原记录的精简字段（以小时为准，人天按 8 小时换算，兼容旧调用方）。"""
+    est_h, act_h = item.get("estimated_hours"), item.get("actual_hours")
+    return {"id": item.get("id"), "title": item.get("title"), "score": item.get("score"), "source": item.get("source", ""),
+            "estimated_hours": est_h, "actual_hours": act_h,
+            "estimate_days": None if est_h is None else round(est_h / 8, 3),
+            "actual_days": None if act_h is None else round(act_h / 8, 3)}
+
+
+def _model_task(task: dict) -> dict:
+    """模型任务沿用 Task 字段存值：share 实为以前参考小时、coef 为两轨比值、note 为具体改动，接口按实际含义命名。"""
+    out = dict(task)
+    out["before_mid_hours"] = out.pop("share", None)
+    out["ratio"] = out.pop("coef", None)
+    out["change"] = out.pop("note", "")
+    return out
+
+
 def to_dict(a: Analysis, *, req_id: int = 0, include_spec: bool = True, include_prototype: bool = False,
             include_tasks: bool = True, include_adr: bool = True) -> dict[str, Any]:
     est, arch = a.estimate, a.architecture
     snapshot = estimate_snapshot(est)
+    references = getattr(est, "references", None) or {}
     out: dict[str, Any] = {
         "req_id": int(req_id or 0),
         "engine": a.engine,
@@ -203,11 +258,13 @@ def to_dict(a: Analysis, *, req_id: int = 0, include_spec: bool = True, include_
             "confidence_reason": est.confidence_reason,
             "unanswered_high": est.unanswered_high,
             "delivery": est.delivery,
-            "dims": dict(est.dims),
+            # dims / similar 保留键名兼容旧调用方，内容改取规则参考的六维评分与历史参考原记录
+            "dims": dict((references.get("rule") or {}).get("dims") or est.dims or {}),
             "who": dict(snapshot.get("who") or {}),
             "phases": dict(snapshot.get("phases") or {}),
             "ai_phases": dict(snapshot.get("ai_phases") or {}),
-            "similar": [{"id": s.id, "title": s.title, "score": s.score, "estimate_days": s.estimate_days, "actual_days": s.actual_days} for s in est.similar],
+            "similar": [_similar(item) for item in (references.get("history") or {}).get("items") or []],
+            "comparison": dict(getattr(est, "comparison", None) or {}),   # 本次模型估时采用的以前 / 现在口径
         },
         "architecture": {
             "coverage_line": arch.coverage_line,
@@ -221,7 +278,8 @@ def to_dict(a: Analysis, *, req_id: int = 0, include_spec: bool = True, include_
         },
     }
     if include_tasks:
-        out["estimate"]["tasks"] = snapshot["tasks"]
+        tasks = snapshot["tasks"]
+        out["estimate"]["tasks"] = [_model_task(t) for t in tasks] if snapshot.get("method") == "llm" else tasks
     if include_adr:
         out["architecture"]["adr_md"] = arch.adr_md
     if include_spec:

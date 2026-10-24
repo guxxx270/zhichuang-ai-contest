@@ -33,8 +33,20 @@ def parse_answers(text: str) -> Dict[int, str]:
     return out
 
 
+# 编号里夹着一条完整的新诉求：「想要一个…页面」「新增一个…报表」（动词后 12 字内出现交付物）
+_NEW_DEMAND = re.compile(r"(?:想要|需要一个|新增一个|做一个|做个|加一个)[^\n]{0,12}?(?:页面|报表|看板|提醒|接口|功能|系统)")
+
+
+def _new_demand(text: str, answers: Dict[int, str]) -> bool:
+    """带编号列表发来的新需求：有新诉求句式，且篇幅像需求（整段超过 40 字或某条超过 20 字）。
+    单看字数或关键词都会误伤真实答复（答复也可能长、也会提到页面），所以两条同时满足才算。"""
+    if not any(_NEW_DEMAND.search(a) for a in answers.values()):
+        return False
+    return len((text or "").strip()) > 40 or any(len(a) > 20 for a in answers.values())
+
+
 def looks_like_answers(text: str, numbered_count: int) -> bool:
-    """像"在回答问题"而不是"一条新需求"：上轮问过题，且正文以编号行为主、整体不长。"""
+    """像"在回答问题"而不是"一条新需求"：上轮问过题，且正文以编号行为主、不像一条带编号的新需求。"""
     if numbered_count <= 0:
         return False
     lines = [ln for ln in (text or "").splitlines() if ln.strip()]
@@ -46,7 +58,9 @@ def looks_like_answers(text: str, numbered_count: int) -> bool:
     # 编号行占多数，且没有超出上轮的题号
     if len(answers) < max(1, len(lines) // 2):
         return False
-    return all(n <= numbered_count for n in answers)
+    if not all(n <= numbered_count for n in answers):
+        return False
+    return not _new_demand(text, answers)
 
 
 # /问 /问码 /ask /代码 + 问题；返回问题正文，不是这个前缀则返回 None

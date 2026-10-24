@@ -6,7 +6,7 @@ import logging
 import time
 from typing import Optional
 
-from .config import Limits
+from .config import WECOM_MAX_BYTES, Limits
 from .models import Inbound
 from .connection import WeComLongConnection, new_req_id
 
@@ -66,7 +66,8 @@ class StreamReply:
 
     async def _send(self, content: str, finish: bool) -> None:
         async with self._lock:
-            content = _truncate_utf8(content, self.limits.stream_max_bytes)
+            # 上限取 sandbox.yaml 与企微官方上限中较小的一个（Limits 手工构造时也不越过官方上限）
+            content = _truncate_utf8(content, min(self.limits.stream_max_bytes, WECOM_MAX_BYTES))
             await self.conn.respond_stream(self.inbound.req_id, self.inbound.msgid, self.stream_id, content, finish)
             self._last_sent = time.monotonic()
             self.sent_chunks += 1

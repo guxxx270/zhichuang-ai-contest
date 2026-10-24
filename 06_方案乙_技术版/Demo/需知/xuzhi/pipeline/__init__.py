@@ -66,14 +66,24 @@ def analyze(
     drafts: list[Draft] | None = None,
     repos: list[RepoBundle] | None = None,
     memory=None,
+    model_stages: set[str] | None = None,
+    count_memory_hits: bool = True,
 ) -> Analysis:
     """drafts：HTML 底稿；repos：git/前后端代码包。有 API 时模型会读代码与 HTML。
     memory：xuzhi.memory.Memory；给了就"问过的不再问"——同一提出方上次答过的题直接沿用并标 recalled。
-    业务这次的答复（answers）优先于记忆。"""
+    业务这次的答复（answers）优先于记忆。
+    model_stages：只让这几步调模型（intake 问清润色 / spec 写单润色 / estimate 模型估时 / prototype 出样改稿），
+    其余走规则；None = 全部（Web 与命令行）。
+    接口只要问清时不必串行等写单、估时、出样的模型调用，企微也少两次调用、不易超时。
+    count_memory_hits=False：同一条需求重算时沿用记忆不再累计「记忆省问」次数。"""
     t0 = time.time()
     llm = (llm or LLM()) if llm_polish else _Mock()
     drafts = list(drafts or [])
     repos = list(repos or [])
+
+    def model_for(stage: str):
+        return llm if model_stages is None or stage in model_stages else _Mock()
+
     red = Redactor().redact(text)
     card = extract_card(red.text, source_hint)
     questions = build_questions(
@@ -82,21 +92,24 @@ def analyze(
         has_materials=bool(drafts or repos),
         table_headers=_draft_table_headers(drafts),
     )
-    card, questions = refine_with_llm(red.text, card, questions, llm, drafts=drafts, repos=repos)
+    card, questions = refine_with_llm(red.text, card, questions, model_for("intake"), drafts=drafts, repos=repos)
     for q in questions:
         if answers and q.id in answers:
             q.answer = answers[q.id]
     recalled = 0
     if memory is not None:
         try:
-            recalled = int(memory.recall(card, questions) or 0)
+            recalled = int((memory.recall(card, questions) if count_memory_hits
+                            else memory.recall(card, questions, count_hits=False)) or 0)
         except Exception:   # 记忆只是加分项，坏了不影响出稿
             recalled = 0
     arch = build_architecture(card, red.text, drafts=drafts, repos=repos)
-    spec = build_spec(card, questions, arch.coverage_line, llm)
-    est = estimate(card, red.text, questions, llm=llm, drafts=drafts, repos=repos)
+    spec = build_spec(card, questions, arch.coverage_line, model_for("spec"))
+    est = estimate(card, red.text, questions, llm=model_for("estimate"), drafts=drafts, repos=repos)
+    if llm.mode == "api" and model_stages is not None and "estimate" not in model_stages:
+        est.error = "本次调用未请求模型估时"
     msg = confirm_message(card, questions, red.text)
-    source = render_source(card, drafts=drafts, repos=repos, llm=llm, demand_text=red.text)
+    source = render_source(card, drafts=drafts, repos=repos, llm=model_for("prototype"), demand_text=red.text)
     proto = apply_prototype_view(source, mobile=mobile, client_view=client_view)
     a = Analysis(
         text, red.text, red.total, red.mapping, card, questions, msg, spec, est, arch, proto,
@@ -167,11 +180,19 @@ def enhance_analysis(
     stage("模型估时")
     result.estimate = estimate(result.card, result.redacted_text, result.questions, llm=llm,
                                drafts=result.drafts, repos=result.repos)
+    # 规则模板与历史参考是独立参考：沿用快速结果里那份，不随模型改写的功能点、补问而变
+    if getattr(seed.estimate, "references", None):
+        result.estimate.references = deepcopy(seed.estimate.references)
 
-    stage("模型出样")
-    source = render_source(result.card, drafts=result.drafts, repos=result.repos, llm=llm, demand_text=result.redacted_text)
-    result.prototype_source_html = source
-    result.prototype_html = apply_prototype_view(source, mobile=result.mobile, client_view=result.client_view)
+    stage("模型出样")   # 阶段检查放在保护之外：任务被丢弃时必须照常中止
+    try:
+        source = render_source(result.card, drafts=result.drafts, repos=result.repos, llm=llm, demand_text=result.redacted_text)
+        view = apply_prototype_view(source, mobile=result.mobile, client_view=result.client_view)
+    except Exception:   # 出样出错不连累已完成的估时与写单
+        source = seed.prototype_source_html
+        result.notes.append("模型出样未完成，已保留规则原型")
+    else:
+        result.prototype_source_html, result.prototype_html = source, view
     result.layers_html = layers_html(result.architecture.layers)
     result.seconds = round(float(seed.seconds or 0) + time.monotonic() - started, 2)
     result.engine = ("规则 + 模型" if result.card.engine != "规则" or result.spec.engine != "规则"

@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import hmac
 import os
 from typing import Any, Optional
 
@@ -24,7 +25,7 @@ DEFAULT_PORT = int(os.getenv("XUZHI_API_PORT", "8770") or 8770)
 
 app = FastAPI(
     title=f"{config.PRODUCT_NAME} API",
-    version="0.4",
+    version="0.6",
     description="一堆话进来，一份能开工的需求出去。问清 / 写单 / 估量（双轨）/ 定架（数据地图 + IT 决策）/ 一本账。",
 )
 
@@ -61,7 +62,7 @@ def require_token(authorization: Optional[str] = Header(default=None), x_api_tok
     given = (x_api_token or "").strip()
     if not given and authorization and authorization.lower().startswith("bearer "):
         given = authorization[7:].strip()
-    if given != API_TOKEN:
+    if not hmac.compare_digest(given.encode("utf-8"), API_TOKEN.encode("utf-8")):   # 恒定时间比较，不按耗时泄露 Token
         raise HTTPException(status_code=401, detail="未授权：请带 Authorization: Bearer <XUZHI_API_TOKEN>")
 
 
@@ -70,8 +71,10 @@ class AnalyzeIn(BaseModel):
     text: str = Field(..., description="需求原话：微信、纪要、邮件、Word 里的一堆话", min_length=1)
     source: str = Field("", description="来源提示（企业微信 / 会议纪要 / 邮件 / 需求单…），空则自动识别")
     answers: dict[str, str] = Field(default_factory=dict, description="业务答复：问题 id → 答复")
-    req_id: int = Field(0, description="答复重算时传上一次返回的 req_id，一本账在同一条上更新；0 = 新需求")
-    polish: bool = Field(False, description="true = 调用服务端 .env 配置的模型润色（没配则自动规则）；false = 纯规则引擎（毫秒级、可复现）")
+    req_id: int = Field(0, description="答复重算时传上一次返回的 req_id，一本账在同一条上更新；0 = 新需求。"
+                                       "编号不存在返回 404，Jira 工单返回 422；不带答复的重算只在拿到模型估时后写回")
+    polish: bool = Field(False, description="true = 调用服务端 .env 配置的模型（没配则自动规则）：问清润色 + 模型估时，"
+                                             "include_spec / include_prototype 为 true 时才润色需求单、改原型；false = 纯规则引擎（毫秒级、可复现）")
     record: bool = Field(True, description="是否进一本账")
     include_spec: bool = Field(True, description="返回需求单（业务版 / 技术版 Markdown）")
     include_prototype: bool = Field(False, description="返回可点原型 HTML（较大）")
@@ -90,7 +93,7 @@ class StatusIn(BaseModel):
 
 
 class ReconcileIn(BaseModel):
-    actual_days: float = Field(..., ge=0)
+    actual_days: float = Field(..., gt=0, description="实际人天，须大于 0")
     ai_assisted: bool = False
     ai_share: float = Field(0.0, ge=0, le=1)
     note: str = ""
@@ -104,11 +107,15 @@ def health() -> dict[str, Any]:
 
 @app.post("/api/v1/analyze", dependencies=[Depends(require_token)])
 def analyze_endpoint(body: AnalyzeIn) -> dict[str, Any]:
-    """整条链：隐盾 → 问清 → 写单 → 估量 → 定架 → 出样。答复重算时带 answers + req_id。"""
+    """整条链：隐盾 → 问清 → 写单 → 估量 → 定架 → 出样。答复重算时带 answers + req_id。
+    polish 时模型只做要返回的部分：问清与估时，需求单、原型按 include_spec / include_prototype 决定。"""
+    stages = {"intake", "estimate"} | ({"spec"} if body.include_spec else set()) | ({"prototype"} if body.include_prototype else set())
     try:
         res = service.run(body.text, source=body.source, answers=body.answers, polish=body.polish, req_id=body.req_id,
                           channel="API", record=body.record, ledger=ledger() if body.record else None, memory=memory(),
-                          mobile=body.mobile, client_view=body.client_view)
+                          mobile=body.mobile, client_view=body.client_view, stages=stages)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
     out = service.to_dict(res.analysis, req_id=res.req_id, include_spec=body.include_spec, include_prototype=body.include_prototype)
@@ -118,9 +125,15 @@ def analyze_endpoint(body: AnalyzeIn) -> dict[str, Any]:
 
 @app.post("/api/v1/clarify", dependencies=[Depends(require_token)])
 def clarify_endpoint(body: AnalyzeIn) -> dict[str, Any]:
-    """只要问清：需求卡 + 待确认清单 + 发给业务的确认消息（其余字段省略）。"""
-    res = service.run(body.text, source=body.source, answers=body.answers, polish=body.polish, req_id=body.req_id,
-                      channel="API", record=body.record, ledger=ledger() if body.record else None, memory=memory())
+    """只要问清：需求卡 + 待确认清单 + 发给业务的确认消息（其余字段省略）；polish 时模型只做问清润色。"""
+    try:
+        res = service.run(body.text, source=body.source, answers=body.answers, polish=body.polish, req_id=body.req_id,
+                          channel="API", record=body.record, ledger=ledger() if body.record else None, memory=memory(),
+                          stages={"intake"})
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
     d = service.to_dict(res.analysis, req_id=res.req_id, include_spec=False, include_tasks=False, include_adr=False)
     return {k: d[k] for k in ("req_id", "engine", "seconds", "redacted", "recalled", "card", "questions", "confirm_message")}
 
@@ -186,10 +199,12 @@ def set_status(req_id: int, body: StatusIn) -> dict[str, Any]:
 
 @app.post("/api/v1/requirements/{req_id}/reconcile", dependencies=[Depends(require_token)])
 def reconcile(req_id: int, body: ReconcileIn) -> dict[str, Any]:
+    if not ledger().get(req_id):
+        raise HTTPException(status_code=404, detail=f"一本账里没有编号 {req_id}")
     try:
         return {"ok": True, "req_id": req_id, **ledger().reconcile(req_id, body.actual_days, body.ai_assisted, body.ai_share, body.note)}
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
+    except ValueError as e:   # 编号已确认存在，其余都是参数问题
+        raise HTTPException(status_code=422, detail=str(e)) from e
 
 
 @app.get("/api/v1/dashboard", dependencies=[Depends(require_token)])
@@ -216,7 +231,7 @@ def audit_llm(n: int = Query(50, ge=1, le=500)) -> dict[str, Any]:
     return {"stats": audit().stats(), "recent": audit().recent(n)}
 
 
-@app.get("/api/v1/sandbox")
+@app.get("/api/v1/sandbox", dependencies=[Depends(require_token)])
 def sandbox_policy() -> dict[str, Any]:
     return {"summary": sandbox.summary(), "policy": sandbox.policy(), "note": sandbox.note(),
             "enforced_by": sandbox.ENFORCED_BY}

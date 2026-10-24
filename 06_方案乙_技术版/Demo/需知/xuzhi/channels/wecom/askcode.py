@@ -6,6 +6,8 @@
 安全边界（无人值守，硬约束）：
 - permission_mode="dontAsk"：任何会弹审批的调用直接拒绝，绝不等人
 - 只放行 Read/Grep/Glob；Bash/Write/Edit/Web* 用 disallowed_tools 从模型视野里整体移除
+- 只放行的三件套也要管读哪里：PreToolUse hook（_guard）拒绝越出 Demo 目录、凭据文件
+  （sandbox.yaml files.deny_read_globs）和 data/ .venv/ .git/ 下的读取；同样的路径另写成 Read(...) 拒绝规则作纵深防御
 - cwd 锁在需知 Demo 目录；setting_sources=[] 不加载本机任何 ~/.claude 配置
 - max_turns / 墙钟超时 双重上限
 """
@@ -14,9 +16,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
+
+from ...drafts import is_secret_path
 
 log = logging.getLogger(__name__)
 
@@ -24,6 +29,22 @@ Progress = Callable[[str], Awaitable[None]]
 
 DENY_TOOLS = ["Bash", "Write", "Edit", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch",
               "Task", "Agent", "TodoWrite", "KillShell", "BashOutput", "AskUserQuestion"]
+
+NO_READ_DIRS = ("data", ".venv", ".git")   # 一本账 / 追问记忆 / 审计库与样本、依赖、版本库
+DENY_REASON = "问码不读凭据与数据文件"
+_GLOB_CHARS = re.compile(r"[*?\[\]{}]")
+
+
+def _names_secret(pattern: str) -> bool:
+    """glob 或文件名本身指向凭据（.env*、*.pem、*secret* …），花括号展开一层。"""
+    last = str(pattern or "").replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+    names = [last]
+    m = re.match(r"^(.*)\{([^{}]*)\}(.*)$", last)
+    if m:
+        names += [m.group(1) + alt + m.group(3) for alt in m.group(2).split(",")]
+    return any(cand.strip(".") and is_secret_path(cand)
+               for name in names for cand in (name, _GLOB_CHARS.sub("", name)))
+
 
 AUTH_ENV_KEYS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK",
                  "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY")
@@ -41,7 +62,7 @@ SYSTEM_PROMPT = """你是「需知」这个项目的代码答疑助手。当前�
 2. 项目结构速记：`app.py` 是 Streamlit 界面；`xuzhi/pipeline/` 是流水线（intake 问清 / spec 写单 /
    estimate 估量 / tasks 双轨任务 / architect 定架 / prototype 出样）；`xuzhi/privacy.py` 是隐盾脱敏；
    `xuzhi/llm.py` 是 OpenAI 兼容客户端与 mock；`xuzhi/channels/wecom/` 是企微入口；
-   `knowledge/` 与 `data/` 是知识库与样本；`tests/` 是 pytest。
+   `knowledge/` 是知识库；`tests/` 是 pytest。`data/`（样本与一本账）、`.env` 等凭据文件不可读，不要去读。
 3. 你没有写权限也没有 shell，不要尝试修改文件或执行命令。需要改动时只给出"改哪个文件的哪里、怎么改"。
 4. 找不到就说没找到，不要编。问的是事实（在哪、有没有、几处）就直接给事实，不要硬凑段落。
 
@@ -130,21 +151,75 @@ class CodeAsker:
     def auth_configured() -> bool:
         return any(os.environ.get(k) for k in AUTH_ENV_KEYS)
 
+    # ---------------- 读取边界 ----------------
+    def _blocked(self, raw: Any, base: Any = None) -> bool:
+        """越出代码目录、位于 data/ .venv/ .git/ 下、或是凭据类文件。相对路径按 base（默认代码目录）求绝对路径。"""
+        s = str(raw or "").strip()
+        if not s:
+            return False
+        p = Path(os.path.expanduser(s))
+        if not p.is_absolute():
+            p = Path(os.path.expanduser(str(base or self.repo))) / p
+            if not p.is_absolute():
+                p = self.repo / p
+        try:
+            rel = p.resolve().relative_to(self.repo)   # resolve 顺带拆穿 ../ 与软链
+        except (ValueError, OSError):
+            return True
+        # 每一级都查：secrets/ 这类目录下的文件名本身可能不像凭据
+        return bool(rel.parts) and (rel.parts[0] in NO_READ_DIRS or any(is_secret_path(part) for part in rel.parts))
+
+    def _glob_blocked(self, pattern: Any, base: Any = None) -> bool:
+        """glob 指向凭据名，或其固定前缀（第一个通配符之前）越界 / 落在禁读目录。"""
+        s = str(pattern or "").strip().replace("\\", "/")
+        if not s:
+            return False
+        if _names_secret(s):
+            return True
+        fixed = []
+        for seg in s.split("/"):
+            if _GLOB_CHARS.search(seg):
+                break
+            fixed.append(seg)
+        prefix = "/".join(fixed) or ("/" if s.startswith("/") else "")
+        return bool(prefix) and self._blocked(prefix, base)
+
+    async def _guard(self, input_data: Dict[str, Any], tool_use_id: Optional[str] = None, context: Any = None) -> Dict[str, Any]:
+        """PreToolUse：Read/Grep/Glob 只读代码目录内、非凭据、非数据的文件；Grep 的 pattern 是正文正则，不当路径看。"""
+        name = str((input_data or {}).get("tool_name") or "")
+        inp = (input_data or {}).get("tool_input") or {}
+        base = inp.get("path")
+        globs = [inp.get("glob")] + ([inp.get("pattern")] if name == "Glob" else [])
+        if not (self._blocked(inp.get("file_path")) or self._blocked(base)
+                or any(self._glob_blocked(g, base) for g in globs)):
+            return {}
+        log.warning("问码拒绝 %s：%s", name, {k: inp.get(k) for k in ("file_path", "path", "pattern", "glob") if inp.get(k)})
+        return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                       "permissionDecisionReason": DENY_REASON}}
+
     def _options(self, resume: Optional[str]):
         sdk = self._sdk
         from ... import sandbox   # 工具白名单 / 黑名单以 sandbox.yaml askcode 为准（缺省即上面的常量）
 
+        denied = list(sandbox.get("askcode.denied_tools") or DENY_TOOLS)
+        # 纵深防御：凭据 glob 与禁读目录也写成 Read 拒绝规则（Grep / Glob 搜全库时同样跳过）
+        for g in sandbox.get("files.deny_read_globs") or []:
+            denied += [f"Read(./{g})", f"Read(./**/{g})"]
+        denied += [f"Read(./{d}/**)" for d in NO_READ_DIRS]
         kw: Dict[str, Any] = dict(
             cwd=str(self.repo),
             system_prompt=SYSTEM_PROMPT,
             allowed_tools=list(sandbox.get("askcode.allowed_tools") or ["Read", "Grep", "Glob"]),
-            disallowed_tools=list(sandbox.get("askcode.denied_tools") or DENY_TOOLS),
+            disallowed_tools=denied,
             permission_mode="dontAsk",
             setting_sources=[] if not sandbox.get("askcode.load_user_settings", False) else None,
             max_turns=self.max_turns,
         )
         if kw["setting_sources"] is None:
             kw.pop("setting_sources")
+        matcher = getattr(sdk, "HookMatcher", None)
+        if matcher is not None:   # 没有 HookMatcher 的旧 SDK / 测试替身就只靠 Read 拒绝规则
+            kw["hooks"] = {"PreToolUse": [matcher(matcher="Read|Grep|Glob", hooks=[self._guard])]}
         if self.model:
             kw["model"] = self.model
         if resume:

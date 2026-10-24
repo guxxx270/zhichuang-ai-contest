@@ -2,7 +2,8 @@
 #
 # 这是需知所有访问边界的唯一声明文件：程序启动时加载（xuzhi/sandbox.py），
 # 「隐盾」页原样展示并标出每条规则在代码里的执行位置，评审时对着这一页看即可。
-# 改这里即改行为（列了执行位置的项），不需要翻代码。没装 PyYAML 时按内置默认值运行。
+# 改这里即改行为（列了执行位置的项），不需要翻代码；企微 .env 里的同名设置只能收紧、不能放宽这里的边界。
+# 没装 PyYAML 时按内置默认值运行。
 #
 # 设计参考：OryxOS 的三类白名单（文件路径 / 命令 / 域名）+ 强制审计。
 
@@ -14,7 +15,7 @@ llm:                                   # 大模型调用
   key_storage: session_only            # 页面填的 Key 只留浏览器会话；.env 仅本机调试兜底，不进仓库
   allowed_api_schemes: [https, http]   # 网关地址只允许这两种协议
   audit_every_call: true               # 每次调用记审计表：网关主机、模型、耗时、脱敏标签数、明文敏感项数、成败
-  block_if_plain_sensitive: false      # true = 出站提示词里检出明文敏感项（手机 / 账号 / 证件 …）就拒发；Demo 先只记录
+  block_if_plain_sensitive: true       # 出站提示词仍含隐盾能识别的明文敏感项就拒发，该步骤回退规则结果；审计照常计数
 
 repo_fetch:                            # 出样 / 定架读取代码仓库
   allowed_schemes: [http, https]       # 不支持 file:// ssh:// git@
@@ -42,17 +43,17 @@ prototype_preview:                     # 出样预览
   sandbox_iframe: true                 # 原型在独立源的沙箱 iframe 里渲染，页面脚本读不到需知本页
 
 wecom:                                 # 企微入口
-  auth_mode: whitelist                 # 只放行 .env 白名单里的 userid（可选再限群）
+  auth_mode: whitelist                 # 只放行 .env 白名单里的 userid（可选再限群）；这里不是 allow_all 时 .env 的 WECOM_AUTH_MODE=allow_all 不生效
   reply_plain_sensitive: false         # 回复里不回显明文敏感信息（原话已脱敏，回复只给结论）
-  stream_max_bytes: 20000              # 企微单条上限 20480 字节，留余量
+  stream_max_bytes: 20000              # 企微单条上限 20480 字节，留余量（填更大也按 20000）
 
 askcode:                               # 企微「问码」：Agent 翻需知自己的代码回答
   allowed_tools: [Read, Grep, Glob]    # 只读三件套
   denied_tools: [Bash, Write, Edit, MultiEdit, NotebookEdit, WebFetch, WebSearch, Task, Agent, TodoWrite, KillShell, BashOutput, AskUserQuestion]
-  cwd_locked: true                     # 工作目录锁在需知 Demo 目录
+  cwd_locked: true                     # 工作目录锁在需知 Demo 目录（WECOM_ASK_REPO 指到目录外会被忽略）；凭据文件与 data/ 不读
   load_user_settings: false            # 不加载本机 ~/.claude 任何配置
-  max_turns: 20
-  wall_clock_seconds: 240
+  max_turns: 20                        # 上限：.env 的 WECOM_ASK_MAX_TURNS 只能调小
+  wall_clock_seconds: 240              # 上限：.env 的 WECOM_ASK_TIMEOUT 只能调小
 
 api:                                   # REST / MCP 接口
   bind: 127.0.0.1                      # 默认只监听本机；要对外必须显式改 XUZHI_API_HOST

@@ -8,9 +8,10 @@ from unittest.mock import Mock
 
 import pytest
 
-from xuzhi import background, pipeline
+from xuzhi import background, config, pipeline
 from xuzhi.drafts import CodeFile, Draft, RepoBundle
 from xuzhi.pipeline.estimate import Estimate
+from xuzhi.pipeline.estimate_references import build_references
 from xuzhi.pipeline.intake import Question
 
 
@@ -221,3 +222,65 @@ def test_only_owned_audit_connection_is_closed(monkeypatch, seed, owned):
     assert job.wait(2)
     assert close.call_count == int(owned)
     assert "超时" in job.snapshot()["error"] and "secret" not in job.snapshot()["error"]
+
+
+def test_rule_reference_is_not_rewritten_by_model_clarify(monkeypatch):
+    """规则模板参考独立于模型：模型问清改了功能点、补了高影响题，后台跑完规则参考仍是快速结果那份（模型估时失败也一样）。"""
+    text = next(config.SAMPLES_DIR.glob("01_*.md")).read_text(encoding="utf-8")
+    seed = pipeline.analyze(text, llm_polish=False)
+
+    def clarify(text, card, questions, llm, **materials):
+        card.features = [f"功能点{i}" for i in range(1, 7)]
+        card.engine = "规则 + 模型"
+        extra = [Question(f"L{i}", "补充", "模型", "高", f"模型补问{i}？", "w", "待业务答复") for i in (1, 2)]
+        return card, list(questions) + extra
+
+    monkeypatch.setattr(pipeline, "refine_with_llm", clarify)
+    result = pipeline.enhance_analysis(seed, _model())   # 假模型没有 chat：写单、估时、出样都按各自的失败回退
+    assert result.estimate.status == "failed"
+    assert result.estimate.references["rule"] == seed.estimate.references["rule"]
+    assert result.estimate.references == seed.estimate.references
+    # 这组改写确实会让重算的规则数字变化，上面相等不是巧合
+    assert build_references(result.card, result.redacted_text, result.questions)["rule"] != seed.estimate.references["rule"]
+
+
+def test_prototype_failure_keeps_finished_estimate(monkeypatch, seed):
+    monkeypatch.setattr(pipeline, "refine_with_llm", lambda text, card, questions, llm, **kw: (card, questions))
+    monkeypatch.setattr(pipeline, "estimate", lambda *args, **kwargs: _ready(2))
+
+    def broken(*args, **kwargs):
+        raise KeyError("layout")
+
+    monkeypatch.setattr(pipeline, "render_source", broken)
+    job = background.start_analysis_job(seed, _model())
+    assert job.wait(2)
+    snapshot = job.snapshot()
+    assert snapshot["status"] == "completed"
+    result = snapshot["result"]
+    assert result.estimate.status == "ready" and result.estimate.mid == 2
+    assert result.prototype_html == seed.prototype_html and result.prototype_source_html == seed.prototype_source_html
+    assert "模型出样未完成，已保留规则原型" in result.notes
+
+
+def test_discard_during_estimate_still_skips_prototype(monkeypatch, seed):
+    """出样那段的保护不能吞掉「任务已丢弃」：丢弃后不再出样，也不发布结果。"""
+    entered, release = Event(), Event()
+
+    def estimate(*args, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        return _ready(1)
+
+    render = Mock(side_effect=AssertionError("丢弃的任务不得再出样"))
+    monkeypatch.setattr(pipeline, "refine_with_llm", lambda text, card, questions, llm, **kw: (card, questions))
+    monkeypatch.setattr(pipeline, "estimate", estimate)
+    monkeypatch.setattr(pipeline, "render_source", render)
+    job = background.start_analysis_job(seed, _model())
+    try:
+        assert entered.wait(2)
+        job.discard()
+    finally:
+        release.set()
+    assert job.wait(2)
+    assert render.call_count == 0 and job.snapshot()["result"] is None
+    assert job.snapshot()["stage"] == "已忽略旧任务"
