@@ -62,6 +62,7 @@ def test_wecom_books_ledger_and_learns_memory(tmp_path):
             assert len(rig.ledger.recent()) == 1
             row = rig.ledger.get(rid)
             assert row["n_answered"] >= 2 and row["status"] == "已确认"
+            assert [v["label"] for v in rig.ledger.versions_of(rid)] == ["受理", "业务答复重算"]   # 版本对比：企微答复也存一版
             assert rig.memory.stats()["entries"] >= 1
             # 换一条同提出方的需求 → 沿用，不再问
             await mock.push("w3", "025058", "/reset")
