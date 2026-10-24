@@ -26,7 +26,7 @@ streamlit run app.py
 - 命令行看全流程：`python run_demo.py 1`（1～6 为六个样例；⑥ 会先列出纪要里识别到的几条需求；请用上面虚拟环境里的 python）
 - 测试：`pytest -q tests`
 
-不配置 Key 可以整理需求、写单、出原型，并查看**规则模板与历史记录参考**。配置模型后增加独立的大模型估时；未配置或调用失败只影响模型结果，不影响其他参考。页面只展示真实模型；**开工先显示规则初稿，再后台调用已配置的模型增强**。规则与历史参考、需求单和原型无需等待模型返回；未填 Key 时保留这些快结果，不显示模型运行中的状态。**页面底稿 / Git 仓库**：可上传 HTML，或粘贴多个文件/整仓链接；整仓会浅克隆并抽取前后端源码摘要，模型据此问清、估时、定架、出样（复刻现页再改）。**口述**仍可用（注意厂商语音服务合规）。API Key 仅会话有效。运维可把公司 AI 平台（任意 OpenAI 兼容网关）写进本机 `.env` 的 `LLM_API_BASE` / `LLM_MODEL` / `LLM_API_KEY`：网关是预设之一就默认选它；不是预设时默认选「自定义网关」并带出网关地址、模型与 Key，打开页面即可用，页面上改了以页面为准。
+不配置 Key 可以整理需求、写单、出原型，并查看**规则模板与历史记录参考**。配置模型后增加独立的大模型估时；未配置或调用失败只影响模型结果，不影响其他参考。页面只展示真实模型；**开工先显示规则初稿，再后台调用已配置的模型增强**。规则与历史参考、需求单和原型无需等待模型返回；未填 Key 时保留这些快结果，不显示模型运行中的状态。**页面底稿 / Git 仓库**：可上传 HTML，或粘贴多个文件/整仓链接；整仓会浅克隆并抽取前后端源码摘要，模型据此问清、估时、定架、出样（复刻现页再改）。**口述**仍可用（注意厂商语音服务合规）。API Key 仅会话有效。运维可把公司 AI 平台（任意 OpenAI 兼容网关）写进本机 `.env` 的 `LLM_API_BASE` / `LLM_MODEL` / `LLM_API_KEY`：网关是预设之一就默认选它；不是预设时默认选「自定义网关」并带出网关地址与模型，打开页面即可用。`.env` 的 Key 只在服务端使用、页面不显示，也只发往 `.env` 里同一个网关；页面上改了网关或填了 Key，以页面为准。
 
 估量中的“现在”按可检索仓库、修改代码、运行测试并迭代修复的编程代理场景比较；工具权限和开发环境属于待验证前提，会随结果保存并展示。两轨统计有效人时，无人值守运行和等待不计入；共享的定位、样本与核对工作不重复计时。未提供代码仍标为粗估，不等于实施时无法使用代码。模型逐项说明操作投入，不预设提效比例；规则模板与历史参考仍独立保留。
 
@@ -195,7 +195,7 @@ tools/demo_seed.py      演示数据：一本账备份 → 清空 → 预置（�
 **REST**：`python api.py`（或双击 `启动接口.command`），文档在 http://127.0.0.1:8770/docs 。
 - `POST /api/v1/analyze` `{text, source?, answers?, req_id?, polish?, include_spec?, include_prototype?}` → 整条链 JSON（卡片、清单、确认消息、双轨估算、数据地图与决策、需求单）；答复重算时带 `answers` + 上次的 `req_id`，一本账在同一条上更新并写追问记忆
 - `POST /api/v1/split` `{text, record?}` 纪要直通车：返回 `{count, segments:[{index, requester, reason, title_hint, body, text}]}`（片段已过隐盾）；`count` 为 0 表示只有一条需求，照常调 analyze；`record: true` 时逐条按规则受理、各记一行账，另返回 `results`（每条的紧凑结果，含各自 `req_id`），之后可带 `req_id` 答复重算
-- `POST /api/v1/clarify` 只要问清；`GET /api/v1/requirements[/{id}]`、`POST …/{id}/status`、`POST …/{id}/reconcile` 一本账；`GET /api/v1/dashboard` 看板（含记忆与审计统计）；`GET /api/v1/digest` 催办摘要；`GET /api/v1/audit/llm` 模型调用审计；`GET /api/v1/sandbox` 沙箱策略
+- `POST /api/v1/clarify` 只要问清；一本账：`GET /api/v1/requirements`（列表）、`GET /api/v1/requirements/{id}`（一条）、`POST /api/v1/requirements/{id}/status`（改状态）、`POST /api/v1/requirements/{id}/reconcile`（对账）；`GET /api/v1/dashboard` 看板（含记忆与审计统计）；`GET /api/v1/digest` 催办摘要；`GET /api/v1/audit/llm` 模型调用审计；`GET /api/v1/sandbox` 沙箱策略；`GET /api/v1/health` 存活检查（不要 Token）
 - 版本对比：`GET /api/v1/requirements/{id}/versions` 历次版本（版本号、时间、动作、快照）；`GET /api/v1/requirements/{id}/diff?from=&to=` 两版差异（默认最近两版；只给 `to` 时比它的上一版）→ `summary` 一句话、`diff` 结构化差异与需重新确认项（`diff.mixed` = 一版规则初稿一版含模型结果）、`markdown` 变更说明；版本不够或版本号不对返回 422。需求变更：带同一 `req_id` 发来改过的原话，按原话指纹识别，整条更新并记「需求变更」一版
 - 安全：默认只监听 127.0.0.1；对外必须设 `XUZHI_API_HOST` 且配 `XUZHI_API_TOKEN`（否则拒绝启动）；请求体不接受模型 Key，模型只用服务端 .env；`polish` 默认 false（需求初稿走规则；估时以返回的状态为准，无模型时仍返回独立规则与历史参考）
 
