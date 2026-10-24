@@ -161,7 +161,9 @@ def test_wecom_default_path_calls_intake_and_estimate_only(rig, monkeypatch):
     analysis = handler._analyze_blocking(session)
     handler._bookkeep(session, analysis, answered=0)
     rows = _rows(rig.audit)
-    assert [x["purpose"] for x in rows] == ["问清润色", "估时分析"]                  # 不润色需求单、不改原型
+    purposes = [x["purpose"] for x in rows]
+    # 不润色需求单、不改原型；估时格式不合格时允许按提示重试一次（estimate.py 的纠错重试）
+    assert purposes[0] == "问清润色" and set(purposes[1:]) == {"估时分析"} and 1 <= len(purposes[1:]) <= 2
     assert {x["channel"] for x in rows} == {"企微"} and {x["req_id"] for x in rows} == {session.req_id}
     assert session.req_id >= 1 and session.audit_sink is None
     # 答复重算：编号直接记上

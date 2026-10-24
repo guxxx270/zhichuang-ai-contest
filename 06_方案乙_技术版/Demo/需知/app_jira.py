@@ -110,10 +110,9 @@ def jira_text_from_analysis(a) -> str:
     lines = [f"【JIRA】{card.title}", "　".join(head), f"描述：{card.goal}。" + "；".join(card.features[:4])]
     if acc:
         lines += ["验收标准："] + [f"{i}. {x}" for i, x in enumerate(acc[:8], 1)]
-    sources = " ".join(card.data_sources)
-    others = "、".join(r.system for r in arch.reuse[1:4] if r.system not in sources)   # 只列可复用的系统，不列数据来源系统
+    # 「数据与渠道复用 …」也是需知按目录关键词做的复用分析，写进工单会被当成原文多算几个系统，只留主承载平台那句
     tech = re.sub(r"（命中：[^）]*）", "", arch.coverage_line)
-    tech = re.sub(r"；数据与渠道复用 [^。；]*", lambda _m: f"；数据与渠道复用 {others}" if others else "", tech)
+    tech = re.sub(r"；数据与渠道复用 [^。；]*", "", tech)
     lines.append(f"技术说明：{tech}")
     return "\n".join(lines)
 
