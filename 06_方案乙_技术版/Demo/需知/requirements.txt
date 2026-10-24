@@ -1,5 +1,5 @@
 pandas>=2.0
-streamlit>=1.50
+streamlit>=1.50,<1.67   # 1.63～1.66 已跑通全部测试与出样预览；Streamlit 预告移除 components.v1.html（出样预览、开工后滚动用到），升大版本前先跑 pytest
 python-dotenv>=1.0
 openai>=1.30
 pytest>=8.0
