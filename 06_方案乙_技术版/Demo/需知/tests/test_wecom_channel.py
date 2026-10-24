@@ -59,6 +59,15 @@ def test_numbered_new_requirement_is_not_an_answer():
     assert looks_like_answers("1 以上一交易日结算价为基准，不复权", 5) is True
     assert looks_like_answers("1 以上一交易日结算价为基准，净值为单位净值不复权，另给累计净值\n2 客户版隐去内部字段", 5) is True
     assert looks_like_answers("1 需要一个提醒\n2 页面上加个导出按钮", 5) is True
+    # 「加一个 / 做个…功能」在答复里很常见，带几句细节也还是答复，不能把会话当新需求清掉
+    for reply in ("1 加一个导出功能，导出时带水印，只有部门负责人能导出",
+                  "3 做个看板给领导看就行，不用导出，每天早上 8 点前出数",
+                  "1 按合约维度\n2 需要一个提醒，超过阈值时推送到企微群，周末不用推",
+                  "1 以上一交易日结算价为基准\n2 按合约和品种两个维度都要\n3 加一个导出功能就行，导出带水印"):
+        assert looks_like_answers(reply, 5) is True, reply
+    # 用这些说法写成一整条的新需求，照样认出来
+    assert looks_like_answers("1、交易部需要一个保证金监控看板，按客户和品种两个维度展示，盘中实时刷新\n"
+                              "2、超过 80% 推送提醒\n3、能导出 Excel", 5) is False
 
 
 # ---------------------------------------------------------------- 渲染
@@ -357,6 +366,20 @@ def test_numbered_new_requirement_starts_over():
         await mock.wait_final("n2")
         assert len(rec.calls) == 2
         assert rec.calls[1]["text"] == NUMBERED_NEW_REQ and rec.calls[1]["answers"] is None   # 按新需求跑，不重算上一条
+    run(body)
+
+
+def test_detailed_answer_still_recomputes_same_requirement():
+    """答复里说「加一个导出功能」并带细节：仍按答复重算上一条，不把会话当新需求清掉。"""
+    reply = "1 加一个导出功能，导出时带水印，只有部门负责人能导出"
+
+    async def body(rig):
+        mock, rec = rig.mock, rig.rec
+        await mock.push("d1", "025058", REQ)
+        await mock.wait_final("d1")
+        await mock.push("d2", "025058", reply)
+        assert "已收到 1 条答复" in await mock.wait_final("d2")
+        assert rec.calls[1]["text"] == REQ and rec.calls[1]["answers"] == {"q1": reply[2:]}
     run(body)
 
 

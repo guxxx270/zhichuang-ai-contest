@@ -32,6 +32,10 @@ class RunResult:
     learned: int = 0
 
 
+class UnknownRequirement(LookupError):
+    """带的 req_id 一本账里没有。接口按它回 404；流水线里的 KeyError / IndexError 也是 LookupError，不能一起当成「没有这条」。"""
+
+
 def _plain(obj: Any) -> Any:
     """dataclass / list / tuple / dict → 纯 JSON 结构。"""
     if is_dataclass(obj) and not isinstance(obj, type):
@@ -69,7 +73,7 @@ def run(
     stages: set[str] | None = None,
 ) -> RunResult:
     """stages：polish 时只让这几步调模型（intake / spec / estimate / prototype），None = 全部。
-    带 req_id 记账时：编号不存在抛 LookupError，Jira 工单抛 ValueError（走 Jira 评估页重评）。"""
+    带 req_id 记账时：编号不存在抛 UnknownRequirement（LookupError），Jira 工单抛 ValueError（走 Jira 评估页重评）。"""
     text = (text or "").strip()
     if not text:
         raise ValueError("原话不能为空")
@@ -81,7 +85,7 @@ def run(
         # 先校验再跑：不认识的编号不再静默新建一行，Jira 工单不被零散需求的流水线改写
         row = ledger.get(req_id)
         if not row:
-            raise LookupError(f"一本账里没有编号 {req_id}")
+            raise UnknownRequirement(f"一本账里没有编号 {req_id}")
         if row.get("source") == JIRA_SOURCE:
             raise ValueError(f"#{req_id} 是 Jira 工单，请在 Jira 评估页重评")
     llm = make_llm(polish, channel)

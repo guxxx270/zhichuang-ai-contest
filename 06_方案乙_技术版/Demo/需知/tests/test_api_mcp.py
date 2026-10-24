@@ -228,6 +228,17 @@ def test_rest_req_id_must_exist_and_not_be_jira(client, deps):
     assert ledger.get(rid) == before
 
 
+def test_rest_pipeline_bug_is_not_reported_as_missing_req(client, monkeypatch):
+    """KeyError / IndexError 也是 LookupError：流水线里的缺陷照常 500，不能报成「一本账里没有编号」的 404。"""
+    def broken(*args, **kwargs):
+        raise KeyError("references")
+
+    monkeypatch.setattr(service, "analyze", broken)
+    for path in ("/api/v1/analyze", "/api/v1/clarify"):
+        with pytest.raises(KeyError):
+            client.post(path, json={"text": SAMPLE})
+
+
 def test_rest_error_codes(client):
     assert client.post("/api/v1/clarify", json={"text": "   "}).status_code == 422
     rid = client.post("/api/v1/analyze", json={"text": SAMPLE}).json()["req_id"]

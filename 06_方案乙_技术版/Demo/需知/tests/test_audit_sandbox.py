@@ -98,6 +98,30 @@ def test_default_policy_refuses_plain_sensitive(tmp_path):
     assert row["ok"] == 0 and row["plain_hits"] == 1 and "沙箱策略拒发" in row["error"]
 
 
+def test_default_policy_does_not_refuse_material_paths(tmp_path):
+    """带仓库材料的问清：时间戳迁移文件名（db/migrate/20240101123456_…）会被认成账号；
+    路径、目录树、摘要出站前同样脱敏，默认拒发策略不误拦，模型这一步照常调用。"""
+    import json
+
+    from xuzhi.drafts import CodeFile, RepoBundle, draft_context_for_llm
+    from xuzhi.pipeline.intake import build_questions, extract_card, refine_with_llm
+
+    migration = "db/migrate/20240101123456_create_positions.rb"
+    repo = RepoBundle(url="https://gitlab.com/acme/futures-report",
+                      tree=["app/models/position.rb", migration, "src/migrations/1700000000000-Init.ts"],
+                      files=[CodeFile(migration, "backend", "class CreatePositions < ActiveRecord::Migration[7.0]\nend")])
+    assert count_plain_sensitive(json.dumps(draft_context_for_llm([], [repo]), ensure_ascii=False)) == 0
+    audit, client = Audit(tmp_path / "a.sqlite3"), _FakeClient()
+    text = "机构部想看各品种持仓排名，按合约汇总"
+    card = extract_card(text, "")
+    refine_with_llm(text, card, build_questions(text, card), _llm(audit, client), repos=[repo])
+    assert len(client.calls) == 1                     # 发出去了，没被拒发
+    sent = client.calls[0]["messages"][1]["content"]
+    assert "20240101123456" not in sent and "1700000000000" not in sent
+    row = audit.recent()[0]
+    assert row["ok"] == 1 and row["plain_hits"] == 0
+
+
 def test_audit_error_is_sanitized(tmp_path):
     audit = Audit(tmp_path / "a.sqlite3")
     audit.record(purpose="问清润色", backend="openai", api_base="https://gw.example.com/v1", model="m", duration_ms=1,

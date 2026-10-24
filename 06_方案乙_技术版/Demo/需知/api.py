@@ -114,7 +114,7 @@ def analyze_endpoint(body: AnalyzeIn) -> dict[str, Any]:
         res = service.run(body.text, source=body.source, answers=body.answers, polish=body.polish, req_id=body.req_id,
                           channel="API", record=body.record, ledger=ledger() if body.record else None, memory=memory(),
                           mobile=body.mobile, client_view=body.client_view, stages=stages)
-    except LookupError as e:
+    except service.UnknownRequirement as e:   # 只认「编号不存在」；流水线里的 KeyError 照常 500，不冒充 404
         raise HTTPException(status_code=404, detail=str(e)) from e
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
@@ -130,7 +130,7 @@ def clarify_endpoint(body: AnalyzeIn) -> dict[str, Any]:
         res = service.run(body.text, source=body.source, answers=body.answers, polish=body.polish, req_id=body.req_id,
                           channel="API", record=body.record, ledger=ledger() if body.record else None, memory=memory(),
                           stages={"intake"})
-    except LookupError as e:
+    except service.UnknownRequirement as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
