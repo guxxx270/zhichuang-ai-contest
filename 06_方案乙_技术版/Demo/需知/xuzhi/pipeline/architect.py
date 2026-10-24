@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import date
 
-from .. import knowledge
+from .. import knowledge, textutil
 from ..drafts import Draft, RepoBundle, summarize, visual_drafts
 from .intake import Card, looks_futures_domain
 
@@ -169,7 +169,7 @@ def discover_reuse(card: Card, text: str) -> list[Reuse]:
     host = AFFINITY.get(card.req_type)
     if card.req_type == "数据" or "公告" in hay:
         host = "公告采集服务" if "公告" in hay else "数据仓库"
-    if re.search(r"下单|报单|指令|拒单", hay) and "公告" not in hay:
+    if re.search(rf"{textutil.ORDER}|指令|拒单", hay) and "公告" not in hay:
         host = "交易系统"
     for s in knowledge.systems():
         matched = [c for c in s.capabilities if c in hay]
@@ -331,7 +331,7 @@ def build_decisions(
         ds.append(Decision("D6", "是否使用 AI 平台", "非结构化解析 / 文案生成用规则还是大模型？",
                            [("规则 + 模板", "确定性强", "覆盖不全、维护累"), ("公司 AI 平台 + 人工复核", "覆盖广、省人工", "需复核环节与评测"), ("两者结合：规则硬判、模型建议", "兼顾", "多一层逻辑")],
                            "两者结合：规则硬判、模型建议", "涉及资金数字的解析必须有人复核", "需明确人工复核和合规验收工作"))
-    if re.search(r"下单|报单|指令|阻断|拒单", text):
+    if re.search(rf"{textutil.ORDER}|指令|阻断|拒单", text):
         ds.append(Decision("D7", "是否改交易链路", "只做旁路提示，还是改交易系统做阻断？",
                            [("旁路提示（只读）", "不动交易链路、审批简单、可快速上线", "不能强制拦截"), ("交易系统事前风控增强（阻断）", "强约束", "变更审批、灰度、回退要求高，周期长")],
                            "旁路提示（只读）", "首版先解释与测算，阻断纳入二期与交易系统排期", "阻断链路需额外验证与上线配合，具体投入待估"))

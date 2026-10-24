@@ -85,11 +85,38 @@ def _want(feature: str) -> str:
     return s.strip("，, ") or feature
 
 
+ORIGIN_NONE = "（原话里没有对应的一句：模型补充的功能点，请业务确认）"
+
+
+def _likeness(a: str, b: str) -> float:
+    """两句话的字面相似度（相邻两字的重合，Dice）。"""
+    ga, gb = ({t[i:i + 2] for i in range(len(t) - 1)} for t in (re.sub(r"\W", "", a or ""), re.sub(r"\W", "", b or "")))
+    return 2 * len(ga & gb) / (len(ga) + len(gb)) if ga and gb else 0.0
+
+
+def _origins(card: Card) -> list[str]:
+    """每条功能点回链原句。规则抽的功能点与原句同序；模型润色后可能换序、合并或补充，
+    同位原句不像时按字面相似度改配最像的一句，都不像就标明是模型补充，不硬配。"""
+    raws = list(card.raw_features or [])
+    pool = [r for r in raws if r.strip()]
+    if not pool:
+        return list(card.features)
+    out = []
+    for i, f in enumerate(card.features):
+        same = raws[i] if i < len(raws) else ""
+        best = max(pool, key=lambda r: _likeness(f, r))
+        if same.strip() and _likeness(f, same) >= _likeness(f, best) - 0.05:
+            out.append(same)
+        else:
+            out.append(best if _likeness(f, best) >= 0.15 else ORIGIN_NONE)
+    return out
+
+
 def build_stories(card: Card) -> list[Story]:
     role = card.users[0] if card.users else "使用者"
     futures = card_is_futures(card)
     stories = []
-    for i, (f, raw) in enumerate(zip(card.features, card.raw_features or card.features), 1):
+    for i, (f, raw) in enumerate(zip(card.features, _origins(card)), 1):
         stories.append(Story(f"US-{i:02d}", role, _want(f), "减少人工整理与漏看，按时拿到可用结果", raw, _acceptance(card, f, futures)))
     return stories
 

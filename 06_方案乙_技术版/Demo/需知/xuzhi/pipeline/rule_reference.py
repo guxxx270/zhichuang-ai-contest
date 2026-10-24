@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 
+from .. import textutil
 from .intake import Card
 from .tasks import AI_DO, AI_REVIEW, HUMAN, Task
 
@@ -36,7 +37,7 @@ def score_dims(card: Card, text: str) -> tuple[dict[str, int], dict[str, str]]:
     pm_raw = 1 + (2 if "客户" in card.scope_objects else 0) + (1 if re.search(r"权限|只能看|按人|投资经理", text) else 0) + (1 if "对外" in text else 0)
     perf_raw = 4 if realtime else 3 if card.frequency == "分钟级" else 2 if re.search(r"\d+\s*分钟内", text) else 1
     perf_raw += 1 if re.search(r"全品种|所有品种|全部客户|逐客户|五家交易所", text) else 0
-    comp_raw = 1 + (2 if "客户" in card.scope_objects else 0) + (1 if re.search(r"合规|适当性|监管|报送", text) else 0) + (1 if re.search(r"留痕|审计", text) else 0) + (1 if re.search(r"下单|指令|阻断", text) else 0)
+    comp_raw = 1 + (2 if "客户" in card.scope_objects else 0) + (1 if re.search(r"合规|适当性|监管|报送", text) else 0) + (1 if re.search(r"留痕|审计", text) else 0) + (1 if re.search(rf"{textutil.ORDER}|指令|阻断", text) else 0)
     dims = {
         "功能点": fp, "数据接入": _clip(di_raw), "界面": _clip(ui_raw),
         "权限": _clip(pm_raw), "性能": _clip(perf_raw), "合规": _clip(comp_raw),
@@ -48,7 +49,7 @@ def score_dims(card: Card, text: str) -> tuple[dict[str, int], dict[str, str]]:
         "界面": _bounded(ui_raw, f"{card.req_type}类" + ("，含手机端" if "手机端可看" in card.nonfunctional else "")),
         "权限": _bounded(pm_raw, ("涉及客户数据，" if "客户" in card.scope_objects else "") + ("需按人 / 产品授权" if pm_raw >= 2 else "沿用现有角色权限")),
         "性能": _bounded(perf_raw, "实时 / 盘中" if realtime else ("有限时要求" if perf_raw >= 2 else "日终批处理")),
-        "合规": _bounded(comp_raw, ("客户信息脱敏与审阅；" if "客户" in card.scope_objects else "") + ("触及交易链路；" if re.search(r"下单|指令|阻断", text) else "") + ("留痕 / 审计" if re.search(r"留痕|审计", text) else "常规")),
+        "合规": _bounded(comp_raw, ("客户信息脱敏与审阅；" if "客户" in card.scope_objects else "") + ("触及交易链路；" if re.search(rf"{textutil.ORDER}|指令|阻断", text) else "") + ("留痕 / 审计" if re.search(r"留痕|审计", text) else "常规")),
     }
     return dims, reasons
 
@@ -90,7 +91,7 @@ def build_tasks(card: Card, text: str) -> list[Task]:
         ts.append(Task("M1", "手机端 H5 与移动门户嵌入", "开发", AI_DO, 0.06, 0.5, "H5 适配 AI 生成，SSO 接入按现成模板"))
     if "客户" in card.scope_objects:
         ts.append(Task("S1", "客户版脱敏与合规审阅接入", "开发", AI_REVIEW, 0.06, 0.75, "脱敏规则 AI 起草，合规审阅是红线，必须人签"))
-    if re.search(r"下单|报单|指令|限仓|阻断|拒单", text):
+    if re.search(rf"{textutil.ORDER}|指令|限仓|阻断|拒单", text):
         ts.append(Task("R1", "交易链路 / 风控口径核对", "开发", AI_REVIEW, 0.08, 0.85, "三套限仓口径与事前风控边界，AI 写核对逻辑，人逐条验证"))
     if re.search(r"通知文案|解释|文案", text + feats):
         ts.append(Task("W1", "通知文案 / 解释生成", "开发", AI_DO, 0.04, 0.4, "大模型生成，合规措辞模板约束，发送前人审"))

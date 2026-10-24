@@ -5,6 +5,8 @@ import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from .. import textutil
+
 if TYPE_CHECKING:
     from .intake import Card
 
@@ -42,7 +44,7 @@ def who_split(tasks: list[Task]) -> dict[str, float]:
 
 def delivery_mode(card: Card, split: dict[str, float], text: str) -> str:
     """按分工占比（以前工时加权）与原话风险给交付建议；没有工作项（split 为空）时按技术部主做。"""
-    risky = "客户" in card.scope_objects or bool(re.search(r"下单|指令|限仓|公告", text))
+    risky = "客户" in card.scope_objects or bool(re.search(rf"{textutil.ORDER}|指令|限仓|公告", text))
     ai_do, human = split.get(AI_DO, 0), split.get(HUMAN, 0)
     if ai_do >= 0.35 and human <= 0.35 and card.req_type in ("报表", "页面") and not risky:
         return "业务可在公司 AI 平台自建（Vibe Coding），技术部只审口径、权限与上线——适合「人人都有智能体」的自助路径"

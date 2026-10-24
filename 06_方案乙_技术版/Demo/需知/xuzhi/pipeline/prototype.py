@@ -1074,14 +1074,15 @@ def _fake_like_neighbors(cells: list[str], rng: random.Random) -> str:
 
 
 def _hide_client_columns(html_src: str) -> str:
-    m = re.search(r"(<table\b[^>]*>)(.*?)(</table>)", html_src, flags=re.I | re.S)
-    if not m:
-        return html_src
-    table = m.group(0)
+    """客户版去掉内部列：表头含集中度 / 杠杆 / 保证金占用即去（模型做的页面常写成「集中度预警」「持仓集中度(%)」），每张表都处理。"""
+    return re.sub(r"<table\b[^>]*>.*?</table>", lambda m: _hide_client_columns_in(m.group(0)), html_src, flags=re.I | re.S)
+
+
+def _hide_client_columns_in(table: str) -> str:
     headers = [_strip_cell(x) for x in re.findall(r"<th[^>]*>(.*?)</th>", table, flags=re.I | re.S)]
-    drop = {i for i, h in enumerate(headers) if re.sub(r"\s*新增$", "", h) in _HIDE_CLIENT}
+    drop = {i for i, h in enumerate(headers) if any(k in h for k in _HIDE_CLIENT)}
     if not drop:
-        return html_src
+        return table
 
     def filter_row(row: re.Match[str]) -> str:
         parts = re.split(r"(</(?:th|td)>)", row.group(1), flags=re.I)
@@ -1097,8 +1098,7 @@ def _hide_client_columns(html_src: str) -> str:
         kept = "".join(c for i, c in enumerate(cells) if i not in drop)
         return f"<tr>{kept}</tr>"
 
-    new_table = re.sub(r"<tr\b[^>]*>(.*?)</tr>", filter_row, table, flags=re.I | re.S)
-    return html_src[: m.start()] + new_table + html_src[m.end() :]
+    return re.sub(r"<tr\b[^>]*>(.*?)</tr>", filter_row, table, flags=re.I | re.S)
 
 
 def _insert_in_body(html_src: str, snippet: str, *, where: str = "end") -> str:

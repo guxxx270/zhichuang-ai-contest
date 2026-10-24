@@ -13,7 +13,7 @@ import re
 from dataclasses import dataclass, field
 from statistics import median
 
-from .. import knowledge
+from .. import knowledge, textutil
 from ..jira import HOURS_PER_DAY, JiraIssue
 from .tasks import AI_DO, AI_REVIEW, HUMAN
 
@@ -23,7 +23,7 @@ KIND_BASE = {"缺陷": 0.6, "任务": 1.0, "需求": 1.5, "改造": 2.5}       #
 KIND_SCALE = {"缺陷": 0.5, "任务": 0.8, "需求": 1.0, "改造": 1.2}      # 六维加权对该类型的放大
 CODING = "编码"
 
-_TRADING = re.compile(r"下单|报单|撤单|柜台|(?:交易|报单|下单)指令|事前风控|阻断|拒单")   # 「企微 /摘要 指令」不是交易指令
+_TRADING = re.compile(rf"{textutil.ORDER}|撤单|柜台|(?:交易|报单|下单)指令|事前风控|阻断|拒单")   # 「企微 /摘要 指令」不是交易指令
 _CUSTOMER = re.compile(r"客户(?!端|经理|版)|投资者|资金账号|脱敏|适当性|合规|监管|报送")   # 客户端、客户经理不是客户数据
 _CLIENT_VER = re.compile(r"客户版")   # 对外的客户版：不一定碰客户数据，但要合规审阅，风险照样算
 _EXTERNAL = re.compile(r"第三方|托管行|外部接口|外部系统|其他团队|依赖|抓取")   # 「按交易所日历」不算外部依赖
