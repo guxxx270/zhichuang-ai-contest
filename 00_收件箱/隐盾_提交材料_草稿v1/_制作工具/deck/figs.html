@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>隐盾 · 示意图</title>
+<!-- 两张示意图：#F01_flow（数据流与本机边界）、#F02_engine（规则流水线与容错还原）。shot_figs.py 按 1600×900、2 倍像素截图。 -->
+<style>
+  :root { --bg:#070B16; --panel:#111A2E; --card:#131D33; --line:#22304F; --line2:#2C3D63; --text:#E6ECF8; --soft:#C7D2E8; --mute:#8A97B4;
+          --green:#34D399; --mint:#6EE7B7; --cyan:#22D3EE; --blue:#60A5FA; --amber:#FBBF24; --red:#F87171; --violet:#A78BFA; --pink:#F472B6; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  html, body { width:1600px; height:900px; overflow:hidden; background:var(--bg); color:var(--text);
+    font-family:-apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  .fig { position:absolute; inset:0; display:none; padding:46px 56px; background:
+    radial-gradient(900px 420px at 4% -8%, rgba(52,211,153,.12), transparent 62%),
+    radial-gradient(800px 420px at 98% -6%, rgba(34,211,238,.10), transparent 60%),
+    linear-gradient(rgba(96,165,250,.04) 1px, transparent 1px) 0 0 / 32px 32px,
+    linear-gradient(90deg, rgba(96,165,250,.04) 1px, transparent 1px) 0 0 / 32px 32px, var(--bg); }
+  .fig.on { display:block; }
+  h1 { font-size:34px; font-weight:800; letter-spacing:1px; }
+  h1 small { font-size:20px; color:var(--mute); font-weight:500; margin-left:16px; }
+  .box { background:var(--card); border:1.5px solid var(--line); border-radius:16px; padding:16px 20px; }
+  .t { font-size:22px; font-weight:750; }
+  .d { font-size:16.5px; color:var(--soft); margin-top:6px; line-height:1.55; }
+  code, .mono { font-family:"SF Mono", Menlo, Consolas, monospace; }
+  .tag { color:var(--mint); background:rgba(52,211,153,.14); border:1px solid rgba(52,211,153,.45); border-radius:6px; padding:0 5px; font-weight:700; }
+  .hit { color:#FECACA; border-bottom:2px solid var(--red); }
+
+  /* ---------- F01 数据流 ---------- */
+  .local { position:absolute; left:56px; top:120px; width:1030px; bottom:46px; border:2px dashed rgba(52,211,153,.55); border-radius:24px;
+    background:rgba(52,211,153,.04); }
+  .local .cap { position:absolute; left:24px; top:-18px; background:var(--bg); padding:0 12px; color:var(--mint); font-size:20px; font-weight:800; }
+  .cloud { position:absolute; right:56px; top:120px; width:350px; bottom:46px; border:2px dashed rgba(248,113,113,.5); border-radius:24px; background:rgba(248,113,113,.04); }
+  .cloud .cap { position:absolute; left:24px; top:-18px; background:var(--bg); padding:0 12px; color:#FCA5A5; font-size:20px; font-weight:800; }
+  .n { position:absolute; }
+  .arrow { position:absolute; height:3px; background:var(--line2); }
+  .arrow::after { content:""; position:absolute; right:-2px; top:-6px; border-left:12px solid var(--line2); border-top:7.5px solid transparent; border-bottom:7.5px solid transparent; }
+  .arrow.g { background:var(--green); } .arrow.g::after { border-left-color:var(--green); }
+  .arrow.c { background:var(--cyan); } .arrow.c::after { border-left-color:var(--cyan); }
+  .arrow.l { transform:scaleX(-1); }
+  .lbl { position:absolute; font-size:15px; color:var(--mute); text-align:center; }
+  .vline { position:absolute; width:3px; background:var(--line2); }
+  .note { position:absolute; left:56px; right:56px; bottom:8px; font-size:15px; color:var(--mute); text-align:center; }
+
+  /* ---------- F02 流水线 ---------- */
+  .lane { display:flex; gap:12px; align-items:stretch; margin-top:26px; }
+  .pass { flex:1; background:var(--card); border:1.5px solid var(--line); border-radius:14px; padding:14px 14px 12px; position:relative; }
+  .pass .no { width:30px; height:30px; border-radius:9px; display:flex; align-items:center; justify-content:center; font-weight:800; color:#0B1222; font-size:16px; }
+  .pass .t { font-size:21px; margin-top:10px; }
+  .pass .d { font-size:16px; }
+  .pass + .pass::before { content:"›"; position:absolute; left:-12px; top:40%; color:var(--mute); font-size:22px; }
+  .row2 { display:grid; grid-template-columns: 1.05fr 1fr; gap:22px; margin-top:22px; }
+  .chips { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
+  .chip { white-space:nowrap; font-size:15px; padding:5px 10px; border-radius:8px; background:rgba(13,20,38,.9); border:1px solid var(--line2); color:var(--soft); }
+  .chip.ok { border-color:rgba(52,211,153,.45); color:var(--mint); }
+  .chip.bad { border-color:rgba(251,191,36,.5); color:#FCD34D; }
+  .walk { display:grid; grid-template-columns: 1fr 26px 1fr 26px 1fr 26px 1fr; align-items:center; margin-top:22px; }
+  .walk .s { background:rgba(13,20,38,.9); border:1.5px solid var(--line2); border-radius:14px; padding:12px 16px; font-size:16.5px; line-height:1.6; color:var(--text); min-height:96px; }
+  .walk .s b { display:block; font-size:14px; color:var(--mute); font-weight:600; margin-bottom:4px; }
+  .walk .ar { color:var(--mute); text-align:center; font-size:24px; }
+</style>
+</head>
+<body>
+
+<section class="fig" id="F01_flow">
+  <h1>数据流与本机边界<small>出本机的只有标签化文本；原文与映射表始终留在本机内存</small></h1>
+  <div class="local"><div class="cap">本机 · 隐盾（127.0.0.1，不联网）</div></div>
+  <div class="cloud"><div class="cap">公网 / 公司外的大模型</div></div>
+
+  <div class="n box" style="left:90px; top:170px; width:290px;">
+    <div class="t">① 原文</div>
+    <div class="d">微信、邮件、工单、日志、Word<br>客户<span class="hit">王建国</span>先生，手机 <span class="hit">139 1234 5678</span></div>
+  </div>
+  <div class="arrow g" style="left:388px; top:232px; width:72px;"></div>
+  <div class="n box" style="left:470px; top:150px; width:300px; border-color:rgba(52,211,153,.55);">
+    <div class="t" style="color:var(--mint)">② 规则引擎</div>
+    <div class="d">名单 → 凭据 → 号码 → 金额 → 机构 → 姓名 → 按出现先后编号；同一实体同一标签</div>
+  </div>
+  <div class="arrow g" style="left:778px; top:232px; width:60px;"></div>
+  <div class="n box" style="left:846px; top:170px; width:220px;">
+    <div class="t">③ 脱敏文本</div>
+    <div class="d">客户<span class="tag">&lt;客户_1&gt;</span>先生，手机 <span class="tag">&lt;手机_1&gt;</span></div>
+  </div>
+  <div class="arrow c" style="left:1074px; top:232px; width:126px;"></div>
+  <div class="lbl" style="left:1070px; top:196px; width:140px;">只发标签化文本</div>
+  <div class="n box" style="left:1212px; top:180px; width:310px; border-color:rgba(248,113,113,.45);">
+    <div class="t">④ 大模型作答</div>
+    <div class="d">看得懂「这是一位客户、一个手机号」，回答照常；看不到原值</div>
+  </div>
+
+  <div class="n box" style="left:470px; top:410px; width:300px; border-color:rgba(167,139,250,.5);">
+    <div class="t" style="color:#C4B5FD">映射表（会话内存）</div>
+    <div class="d"><span class="mono">&lt;客户_1&gt; → 王建国</span><br><span class="mono">&lt;手机_1&gt; → 139 1234 5678</span><br>多轮共用 · 可导出到本机 · 关页面即清空</div>
+  </div>
+  <div class="vline" style="left:618px; top:318px; height:86px;"></div>
+
+  <div class="n box" style="left:1212px; top:470px; width:310px;">
+    <div class="t">⑤ 回答（含标签）</div>
+    <div class="d">模型常把标签改写：<span class="mono">〈客户_1〉</span> <span class="mono">【客户_1】</span> <span class="mono">\&lt;客户\_1\&gt;</span> <span class="mono">客户1</span>……</div>
+  </div>
+  <div class="arrow c l" style="left:1074px; top:540px; width:126px;"></div>
+  <div class="lbl" style="left:1070px; top:552px; width:140px;">贴回本机</div>
+  <div class="n box" style="left:846px; top:470px; width:220px; border-color:rgba(34,211,238,.5);">
+    <div class="t" style="color:#9BE7F7">⑥ 容错还原</div>
+    <div class="d">8 种写法归一 → 查映射表 → 换回原文；对不上的标签单独提醒</div>
+  </div>
+  <div class="arrow l" style="left:778px; top:540px; width:60px; background:#9BE7F7"></div>
+  <div class="n box" style="left:90px; top:640px; width:680px;">
+    <div class="t">⑦ 可直接用的回答</div>
+    <div class="d">给<span style="color:#9BE7F7;border-bottom:2px solid var(--cyan)">王建国</span>先生的回复要点……回电 <span style="color:#9BE7F7;border-bottom:2px solid var(--cyan)">139 1234 5678</span>；原文、映射表、回答都没有离开本机</div>
+  </div>
+  <div class="vline" style="left:955px; top:620px; height:60px; background:#9BE7F7"></div>
+  <div class="arrow l" style="left:778px; top:678px; width:178px; background:#9BE7F7"></div>
+  <div class="note">规则引擎只用 Python 标准库；网页版另需 Streamlit（只听 127.0.0.1、关闭使用统计）。命令行与剪贴板模式不需要任何第三方依赖。</div>
+</section>
+
+<section class="fig" id="F02_engine">
+  <h1>规则流水线与容错还原<small>先认最确定的，再认需要上下文的；每一遍只碰原文里还没换掉的部分</small></h1>
+  <div class="lane">
+    <div class="pass"><div class="no" style="background:#A78BFA">1</div><div class="t">自定义名单</div><div class="d">裸姓名、机构简称整词先换；白名单里的词一律放过</div></div>
+    <div class="pass"><div class="no" style="background:#F472B6">2</div><div class="t">技术凭据</div><div class="d">私钥块、连接串口令、sk- / ghp_ / AKIA / JWT；api_key=、密码： 只换值</div></div>
+    <div class="pass"><div class="no" style="background:#60A5FA">3</div><div class="t">号码</div><div class="d">身份证 → 银行卡 → 手机 → 邮箱 → 长账号 → 内网地址 → 座机（分段写法先认）</div></div>
+    <div class="pass"><div class="no" style="background:#22D3EE">4</div><div class="t">短账号</div><div class="d">6～9 位只在「资金账号 / 客户号 / 交易编码」后才换</div></div>
+    <div class="pass"><div class="no" style="background:#FBBF24">5</div><div class="t">金额</div><div class="d">千分位、带元、¥；万 / 亿要资金语境；单价、成交量不换</div></div>
+    <div class="pass"><div class="no" style="background:#FB923C">6</div><div class="t">机构</div><div class="d">客户 / 机构 / 投资者 + XX 公司…；泛称、动作词过滤</div></div>
+    <div class="pass"><div class="no" style="background:#34D399">7</div><div class="t">姓名</div><div class="d">先生 / 女士、客户后、挨着号码；行情词与同事称谓过滤</div></div>
+  </div>
+  <div class="row2">
+    <div class="box">
+      <div class="t">标签怎么编</div>
+      <div class="d">类型 + 编号：<span class="tag">&lt;客户_1&gt;</span> <span class="tag">&lt;手机_2&gt;</span>。同一号码不同写法（<span class="mono">139 1234 5678</span> / <span class="mono">+86 13912345678</span>）算同一实体；
+        新标签按在文中第一次出现的先后编号；多轮会话接着上一轮的最大编号往后编，旧实体沿用旧标签。</div>
+      <div class="chips">
+        <span class="chip ok">语义保持：模型知道是谁、是什么</span><span class="chip ok">多轮一致</span><span class="chip ok">一遍替换，不会二次替换</span>
+      </div>
+      <div class="t" style="margin-top:18px">拿不准的只提示</div>
+      <div class="d">没有上下文的 6～9 位数字（可能是账号，也可能是编号）列为「疑似遗漏」，用户确认后按账号脱敏；不自作主张。</div>
+    </div>
+    <div class="box">
+      <div class="t">容错还原：8 种写法都认</div>
+      <div class="chips">
+        <span class="chip mono">&lt;客户_1&gt;</span><span class="chip mono">〈客户_1〉</span><span class="chip mono">【客户_1】</span><span class="chip mono">\&lt;客户\_1\&gt;</span>
+        <span class="chip mono">&amp;lt;客户_1&amp;gt;</span><span class="chip mono">&lt;客户1&gt;</span><span class="chip mono">客户_1</span><span class="chip mono">＜客户＿１＞</span>
+      </div>
+      <div class="d" style="margin-top:12px">归一成 <span class="tag">&lt;类型_编号&gt;</span> → 查映射表 → 换回原文；只换映射表里有的，模型自己编出来的 <span class="chip bad mono" style="padding:1px 6px">&lt;客户_9&gt;</span> 原样留着并提醒人工核对。</div>
+      <div class="t" style="margin-top:18px">发送前提示</div>
+      <div class="d">脱敏文本开头自动加一句「形如 &lt;客户_1&gt; 的标记是占位符，请原样保留」，从源头减少改写。</div>
+    </div>
+  </div>
+  <div class="walk">
+    <div class="s"><b>原文</b>客户<span class="hit">王建国</span>先生（手机 <span class="hit">139 1234 5678</span>）浮亏 <span class="hit">125 万元</span></div><div class="ar">→</div>
+    <div class="s"><b>发出去的</b>客户<span class="tag">&lt;客户_1&gt;</span>先生（手机 <span class="tag">&lt;手机_1&gt;</span>）浮亏 <span class="tag">&lt;金额_1&gt;</span></div><div class="ar">→</div>
+    <div class="s"><b>模型回答（改了写法）</b>请回电<span class="mono">〈客户_1〉</span>：<span class="mono">\&lt;手机\_1\&gt;</span>，先确认<span class="mono">【金额_1】</span>的保证金</div><div class="ar">→</div>
+    <div class="s"><b>还原后</b>请回电<span style="color:#9BE7F7;border-bottom:2px solid var(--cyan)">王建国</span>：<span style="color:#9BE7F7;border-bottom:2px solid var(--cyan)">139 1234 5678</span>，先确认<span style="color:#9BE7F7;border-bottom:2px solid var(--cyan)">125 万元</span>的保证金</div>
+  </div>
+</section>
+
+<script>document.getElementById((location.hash || "#F01_flow").slice(1)).classList.add("on");</script>
+</body>
+</html>

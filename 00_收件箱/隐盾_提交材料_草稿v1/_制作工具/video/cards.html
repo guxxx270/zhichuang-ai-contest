@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>隐盾 · 视频卡片</title>
+<!-- 1920×1080 动画卡片：#title / #pain / #ways / #eval / #close。
+     带 data-line 的元素由 record_cards.py 按旁白时间轴设动画延迟：第 k 句开始时出现（data-frac 指句内的位置 0～1）。 -->
+<style>
+  :root { --bg:#070B16; --panel:rgba(17,26,46,.80); --line:#22304F; --text:#E6ECF8; --soft:#C7D2E8; --mute:#8A97B4;
+          --green:#34D399; --mint:#6EE7B7; --cyan:#22D3EE; --blue:#4361EE; --amber:#FBBF24; --red:#F87171; --violet:#A78BFA; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  html, body { width:1920px; height:1080px; overflow:hidden; background:var(--bg); color:var(--text);
+    font-family:-apple-system, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif; }
+  body { background:
+    radial-gradient(1200px 620px at 6% -10%, rgba(52,211,153,.16), transparent 62%),
+    radial-gradient(1000px 620px at 98% -6%, rgba(34,211,238,.15), transparent 60%),
+    radial-gradient(1100px 600px at 60% 118%, rgba(67,97,238,.14), transparent 60%),
+    linear-gradient(rgba(96,165,250,.05) 1px, transparent 1px) 0 0 / 40px 40px,
+    linear-gradient(90deg, rgba(96,165,250,.05) 1px, transparent 1px) 0 0 / 40px 40px, var(--bg); }
+  .card { position:absolute; inset:0; display:none; }
+  .card.on { display:block; }
+  @keyframes up { from { opacity:0; transform:translateY(28px); } to { opacity:1; transform:none; } }
+  @keyframes fade { from { opacity:0; } to { opacity:1; } }
+  @keyframes pop { 0% { opacity:0; transform:scale(.86); } 70% { opacity:1; transform:scale(1.03); } 100% { opacity:1; transform:scale(1); } }
+  @keyframes glow { 0%,100% { box-shadow:0 0 34px rgba(52,211,153,.35); } 50% { box-shadow:0 0 70px rgba(52,211,153,.6); } }
+  @keyframes mark { from { background-size:0% 100%; } to { background-size:100% 100%; } }
+  .a { opacity:0; animation:up .9s cubic-bezier(.2,.7,.2,1) forwards; }
+  .f { opacity:0; animation:fade 1s ease forwards; }
+  .p { opacity:0; animation:pop .7s cubic-bezier(.2,.7,.2,1) forwards; }
+  .h { position:absolute; left:140px; top:96px; font-size:56px; font-weight:800; letter-spacing:2px; }
+  .h em { font-style:normal; color:var(--green); }
+  .sub { position:absolute; left:142px; top:178px; font-size:26px; color:var(--mute); letter-spacing:1px; }
+  .foot { position:absolute; left:0; right:0; bottom:170px; text-align:center; font-size:22px; color:var(--mute); letter-spacing:1px; }
+
+  /* ---------- 片头 ---------- */
+  #title .wrap { position:absolute; left:0; right:0; top:210px; display:flex; flex-direction:column; align-items:center; text-align:center; }
+  .brand { display:flex; align-items:center; gap:40px; }
+  .logo { width:132px; height:132px; border-radius:34px; display:flex; align-items:center; justify-content:center;
+    font-size:70px; font-weight:800; color:#04121F; background:linear-gradient(135deg,#6EE7B7,#34D399 50%,#22D3EE); }
+  .logo.p { animation: pop .7s cubic-bezier(.2,.7,.2,1) forwards, glow 3s ease-in-out 1s infinite; }
+  .name { font-size:120px; font-weight:800; letter-spacing:18px; line-height:1;
+    background:linear-gradient(90deg,#E6ECF8,#A7F3D0 60%,#9BE7F7); -webkit-background-clip:text; background-clip:text; color:transparent; }
+  .en { font-size:26px; letter-spacing:5px; color:var(--mute); margin-top:16px; text-align:left; }
+  .slogan { font-size:52px; font-weight:700; margin-top:76px; color:#DCE6FA; letter-spacing:3px; }
+  .demo { margin-top:46px; font-size:32px; color:var(--soft); background:rgba(13,20,38,.75); border:1.5px solid var(--line); border-radius:18px; padding:18px 30px; }
+  .demo s { color:#FCA5A5; text-decoration-color:var(--red); text-decoration-thickness:3px; }
+  .demo b { color:var(--mint); background:rgba(52,211,153,.14); border:1.5px solid rgba(52,211,153,.5); border-radius:10px; padding:0 8px; font-weight:700; }
+  .chips { display:flex; flex-wrap:wrap; justify-content:center; gap:14px; margin-top:44px; max-width:1500px; }
+  .chip { display:inline-flex; padding:9px 20px; border-radius:999px; font-size:24px; color:#DCE4F5;
+    background:rgba(52,211,153,.10); border:1.5px solid rgba(52,211,153,.42); }
+
+  /* ---------- 痛点 ---------- */
+  .redline { position:absolute; left:140px; right:140px; top:200px; display:flex; gap:22px; align-items:center; padding:22px 30px; border-radius:18px;
+    background:rgba(248,113,113,.10); border:1.5px solid rgba(248,113,113,.45); font-size:27px; color:#FECACA; line-height:1.5; }
+  .redline i { font-style:normal; flex:none; background:var(--red); color:#1F0A0A; font-weight:800; border-radius:10px; padding:6px 14px; font-size:24px; }
+  .paste { position:absolute; left:140px; top:350px; width:820px; border-radius:26px; background:#0E1626; border:1.5px solid var(--line);
+    box-shadow:0 30px 80px rgba(0,0,0,.5); overflow:hidden; }
+  .paste .bar { height:70px; display:flex; align-items:center; gap:14px; padding:0 28px; font-size:23px; color:var(--soft); border-bottom:1px solid var(--line); background:#111A2E; }
+  .paste .bar span { width:14px; height:14px; border-radius:50%; background:#334155; display:inline-block; }
+  .paste .body { padding:26px 30px 30px; font-size:27px; line-height:1.75; color:var(--text); }
+  .paste .send { margin:0 30px 28px; display:flex; justify-content:flex-end; }
+  .paste .send b { background:#1E293B; color:var(--mute); border-radius:12px; padding:10px 22px; font-size:22px; font-weight:600; }
+  .hot { background:linear-gradient(rgba(248,113,113,.28), rgba(248,113,113,.28)) no-repeat 0 100% / 0% 100%; border-bottom:3px solid transparent;
+    color:var(--text); border-radius:4px; padding:0 2px; }
+  .hot.go { animation: mark .6s ease forwards; }
+  .hot.go { border-bottom-color:var(--red); color:#FECACA; }
+  .pains { position:absolute; left:1020px; top:350px; right:140px; display:flex; flex-direction:column; gap:26px; }
+  .pain { background:var(--panel); border:1.5px solid var(--line); border-radius:22px; padding:26px 30px; display:flex; gap:24px; align-items:flex-start; }
+  .pain .n { flex:none; width:62px; height:62px; border-radius:18px; display:flex; align-items:center; justify-content:center; font-size:30px; font-weight:800; color:#0B1222; }
+  .pain .t { font-size:33px; font-weight:750; }
+  .pain .d { font-size:23px; color:var(--mute); margin-top:8px; line-height:1.5; }
+
+  /* ---------- 三种用法 ---------- */
+  .ways { position:absolute; left:120px; right:120px; top:240px; display:grid; grid-template-columns: 1fr 1fr 1fr; gap:34px; }
+  .way { background:var(--panel); border:1.5px solid var(--line); border-radius:26px; padding:30px 30px 26px; height:690px; display:flex; flex-direction:column; }
+  .way .k { display:flex; align-items:center; gap:18px; }
+  .way .k i { font-style:normal; width:58px; height:58px; border-radius:16px; display:flex; align-items:center; justify-content:center; font-size:28px; font-weight:800; color:#04121F; }
+  .way .k b { font-size:36px; font-weight:800; }
+  .way .d { font-size:24px; color:var(--soft); margin-top:16px; line-height:1.55; min-height:76px; }
+  .way .shot { margin-top:18px; height:228px; border-radius:14px; border:1.5px solid var(--line);
+    background-size:300% auto; background-position:93% 34%; background-repeat:no-repeat; }
+  .steps { margin-top:18px; display:flex; flex-direction:column; gap:12px; }
+  .step { display:flex; gap:14px; align-items:center; font-size:24px; color:var(--text); background:rgba(13,20,38,.8); border:1.5px solid var(--line); border-radius:14px; padding:14px 18px; }
+  .step u { text-decoration:none; flex:none; width:36px; height:36px; border-radius:10px; background:rgba(52,211,153,.18); color:var(--mint); display:flex; align-items:center; justify-content:center; font-weight:800; }
+  .term { margin-top:18px; background:#05080F; border:1.5px solid #1C2740; border-radius:14px; padding:16px 18px; font:20px/1.62 "SF Mono", Menlo, Consolas, monospace; color:#CBD5E1; white-space:pre-wrap; word-break:break-all; flex:1; }
+  .term .c { color:var(--green); } .term .m { color:var(--mute); } .term .r { color:#FCA5A5; } .term .y { color:#FCD34D; }
+  .badge { margin-top:16px; align-self:flex-start; font-size:21px; color:var(--mint); background:rgba(52,211,153,.12); border:1.5px solid rgba(52,211,153,.4); border-radius:999px; padding:8px 18px; }
+
+  /* ---------- 评测 ---------- */
+  .stats { position:absolute; left:140px; right:140px; top:250px; display:grid; grid-template-columns: repeat(3, 1fr); gap:30px; }
+  .stat { background:var(--panel); border:1.5px solid var(--line); border-radius:24px; padding:28px 32px; position:relative; overflow:hidden; height:236px; }
+  .stat::before { content:""; position:absolute; left:0; top:0; right:0; height:4px; background:linear-gradient(90deg, var(--c, #34D399), transparent); }
+  .stat .v { font-size:76px; font-weight:800; color:var(--c, #34D399); line-height:1.05; font-variant-numeric:tabular-nums; }
+  .stat .v small { font-size:34px; font-weight:700; margin-left:8px; color:var(--soft); }
+  .stat .l { font-size:28px; font-weight:750; margin-top:14px; }
+  .stat .n { font-size:21px; color:var(--mute); margin-top:8px; line-height:1.45; }
+  .bound { position:absolute; left:140px; right:140px; top:820px; display:flex; gap:18px; align-items:center; flex-wrap:wrap; padding:22px 30px; border-radius:20px;
+    background:rgba(251,191,36,.08); border:1.5px dashed rgba(251,191,36,.5); font-size:25px; color:#FDE68A; }
+  .bound b { color:#0B1222; background:var(--amber); border-radius:10px; padding:5px 14px; font-size:23px; }
+  .bound span { background:rgba(251,191,36,.12); border-radius:10px; padding:4px 14px; }
+
+  /* ---------- 片尾 ---------- */
+  #close .wrap { position:absolute; left:0; right:0; top:200px; display:flex; flex-direction:column; align-items:center; text-align:center; }
+  #close .slogan { margin-top:64px; font-size:56px; }
+  #close .three { display:flex; gap:26px; margin-top:64px; }
+  #close .three div { font-size:30px; font-weight:700; padding:18px 34px; border-radius:20px; background:var(--panel); border:1.5px solid var(--line); }
+  #close .three div b { color:var(--green); margin-right:10px; }
+</style>
+</head>
+<body>
+
+<section class="card" id="title">
+  <div class="wrap">
+    <div class="brand p" style="animation-delay:.1s">
+      <div class="logo p" style="animation-delay:.15s">盾</div>
+      <div><div class="name">隐盾</div><div class="en">YINDUN · 贴给大模型前先脱敏</div></div>
+    </div>
+    <div class="slogan a" style="animation-delay:.8s">贴给大模型之前，先过一道门</div>
+    <div class="demo a" style="animation-delay:1.6s">客户<s>王建国</s>先生，手机 <s>139 1234 5678</s>　→　客户<b>&lt;客户_1&gt;</b>先生，手机 <b>&lt;手机_1&gt;</b></div>
+    <div class="chips a" style="animation-delay:2.4s">
+      <span class="chip">客户</span><span class="chip">机构</span><span class="chip">手机</span><span class="chip">座机</span><span class="chip">身份证</span>
+      <span class="chip">账号</span><span class="chip">邮箱</span><span class="chip">内网地址</span><span class="chip">密钥</span><span class="chip">金额</span>
+    </div>
+  </div>
+  <div class="foot f" style="animation-delay:2.8s">「智创未来」AI 创新应用大赛 · 个人赛 · 工具赛道　｜　本地运行 · 不联网 · 演示数据均为虚构</div>
+</section>
+
+<section class="card" id="pain">
+  <div class="h a" style="animation-delay:.1s">红线写得清楚，可最顺手的还是<em>「直接贴」</em></div>
+  <div class="redline a" style="animation-delay:.5s"><i>大赛红线</i>严禁将未脱敏的客户身份信息、交易持仓数据、内部财务数据上传至未经许可的公网大模型</div>
+  <div class="paste a" data-line="1" data-frac="0">
+    <div class="bar"><span></span><span></span><span></span>&nbsp;发给公网大模型</div>
+    <div class="body">帮我写段回复：客户<span class="hot" data-line="1" data-frac=".25">王建国</span>先生（手机 <span class="hot" data-line="1" data-frac=".38">139 1234 5678</span>，资金账号 <span class="hot" data-line="1" data-frac=".5">88123456</span>）螺纹空单浮亏 <span class="hot" data-line="1" data-frac=".62">125 万元</span>……<br>
+      日志：jdbc:mysql://<span class="hot" data-line="1" data-frac=".74">trade_ro:Settle2026x</span>@<span class="hot" data-line="1" data-frac=".84">10.20.5.8</span>:3306 超时</div>
+    <div class="send"><b>发送 ▸</b></div>
+  </div>
+  <div class="pains">
+    <div class="pain a" data-line="2" data-frac=".16"><div class="n" style="background:var(--red)">1</div>
+      <div><div class="t">容易漏</div><div class="d">139 1234 5678、+86、6-8-4 分段的证件号；密钥藏在日志和连接串里，人眼一扫就过去了</div></div></div>
+    <div class="pain a" data-line="2" data-frac=".43"><div class="n" style="background:var(--amber)">2</div>
+      <div><div class="t">改完还不回来</div><div class="d">换成「客户 A」「某账号」，回答里谁是谁要自己对；多轮对话编号还会乱</div></div></div>
+    <div class="pain a" data-line="2" data-frac=".7"><div class="n" style="background:var(--violet)">3</div>
+      <div><div class="t">在线工具不放心</div><div class="d">网上的脱敏服务本身就是一次外发；装模型又太重，日常用不起来</div></div></div>
+  </div>
+</section>
+
+<section class="card" id="ways">
+  <div class="h a" style="animation-delay:.1s">三种用法，<em>同一套规则</em></div>
+  <div class="sub a" style="animation-delay:.3s">纯本地 · 只用 Python 标准库做规则引擎 · 网页版另需 Streamlit</div>
+  <div class="ways">
+    <div class="way a" data-line="0" data-frac=".1">
+      <div class="k"><i style="background:linear-gradient(135deg,#6EE7B7,#22D3EE)">网</i><b>网页版</b></div>
+      <div class="d">双击启动；① 贴原文 → 脱敏 → 复制去问 AI；② 贴回答 → 还原。会话映射表多轮一致</div>
+      <div class="shot" style="background-image:url('../shots/S02_redact.png')"></div>
+      <div class="shot" style="background-image:url('../shots/S06_restore.png'); margin-top:14px"></div>
+    </div>
+    <div class="way a" data-line="1" data-frac="0">
+      <div class="k"><i style="background:linear-gradient(135deg,#FCD34D,#FB923C)">贴</i><b>剪贴板一键</b></div>
+      <div class="d">不开网页：复制 → 双击 → 粘贴。只用标准库，不用装依赖</div>
+      <div class="steps">
+        <div class="step"><u>1</u>复制原文</div>
+        <div class="step"><u>2</u>双击「剪贴板脱敏」</div>
+        <div class="step"><u>3</u>粘贴给大模型</div>
+        <div class="step"><u>4</u>复制回答，再双击 → 已还原</div>
+      </div>
+      <div class="term"><span class="m">[隐盾]</span> 已脱敏 2 处（手机 1、客户 1），剪贴板里是脱敏后的文字，直接粘贴给大模型。
+<span class="m">[隐盾]</span> 已还原 2 处，剪贴板里是还原后的文字。</div>
+    </div>
+    <div class="way a" data-line="2" data-frac="0">
+      <div class="k"><i style="background:linear-gradient(135deg,#A78BFA,#4361EE)">令</i><b>命令行 · 嵌入</b></div>
+      <div class="d">整个目录批量脱敏、共用映射表；外发前检查，发现明文退出码为 1</div>
+      <div class="term"><span class="c">$ python cli.py redact 材料 --out 材料_脱敏</span>
+<span class="m">[隐盾] 共 3 个文件，换掉 22 处</span>
+<span class="c">$ python cli.py check 材料</span>
+<span class="r">[隐盾] 检查完成：发现 22 处明文敏感信息</span>
+<span class="c">$ python cli.py check 材料_脱敏</span>
+<span class="m">[隐盾] 检查完成：未发现明文敏感信息</span>
+<span class="y">from yindun.privacy import Session</span></div>
+      <div class="badge f" data-line="2" data-frac=".72">已作为安全模块用在团队作品「需知」</div>
+    </div>
+  </div>
+</section>
+
+<section class="card" id="eval">
+  <div class="h a" style="animation-delay:.1s">效果用数字说话</div>
+  <div class="sub a" style="animation-delay:.3s">评测集全部虚构 · <span style="font-family:Menlo,monospace">python tools/eval.py</span> 可复现</div>
+  <div class="stats">
+    <div class="stat p" data-line="0" data-frac=".2" style="--c:#34D399"><div class="v">100%<small>83/83</small></div><div class="l">敏感项检出</div><div class="n">开发集 48 条：姓名、号码、地址、密钥、金额</div></div>
+    <div class="stat p" data-line="0" data-frac=".62" style="--c:#22D3EE"><div class="v">0<small>/ 16</small></div><div class="l">无敏感文本误改</div><div class="n">行情、交易规则、办公文本一个字不动；业务词误伤 0/72</div></div>
+    <div class="stat p" data-line="1" data-frac=".05" style="--c:#FBBF24"><div class="v">96%<small>24/25</small></div><div class="l">留出集检出</div><div class="n">规则定稿前写好、定稿后只跑一次；漏的一项是「付」姓不在姓氏表</div></div>
+    <div class="stat p" data-line="1" data-frac=".5" style="--c:#A78BFA"><div class="v">100%</div><div class="l">往返一致 · 容错还原</div><div class="n">标签被改成 8 种写法（〈〉【】、转义、全角…）照样还原</div></div>
+    <div class="stat p" data-line="1" data-frac=".78" style="--c:#60A5FA"><div class="v">≈4<small>ms</small></div><div class="l">一万字一次脱敏</div><div class="n">单条平均约 0.03 ms；纯规则，不联网</div></div>
+    <div class="stat p" data-line="1" data-frac=".9" style="--c:#F472B6"><div class="v">37<small>项</small></div><div class="l">自动化测试全部通过</div><div class="n">规则、会话、还原、文件、命令行、网页</div></div>
+  </div>
+  <div class="bound a" data-line="2" data-frac="0"><b>已知边界</b><span>裸姓名</span><span>外号</span><span>复姓</span><span>无前缀机构名</span><span>住址</span>→ 侧边栏自定义名单补上</div>
+</section>
+
+<section class="card" id="close">
+  <div class="wrap">
+    <div class="brand p" style="animation-delay:.1s">
+      <div class="logo p" style="animation-delay:.15s">盾</div>
+      <div><div class="name">隐盾</div><div class="en">YINDUN · 贴给大模型前先脱敏</div></div>
+    </div>
+    <div class="three a" style="animation-delay:.7s"><div><b>●</b>本地运行</div><div><b>●</b>不联网</div><div><b>●</b>即插即用</div></div>
+    <div class="slogan a" style="animation-delay:1.4s">让每一次向大模型提问，第一步就合规</div>
+  </div>
+  <div class="foot f" style="animation-delay:2s">网页 · 剪贴板一键 · 命令行 / 嵌入　｜　「智创未来」AI 创新应用大赛 · 个人赛 · 工具赛道</div>
+</section>
+
+<script>
+  const id = (location.hash || "#title").slice(1);
+  document.getElementById(id).classList.add("on");
+  // record_cards.py 开录后调用 __cue(本场景各句起止)：带 data-line 的元素到点出现
+  window.__cue = (lines) => {
+    document.querySelectorAll(`#${id} [data-line]`).forEach(el => {
+      const k = +el.dataset.line, frac = +(el.dataset.frac || 0);
+      const ln = lines[k]; if (!ln) return;
+      const t = ln.start + (ln.end - ln.start) * frac;
+      if (el.classList.contains("hot")) { setTimeout(() => el.classList.add("go"), t * 1000); return; }   // 标红：到点再加动画类
+      // 出场动画也到点再加：开播后再改 animation-delay，Chrome 会把已开始的动画留成半透明
+      const cls = ["a", "p", "f"].find(c => el.classList.contains(c));
+      if (!cls) return;
+      el.classList.remove(cls);
+      el.style.opacity = "0";
+      setTimeout(() => { el.style.opacity = ""; el.classList.add(cls); }, t * 1000);
+    });
+  };
+</script>
+</body>
+</html>
