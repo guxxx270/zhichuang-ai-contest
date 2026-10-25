@@ -8,7 +8,7 @@
 | `shots/` | 截图 S01～S12（整屏，3200×2000）与 PPT 用的局部图 P*（`scripts/crop_shots.py` 从 S* 裁出） |
 | `deck/` | `build.js` 出 PPT，`md2docx.js` 出 Word，`render.sh` 转 PDF 和逐页预览图，`figs.html` + `shot_figs.py` 出两张示意图 F01 / F02，`make_bg.py` 出幻灯片背景 |
 | `video/` | `narration.json` 旁白，`tts.py` 合成语音与时间轴，`record_cards.py` + `cards.html` 录片头 / 痛点 / 用法 / 评测 / 片尾卡片，`record_app.py` 自动操作隐盾页面录屏，`capture.py` 拍截图，`assemble.py` 合成成片与字幕 |
-| `scripts/` | `build_docs.py` 一键出 Word + PDF，`make_script_md.py` 出旁白稿，`package_code.py` 打包源码，`crop_shots.py` 裁 PPT 用局部图 |
+| `scripts/` | `build_docs.py` 一键出 Word + PDF，`make_script_md.py` 出旁白稿，`package_code.py` 打包源码，`crop_shots.py` 裁 PPT 用局部图，`pack_submission.py` 打提交包 |
 
 ## 一次性准备
 
@@ -72,3 +72,15 @@ python3 scripts/package_code.py <仓库根目录> out/隐盾_源码.zip
 ```
 
 只打包 git 跟踪的文件；`.venv`、缓存、`*.map.json` 映射表一律不在里面。
+
+## 打提交包
+
+这一步不用拷出去，直接在 Synology 里的 `_制作工具` 目录下运行：
+
+```bash
+python3 scripts/pack_submission.py .. ../隐盾_个人赛工具赛道_提交包_草稿v1.zip
+```
+
+把上一级的 PPT（pptx + pdf）、Demo 视频、技术文档（docx + pdf）和源码包装进一个 zip：文件名去掉「_草稿vN」，源码展开成 `04_隐盾_源码_v0.2/` 文件夹，附 `00_材料说明.txt`（内容在 `content/提交包说明.txt`）。字幕、旁白稿、提交清单和本目录不进包。同一份材料有多个草稿版本时取版本号最大的。
+
+打包时会列出 PPT / Word / PDF 里还没补的【待填写】，以及比 pptx / docx 旧的 PDF（改了源文件忘了重新另存）；补完、另存 PDF 后重跑一次即可。
