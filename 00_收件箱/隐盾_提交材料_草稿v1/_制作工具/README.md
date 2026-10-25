@@ -22,7 +22,7 @@ brew install --cask libreoffice && brew install poppler   # 转 PDF、出预览�
 ```
 
 - 录屏用本机 Chrome（Playwright `channel="chrome"`），不需要 `playwright install`。
-- 旁白用 macOS 自带的「婷婷」语音（`say -v Tingting`）。
+- 旁白用微软神经语音「晓晓」（edge-tts，需要联网，只发送旁白文字，旁白里没有真实数据）。合成结果按「语音 + 语速 + 文字」缓存在 `video/tts/_cache`，改哪句只重合成哪句。想换声音改 `narration.json` 的 `voice`（如 `zh-CN-YunxiNeural`）；要完全离线，把 `engine` 改成 `say`、`voice` 改成 `Tingting`（本机合成，声音偏机械）。
 - 隐盾本身：在 `06_方案乙_技术版/Demo/隐盾` 下 `streamlit run app.py --server.port 8520 --server.headless true`（或用任一装了 streamlit>=1.50 的 Python）。录屏与截图都需要一个**刚启动的新会话**，录之前重启一次。
 
 ## 重拍截图与示意图
@@ -62,8 +62,9 @@ LibreOffice 转 PDF 时不刷新目录，所以 `--pdf` 会先转一次，按 PD
 ```
 
 - 隐盾不调模型，录屏全程是真实页面操作；「填入模拟回答」是 `yindun/samples.py` 里手写的一段回答，故意改了几处标签写法，用来演示容错还原。
-- 改了旁白文字要先重跑 `tts.py`，再重录卡片和页面（动作按句子时间轴卡点）。
+- 改了旁白文字要先重跑 `tts.py`，再重录卡片和页面。画面动作按逐词时间卡点：`record_app.py` 里的 `sc.at(第几句, "词")` 和 `cards.html` 里的 `data-at="词"`，改稿时这些词要跟着改（录屏脚本找不到词会直接报错）。字幕也按逐词时间切块，句号、分号处必断。
 - 成片 1920×1080、30fps、H.264 + AAC，字幕烧录在画面里，另出同名 `.srt`。
+- 上一级 `_试听_草稿v1/` 是同一段旁白的几种声音（晓晓、云希、云扬、本地 Kokoro、原来的婷婷），挑声音用，不进提交包。
 
 ## 打包源码
 

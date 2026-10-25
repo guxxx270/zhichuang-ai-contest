@@ -26,24 +26,47 @@ def probe_duration(path: Path) -> float:
 
 
 def chunks(text: str) -> list[str]:
-    """按标点切成不超过 MAX_CHARS 的字幕块（中文无空格，libass 不会自动换行）。"""
-    parts = re.split(r"(?<=[，。；：！？、])", text)
-    out, cur = [], ""
-    for p in parts:
-        if not p:
-            continue
-        if len(cur) + len(p) <= MAX_CHARS:
-            cur += p
-        else:
-            if cur:
-                out.append(cur)
-            while len(p) > MAX_CHARS:
-                out.append(p[:MAX_CHARS])
-                p = p[MAX_CHARS:]
-            cur = p
-    if cur:
-        out.append(cur)
-    return [c.strip("，、；： ") or c for c in out]
+    """切成不超过 MAX_CHARS 的字幕块（中文无空格，libass 不会自动换行）：句号、分号处必断，句内按逗号凑满一行；块尾标点去掉。"""
+    out = []
+    for sent in re.split(r"(?<=[。；！？])", text):
+        cur = ""
+        for p in re.split(r"(?<=[，、：])", sent):
+            if not p:
+                continue
+            if len(cur) + len(p) <= MAX_CHARS:
+                cur += p
+            else:
+                if cur:
+                    out.append(cur)
+                while len(p) > MAX_CHARS:
+                    out.append(p[:MAX_CHARS])
+                    p = p[MAX_CHARS:]
+                cur = p
+        if cur:
+            out.append(cur)
+    return [c.rstrip("，、；：。 ") or c for c in out if c.strip()]
+
+
+def timed_chunks(line: dict) -> list[tuple[float, float, str]]:
+    """一句旁白 → [(起, 止, 字幕块)]。有逐词时间：每块从它第一个词念出时开始；没有：按字数比例分。"""
+    pieces = chunks(line["text"])
+    words = line.get("words")
+    if words:
+        starts, pos = [], 0
+        for p in pieces:
+            i = line["text"].find(p, pos)
+            pos = i + len(p)
+            ws = [w for w in words if w[2] <= i]
+            starts.append(ws[-1][0] if ws else line["start"])
+        starts[0] = line["start"]
+        return list(zip(starts, starts[1:] + [line["end"]], pieces))
+    out, t = [], line["start"]
+    total = sum(len(p) for p in pieces) or 1
+    for p in pieces:
+        d = (line["end"] - line["start"]) * len(p) / total
+        out.append((t, t + d, p))
+        t += d
+    return out
 
 
 def ts_ass(t: float) -> str:
@@ -89,14 +112,8 @@ def main() -> None:
                         "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2", str(seg)], check=True)
         seg_files.append(seg)
         for line in timeline[sid]["lines"]:
-            pieces = chunks(line["text"])
-            dur = line["end"] - line["start"]
-            total = sum(len(p) for p in pieces) or 1
-            t = offset + line["start"]
-            for p in pieces:
-                d = dur * len(p) / total
-                events.append((t, t + d, p))
-                t += d
+            for a, b, p in timed_chunks(line):
+                events.append((offset + a, offset + b, p))
         print(f"{sid}: video {d_v:.1f}s / audio {d_a:.1f}s -> {L:.1f}s @ {offset:.1f}s")
         offset += L
 

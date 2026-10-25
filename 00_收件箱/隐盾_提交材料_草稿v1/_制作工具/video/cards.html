@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <title>隐盾 · 视频卡片</title>
 <!-- 1920×1080 动画卡片：#title / #pain / #ways / #eval / #close。
-     带 data-line 的元素由 record_cards.py 按旁白时间轴设动画延迟：第 k 句开始时出现（data-frac 指句内的位置 0～1）。 -->
+     带 data-line 的元素由 record_cards.py 按旁白时间轴设动画延迟：第 k 句开始时出现（data-frac 指句内的位置 0～1，data-at 指念到某个词时）。 -->
 <style>
   :root { --bg:#070B16; --panel:rgba(17,26,46,.80); --line:#22304F; --text:#E6ECF8; --soft:#C7D2E8; --mute:#8A97B4;
           --green:#34D399; --mint:#6EE7B7; --cyan:#22D3EE; --blue:#4361EE; --amber:#FBBF24; --red:#F87171; --violet:#A78BFA; }
@@ -135,11 +135,11 @@
     <div class="send"><b>发送 ▸</b></div>
   </div>
   <div class="pains">
-    <div class="pain a" data-line="2" data-frac=".16"><div class="n" style="background:var(--red)">1</div>
+    <div class="pain a" data-line="2" data-at="号码写法"><div class="n" style="background:var(--red)">1</div>
       <div><div class="t">容易漏</div><div class="d">139 1234 5678、+86、6-8-4 分段的证件号；密钥藏在日志和连接串里，人眼一扫就过去了</div></div></div>
-    <div class="pain a" data-line="2" data-frac=".43"><div class="n" style="background:var(--amber)">2</div>
+    <div class="pain a" data-line="2" data-at="改完"><div class="n" style="background:var(--amber)">2</div>
       <div><div class="t">改完还不回来</div><div class="d">换成「客户 A」「某账号」，回答里谁是谁要自己对；多轮对话编号还会乱</div></div></div>
-    <div class="pain a" data-line="2" data-frac=".7"><div class="n" style="background:var(--violet)">3</div>
+    <div class="pain a" data-line="2" data-at="网上"><div class="n" style="background:var(--violet)">3</div>
       <div><div class="t">在线工具不放心</div><div class="d">网上的脱敏服务本身就是一次外发；装模型又太重，日常用不起来</div></div></div>
   </div>
 </section>
@@ -176,7 +176,7 @@
 <span class="c">$ python cli.py check 材料_脱敏</span>
 <span class="m">[隐盾] 检查完成：未发现明文敏感信息</span>
 <span class="y">from yindun.privacy import Session</span></div>
-      <div class="badge f" data-line="2" data-frac=".72">已作为安全模块用在团队作品「需知」</div>
+      <div class="badge f" data-line="2" data-at="这套规则">已作为安全模块用在团队作品「需知」</div>
     </div>
   </div>
 </section>
@@ -185,12 +185,12 @@
   <div class="h a" style="animation-delay:.1s">效果用数字说话</div>
   <div class="sub a" style="animation-delay:.3s">评测集全部虚构 · <span style="font-family:Menlo,monospace">python tools/eval.py</span> 可复现</div>
   <div class="stats">
-    <div class="stat p" data-line="0" data-frac=".2" style="--c:#34D399"><div class="v">100%<small>83/83</small></div><div class="l">敏感项检出</div><div class="n">开发集 48 条：姓名、号码、地址、密钥、金额</div></div>
-    <div class="stat p" data-line="0" data-frac=".62" style="--c:#22D3EE"><div class="v">0<small>/ 16</small></div><div class="l">无敏感文本误改</div><div class="n">行情、交易规则、办公文本一个字不动；业务词误伤 0/72</div></div>
-    <div class="stat p" data-line="1" data-frac=".05" style="--c:#FBBF24"><div class="v">96%<small>24/25</small></div><div class="l">留出集检出</div><div class="n">规则定稿前写好、定稿后只跑一次；漏的一项是「付」姓不在姓氏表</div></div>
-    <div class="stat p" data-line="1" data-frac=".5" style="--c:#A78BFA"><div class="v">100%</div><div class="l">往返一致 · 容错还原</div><div class="n">标签被改成 8 种写法（〈〉【】、转义、全角…）照样还原</div></div>
-    <div class="stat p" data-line="1" data-frac=".78" style="--c:#60A5FA"><div class="v">≈4<small>ms</small></div><div class="l">一万字一次脱敏</div><div class="n">单条平均约 0.03 ms；纯规则，不联网</div></div>
-    <div class="stat p" data-line="1" data-frac=".9" style="--c:#F472B6"><div class="v">37<small>项</small></div><div class="l">自动化测试全部通过</div><div class="n">规则、会话、还原、文件、命令行、网页</div></div>
+    <div class="stat p" data-line="0" data-at="八十三" style="--c:#34D399"><div class="v">100%<small>83/83</small></div><div class="l">敏感项检出</div><div class="n">开发集 48 条：姓名、号码、地址、密钥、金额</div></div>
+    <div class="stat p" data-line="0" data-at="十六条" style="--c:#22D3EE"><div class="v">0<small>/ 16</small></div><div class="l">无敏感文本误改</div><div class="n">行情、交易规则、办公文本一个字不动；业务词误伤 0/72</div></div>
+    <div class="stat p" data-line="1" data-at="检出率" style="--c:#FBBF24"><div class="v">96%<small>24/25</small></div><div class="l">留出集检出</div><div class="n">规则定稿前写好、定稿后只跑一次；漏的一项是「付」姓不在姓氏表</div></div>
+    <div class="stat p" data-line="1" data-at="脱敏再还原" style="--c:#A78BFA"><div class="v">100%</div><div class="l">往返一致 · 容错还原</div><div class="n">标签被改成 8 种写法（〈〉【】、转义、全角…）照样还原</div></div>
+    <div class="stat p" data-line="1" data-at="一万字" style="--c:#60A5FA"><div class="v">≈4<small>ms</small></div><div class="l">一万字一次脱敏</div><div class="n">单条平均约 0.03 ms；纯规则，不联网</div></div>
+    <div class="stat p" data-line="1" data-at="几毫秒" style="--c:#F472B6"><div class="v">37<small>项</small></div><div class="l">自动化测试全部通过</div><div class="n">规则、会话、还原、文件、命令行、网页</div></div>
   </div>
   <div class="bound a" data-line="2" data-frac="0"><b>已知边界</b><span>裸姓名</span><span>外号</span><span>复姓</span><span>无前缀机构名</span><span>住址</span>→ 侧边栏自定义名单补上</div>
 </section>
@@ -211,11 +211,18 @@
   const id = (location.hash || "#title").slice(1);
   document.getElementById(id).classList.add("on");
   // record_cards.py 开录后调用 __cue(本场景各句起止)：带 data-line 的元素到点出现
+  // data-at：念到这个词时出现（timeline 里有逐词时间就按词，没有按字数比例估）
+  const wordTime = (ln, word) => {
+    const i = ln.text.indexOf(word);
+    if (i < 0) return ln.start;
+    const ws = (ln.words || []).filter(w => w[2] <= i);
+    return ws.length ? ws[ws.length - 1][0] : ln.start + (ln.end - ln.start) * i / ln.text.length;
+  };
   window.__cue = (lines) => {
     document.querySelectorAll(`#${id} [data-line]`).forEach(el => {
       const k = +el.dataset.line, frac = +(el.dataset.frac || 0);
       const ln = lines[k]; if (!ln) return;
-      const t = ln.start + (ln.end - ln.start) * frac;
+      const t = el.dataset.at ? wordTime(ln, el.dataset.at) : ln.start + (ln.end - ln.start) * frac;
       if (el.classList.contains("hot")) { setTimeout(() => el.classList.add("go"), t * 1000); return; }   // 标红：到点再加动画类
       // 出场动画也到点再加：开播后再改 animation-delay，Chrome 会把已开始的动画留成半透明
       const cls = ["a", "p", "f"].find(c => el.classList.contains(c));

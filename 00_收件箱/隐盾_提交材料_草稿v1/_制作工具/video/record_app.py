@@ -42,6 +42,14 @@ def wait_idle(pg, timeout_s: float = 15.0) -> None:
         pg.wait_for_timeout(250)
 
 
+def word_time(ln: dict, word: str) -> float:
+    i = ln["text"].find(word)
+    if i < 0:
+        raise ValueError(f"旁白里找不到「{word}」：{ln['text']}")
+    ws = [w for w in ln.get("words", []) if w[2] <= i]
+    return ws[-1][0] if ws else ln["start"] + (ln["end"] - ln["start"]) * i / len(ln["text"])
+
+
 class Scene:
     def __init__(self, rec: Recorder, sid: str):
         self.rec, self.sid = rec, sid
@@ -54,6 +62,10 @@ class Scene:
         """等到第 i 句旁白的 frac 处（0 = 句首）。"""
         ln = self.lines[i]
         self.rec.wait_until(self.t0 + ln["start"] + (ln["end"] - ln["start"]) * frac)
+
+    def at(self, i: int, word: str, shift: float = 0.0) -> None:
+        """等到第 i 句旁白念到 word（有逐词时间就按词卡点，没有按字数比例估），shift 可提前 / 推后。"""
+        self.rec.wait_until(self.t0 + word_time(self.lines[i], word) + shift)
 
     def end(self, extra: float = 0.3) -> tuple[float, float]:
         self.rec.wait_until(self.t0 + self.duration + extra)
@@ -104,9 +116,9 @@ def main() -> None:
         sc = Scene(rec, "s02_open")
         sc.cue(0, 0.15)
         rec.highlight(pg.locator(".yd-chips").first, "本机运行 · 不联网", 3.2)
-        sc.cue(1, 0.3)
+        sc.at(1, "点一下", -1.2)
         rec.move_to(*_center(key("ex_0")), ms=900)
-        sc.cue(1, 0.62)
+        sc.at(1, "点一下")
         press("ex_0")
         marks["s02_open"] = sc.end()
 
@@ -115,7 +127,7 @@ def main() -> None:
         reinstall()
         sc.cue(0, 0.0)
         hl_union('[data-testid="stMain"] [data-testid="stMetric"]', "9 处 · 7 类 · 不到 1 毫秒", 3.0)
-        sc.cue(0, 0.35)
+        sc.at(0, "客户、手机")
         rec.highlight(pg.locator(".yd-box").first, "带类型的语义标签", 6.0)
         sc.cue(1, 0.05)
         rec.move_to(*_center(pg.locator(".yd-tag").first), ms=900)
@@ -148,7 +160,7 @@ def main() -> None:
         rec.click(pg.get_by_role("tab", name="② 还原 · 贴大模型的回答"), ms=800)
         wait_idle(pg)
         reinstall()
-        sc.cue(0, 0.2)
+        sc.at(0, "这是一段")
         press("btn_fill")
         reinstall()
         rec.highlight(pg.locator(".st-key-ans textarea").first, "模拟回答：〈〉【】、Markdown 转义、少了尖括号", 5.0)
@@ -161,11 +173,11 @@ def main() -> None:
 
         # ---------- s06 第二轮 ----------
         sc = Scene(rec, "s06_round2")
-        sc.cue(0, 0.15)
+        sc.at(0, "回到第一步", -0.4)
         rec.click(pg.get_by_role("tab", name="① 脱敏 · 贴原文"), ms=800)
         wait_idle(pg)
         reinstall()
-        sc.cue(0, 0.5)
+        sc.at(0, "点第二轮")
         press("ex_2")
         reinstall()
         sc.cue(1, 0.0)
@@ -177,10 +189,10 @@ def main() -> None:
 
         # ---------- s07 运维日志 ----------
         sc = Scene(rec, "s07_ops")
-        sc.cue(0, 0.3)
+        sc.at(0, "开个新会话")
         press("btn_new")
         reinstall()
-        sc.cue(0, 0.62)
+        sc.at(0, "点系统告警")
         press("ex_1")
         reinstall()
         sc.cue(1, 0.0)
@@ -200,10 +212,10 @@ def main() -> None:
         press("btn_redact", ms=500)
         reinstall()
         rec.highlight(pg.locator('[data-testid="stMain"] [data-testid="stAlertContainer"]').first, "没有上下文的 8 位数字：只提示，不自作主张", 3.4)
-        sc.cue(1, 0.66)
+        sc.at(1, "你确认一下", -0.3)
         press("btn_sus")
         reinstall()
-        rec.highlight(pg.locator(".yd-box").first, "确认后一起脱敏", 2.4)
+        rec.highlight(pg.locator(".yd-box").first, "确认后一起脱敏", 1.6)
         marks["s08_suspect"] = sc.end()
 
         # ---------- s09 侧边栏 ----------

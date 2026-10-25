@@ -31,6 +31,14 @@ SCENES = {
 }
 
 
+VOICES = {
+    "zh-CN-XiaoxiaoNeural": "微软神经语音「晓晓」，edge-tts 合成",
+    "zh-CN-YunxiNeural": "微软神经语音「云希」，edge-tts 合成",
+    "zh-CN-YunyangNeural": "微软神经语音「云扬」，edge-tts 合成",
+    "Tingting": "macOS「婷婷」",
+}
+
+
 def dur(p: Path) -> float:
     r = subprocess.run([FFMPEG, "-hide_banner", "-i", str(p)], capture_output=True, text=True)
     m = re.search(r"Duration: (\d+):(\d+):([\d.]+)", r.stderr)
@@ -55,10 +63,12 @@ def main() -> None:
         rows.append((mmss(t), mmss(t + length), SCENES.get(sid, sid), "".join(sc["lines"])))
         t += length
     total = dur(Path(sys.argv[5])) if len(sys.argv) > 5 else t
+    ver = re.search(r"_草稿v(\d+)", Path(sys.argv[4]).name)
+    voice = VOICES.get(cfg.get("voice", ""), cfg.get("voice", ""))
     out = [
-        "# 隐盾 · Demo 视频旁白稿（草稿 v1）",
+        f"# 隐盾 · Demo 视频旁白稿（草稿 v{ver.group(1) if ver else 1}）",
         "",
-        f"> 成片 {mmss(total)}，1920×1080 · 30fps · H.264 + AAC，字幕已烧录（同名 .srt 另附）。旁白为本机合成语音（macOS「婷婷」），"
+        f"> 成片 {mmss(total)}，1920×1080 · 30fps · H.264 + AAC，字幕已烧录（同名 .srt 另附）。旁白为合成语音（{voice}），"
         "需要真人配音时按下表时间轴照念即可；演示数据全部虚构（yindun/samples.py）。",
         "> 录制环境：本机启动隐盾 v0.2，Playwright 驱动本机 Chrome 按旁白时间轴自动操作页面，不调任何模型。「模拟回答」是手写的一段回答，故意改了几处标签写法，用来演示容错还原。重录方法见 `_制作工具/README.md`。",
         "",
