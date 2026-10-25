@@ -31,6 +31,8 @@ SCENES = {
     "s12_shield": "样例③（邮件夹带客户姓名、资金账号、手机号）→ 隐盾：脱敏 3 处、沙箱策略表",
     "s13_close": "片尾：四个入口、一条流水线、一本账；换三张表即可复制；先问清，再开工",
 }
+VOICE_NAMES = {"zh-CN-XiaoxiaoNeural": "晓晓", "zh-CN-XiaoyiNeural": "晓伊", "zh-CN-YunxiNeural": "云希",
+               "zh-CN-YunjianNeural": "云健", "zh-CN-YunyangNeural": "云扬", "zh-CN-YunxiaNeural": "云夏"}
 
 
 def dur(p: Path) -> float:
@@ -57,10 +59,16 @@ def main() -> None:
         rows.append((mmss(t), mmss(t + length), SCENES.get(sid, sid), "".join(sc["lines"])))
         t += length
     total = dur(Path(sys.argv[5])) if len(sys.argv) > 5 else t
+    # tts_neural.py 的时间轴每句带 rate；tts.py 的没有
+    if any("rate" in ln for v in tl.values() for ln in v["lines"]):
+        name = cfg.get("neural_voice", "zh-CN-XiaoxiaoNeural")
+        voice = f"微软神经语音「{VOICE_NAMES.get(name, name)}」（edge-tts 合成）"
+    else:
+        voice = "本机合成语音（macOS「婷婷」）"
     out = [
         "# 需知 · Demo 视频旁白稿（草稿 v1）",
         "",
-        f"> 成片 {mmss(total)}，1920×1080 · 30fps · H.264 + AAC，字幕已烧录（同名 .srt 另附）。旁白为本机合成语音（macOS「婷婷」），"
+        f"> 成片 {mmss(total)}，1920×1080 · 30fps · H.264 + AAC，字幕已烧录（同名 .srt 另附）。旁白为{voice}，"
         "需要真人配音时按下表时间轴照念即可；演示所用需求、系统与数据全部虚构。",
         "> 录制环境：本机启动需知，模型按 `.env` 配置在后台增强；等待模型的时段已剪去。重录方法见提交清单。",
         "",

@@ -7,7 +7,7 @@
 | `content/PPT内容.json` | PPT 文案（每页标题、要点、配图、讲稿备注） |
 | `shots/` | 21 张 Demo 截图 S01～S21（PPT 与 Word 共用） |
 | `deck/` | `build.js` 出 PPT，`md2docx.js` 出 Word，`render.sh` 转 PDF 和逐页预览图，`figs.html` 是两张配图 F01/F02 的源文件 |
-| `video/` | `final_run.sh` 自动操作需知页面录屏，`narration.json` 旁白，`tts.py` 合成语音，`assemble.py` 合成成片与字幕 |
+| `video/` | `final_run.sh` 自动操作需知页面录屏，`narration.json` 旁白，`tts_neural.py` 合成旁白（微软神经语音，现用；`tts.py` 是早先的 macOS「婷婷」版），`assemble.py` 合成成片与字幕 |
 | `scripts/` | `build_docs.py` 一键出 Word + PDF，`make_script_md.py` 出旁白稿，`package_code.py` 打包源码，`facts.py` 统计代码与测试数字，`pack_submission.py` 打提交包 |
 
 ## 一次性准备
@@ -23,7 +23,7 @@ brew install --cask libreoffice && brew install poppler   # 转 PDF、出预览�
 ```
 
 - 录屏用本机 Chrome（Playwright `channel="chrome"`），不需要 `playwright install`。
-- 旁白用 macOS 自带的「婷婷」语音（`say -v Tingting`）。
+- 旁白用微软 Edge 的神经语音「晓晓」（`video/tts_neural.py`，edge-tts，要联网，只发出旁白文字）；断网时可退回 `video/tts.py`（macOS「婷婷」，听起来一字一顿）。
 
 ## 重出 PPT
 
@@ -48,7 +48,7 @@ LibreOffice 转 PDF 时不刷新目录，所以 `--pdf` 会先转一次，按 PD
 视频里的「问清」「估量」两页会显示模型 ID。要换成公司 AI 平台的模型，先改需知目录 `.env` 里的网关和模型，再按顺序跑：
 
 ```bash
-.venv/bin/python video/tts.py video/narration.json video/tts      # 旁白语音 + 时间轴（录制按它控制每段时长）
+.venv/bin/python video/tts_neural.py video/narration.json video/tts   # 旁白语音 + 时间轴（录制按它控制每段时长）
 .venv/bin/python video/record_cards.py                             # 片头、痛点、片尾三张卡片
 bash video/final_run.sh --model record                             # 自动操作页面录 s02～s12，约 15 分钟
 .venv/bin/python video/assemble.py video/narration.json video/tts video/clips out/需知_Demo视频.mp4
@@ -59,6 +59,21 @@ bash video/final_run.sh --model record                             # 自动操�
 - 等模型的时段录制时自动暂停，成片里不会出现空等；录完会把模型来源切到没 Key 的预设，后面几段只跑规则。
 - 不带 `--model` 就是纯规则演示（不调模型，页面上没有模型 ID）。
 - 成片 1920×1080、30fps、H.264 + AAC，字幕烧录在画面里，另出同名 `.srt`。
+
+## 只换旁白（画面不重录）
+
+`video/clips/` 里是现在这版成片用的 15 段录屏（不带字幕），`video/tts/timeline.json` 是录屏时卡点用的时间轴（都只在 Synology，不进 git）。换声音、改旁白措辞时不用重录：
+
+```bash
+.venv/bin/python video/tts_neural.py video/narration.json video/tts_neural --fit video/tts/timeline.json
+.venv/bin/python video/assemble.py video/narration.json video/tts_neural video/clips out/需知_Demo视频.mp4
+.venv/bin/python scripts/make_script_md.py video/narration.json video/tts_neural/timeline.json video/clips out/旁白稿.md out/需知_Demo视频.mp4
+```
+
+- 每句仍从原来的起点开始、场景时长不变，画面和旁白照样对得上；哪句放不下，只把这一句调快（最多再快 20%），脚本会打印出来。合成结果缓存在 `video/tts_neural/_cache`，改哪句只重合成哪句。
+- 字幕按逐词时间出现（edge-tts 的 WordBoundary），句号、分号处断行，与隐盾的视频同一套规则。
+- 换声音改 `narration.json` 的 `neural_voice`（女声晓晓 `zh-CN-XiaoxiaoNeural`、晓伊 `zh-CN-XiaoyiNeural`，男声云希 `zh-CN-YunxiNeural`），语速改 `neural_rate`（百分比，现为 +5）。改了措辞，字幕跟着变。
+- 真人配音：按旁白稿的时间轴逐场景录成 `{场景}.wav`（48 kHz 单声道），连同 `timeline.json` 放进一个目录，把它当第二个参数交给 `assemble.py`。
 
 ## 重拍截图
 
