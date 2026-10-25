@@ -1,0 +1,39 @@
+# 隐盾 · 暗色主题（与团队作品「需知」同一套底色，主色换成盾牌绿）
+# 字体只用系统字体：会场网络可能打不开外链字体。
+
+[theme]
+base = "dark"
+primaryColor = "#059669"               # 盾牌绿：按钮、选中态（白字对比度 3.8，按钮另用渐变加深）
+backgroundColor = "#070B16"
+secondaryBackgroundColor = "#111A2E"
+codeBackgroundColor = "#0C1324"
+textColor = "#E6ECF8"
+linkColor = "#34D399"
+borderColor = "#22304F"
+showWidgetBorder = true
+baseRadius = "10px"
+buttonRadius = "10px"
+font = "sans-serif"
+codeFont = "monospace"
+baseFontSize = 15
+headingFontWeights = [700, 650, 600, 600, 600, 600]
+blueColor = "#60A5FA"
+greenColor = "#34D399"
+redColor = "#F87171"
+orangeColor = "#FB923C"
+yellowColor = "#FBBF24"
+violetColor = "#A78BFA"
+grayColor = "#8A97B4"
+dataframeBorderColor = "#22304F"
+dataframeHeaderBackgroundColor = "#141F38"
+
+[server]
+# 只在本机监听：映射表里是原文，不给局域网里的其他人打开
+address = "127.0.0.1"
+maxUploadSize = 5
+
+[browser]
+gatherUsageStats = false
+
+[client]
+toolbarMode = "minimal"
