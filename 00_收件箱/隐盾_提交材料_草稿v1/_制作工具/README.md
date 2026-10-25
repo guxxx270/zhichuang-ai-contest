@@ -49,7 +49,7 @@ bash deck/render.sh out/隐盾_方案PPT.pptx out/ppt 80                     # �
 .venv/bin/python scripts/build_docs.py ../03_隐盾_工具说明与技术方案_草稿v1.md out/隐盾_工具说明与技术方案.docx "隐盾 · 工具说明与技术方案" --pdf
 ```
 
-Word 打开时会提示更新域，点「是」，目录页码才会刷新。
+LibreOffice 转 PDF 时不刷新目录，所以 `--pdf` 会先转一次，按 PDF 页脚把各标题所在页写进 Word 目录，再转一次：PDF 和 Word 的目录都带页码。Word 打开时仍会提示更新域，点「是」按 Word 自己的排版刷新。
 
 ## 重录 Demo 视频
 

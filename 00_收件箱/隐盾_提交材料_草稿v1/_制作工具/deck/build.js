@@ -601,6 +601,7 @@ async function main() {
   pres.author = "隐盾";
   pres.company = "隐盾";
   pres.title = "隐盾 · 贴给大模型前先脱敏 —— 个人赛工具赛道方案";
+  pres.subject = "「智创未来」首届 AI 创新应用大赛 · 个人赛 · 工具赛道";   // 不写就是 pptxgenjs 默认的「PptxGenJS Presentation」，PDF 属性里也看得到
   pres.theme = { headFontFace: FONT, bodyFontFace: FONT };
   const footer = { text: "隐盾 · 贴给大模型前先脱敏", options: { x: MX, y: 7.06, w: 6, h: 0.3, fontFace: FONT, fontSize: 10, color: C.dim } };
   pres.defineSlideMaster({ title: "XZ_COVER", background: { path: path.join(ASSETS, "bg_title.png") } });
