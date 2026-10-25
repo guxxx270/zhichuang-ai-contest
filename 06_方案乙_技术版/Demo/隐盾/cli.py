@@ -17,6 +17,7 @@ import argparse
 import json
 import os
 import platform
+import re
 import subprocess
 import sys
 import time
@@ -26,6 +27,7 @@ from yindun.files import SUFFIXES, read_path
 from yindun.privacy import KINDS, PROMPT_HINT, Redactor, Session, restore_detail, suspects
 
 CLIP_MAP = Path.home() / ".yindun" / "clip.map.json"
+_LABEL = re.compile(r"<[^\s<>_]{1,8}_\d+>")
 
 
 def _lines(path: str | None) -> list[str]:
@@ -80,7 +82,7 @@ def cmd_redact(a: argparse.Namespace) -> int:
     elif src.is_dir():
         out_dir = Path(a.out) if a.out else src.with_name(src.name + "_脱敏")
         total: dict[str, int] = {}
-        files = _files(src)
+        files, hits = _files(src), 0
         for f in files:
             r = session.redact(read_path(f))
             dest = (out_dir / f.relative_to(src)).with_suffix(".txt" if f.suffix.lower() == ".docx" else f.suffix)
@@ -88,9 +90,11 @@ def cmd_redact(a: argparse.Namespace) -> int:
             dest.write_text((PROMPT_HINT + "\n\n" if a.hint else "") + r.text, encoding="utf-8")
             for k, v in r.counts.items():
                 total[k] = total.get(k, 0) + v
-            print(f"[隐盾] {f.relative_to(src)} → {dest}：{r.total} 处", file=sys.stderr)
+            n = len(_LABEL.findall(r.text))
+            hits += n
+            print(f"[隐盾] {f.relative_to(src)} → {dest}：{n} 处", file=sys.stderr)
         map_path = Path(a.map) if a.map else out_dir / "隐盾映射表.map.json"
-        print(f"[隐盾] 共 {len(files)} 个文件", file=sys.stderr)
+        print(f"[隐盾] 共 {len(files)} 个文件，换掉 {hits} 处", file=sys.stderr)
     else:
         r = session.redact(read_path(src))
         text = (PROMPT_HINT + "\n\n" if a.hint else "") + r.text
@@ -103,7 +107,7 @@ def cmd_redact(a: argparse.Namespace) -> int:
     ms = (time.perf_counter() - t0) * 1000
     if map_path:
         _save_map(map_path, session.mapping)
-    print(f"\n[隐盾] 脱敏 {sum(total.values())} 处（{_summary(total)}），用时 {ms:.1f} ms"
+    print(f"\n[隐盾] 敏感项 {sum(total.values())} 个（{_summary(total)}），用时 {ms:.1f} ms"
           + (f"；映射表 → {map_path}（含原文，只留本机）" if map_path else "；管道模式未存映射表，需要还原请加 --map"), file=sys.stderr)
     return 0
 

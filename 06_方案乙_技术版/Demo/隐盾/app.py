@@ -52,6 +52,7 @@ header[data-testid="stHeader"] { background: transparent; }
 .yd-hit { background:rgba(248,113,113,.16); color:#FCA5A5; border-bottom:2px solid #F87171; border-radius:3px; padding:0 2px; }
 .yd-back { background:rgba(34,211,238,.14); color:#9BE7F7; border-bottom:2px solid #22D3EE; border-radius:3px; padding:0 2px; }
 .yd-bad { background:rgba(251,191,36,.16); color:#FCD34D; border:1px dashed #FBBF24; border-radius:6px; padding:0 4px; }
+.yd-tag, .yd-hit, .yd-back, .yd-bad { word-break:keep-all; }   /* 姓名、号码不在中间折行；超长令牌仍按 overflow-wrap 断开 */
 .yd-cap { color:#8A97B4; font-size:12.5px; margin:2px 0 6px; }
 .yd-foot { color:#5B6785; font-size:12px; margin-top:14px; }
 [data-testid="stBaseButton-primary"] { background:linear-gradient(120deg,#059669,#0D9488 50%,#0891B2) !important; border:0 !important;
@@ -77,6 +78,7 @@ ss.setdefault("ans", "")
 ss.setdefault("kinds", list(KINDS))
 ss.setdefault("hint", True)
 ss.setdefault("example", None)
+ss.setdefault("view", "脱敏结果")    # 结果区视图：脱敏结果 / 原文对照 / 本次映射
 
 
 def _lines(key: str) -> list[str]:
@@ -101,6 +103,7 @@ def run_redact() -> None:
     ss.mapping = session.mapping
     ss.rounds += 1
     ss.last = {"src": src, "res": res, "ms": ms, "new": len(ss.mapping) - before, "sus": suspects(res.text)}
+    ss.view = "脱敏结果"   # 新结果先看标签
 
 
 def load_example(name: str) -> None:
@@ -188,7 +191,7 @@ with st.sidebar:
                            file_name=f"隐盾映射表_{datetime.now():%Y%m%d_%H%M}.map.json", mime="application/json",
                            icon=":material/download:", disabled=not ss.mapping,
                            help="映射表里是原文，只存本机，不要外发。隔天还原时在「② 还原」里载入。")
-        st.button("新会话", on_click=new_session, icon=":material/restart_alt:", help="清空映射表、原文与回答，开新话题")
+        st.button("新会话", on_click=new_session, icon=":material/restart_alt:", help="清空映射表、原文与回答，开新话题", key="btn_new")
     st.divider()
     st.subheader("自定义名单", anchor=False)
     st.text_area("客户 / 员工姓名（一行一个）", key="names", height=80, placeholder="张三\n李四",
@@ -199,7 +202,7 @@ with st.sidebar:
     st.divider()
     st.pills("脱敏类型", KINDS, selection_mode="multi", key="kinds",
              help="默认全开。要让模型算比例、看金额时，可以临时关掉「金额」")
-    st.toggle("脱敏文本前加一句「请原样保留标签」", key="hint",
+    st.toggle("加一句「请原样保留标签」", key="hint",
               help="提醒模型别改写 <客户_1> 这类标签；就算改了写法，② 还原也认得")
 
 # ---------- 品牌区 ----------
@@ -243,8 +246,7 @@ with tab1:
                 st.metric("会话映射", f"{len(ss.mapping)} 条", delta=f"+{last['new']} 新增" if ss.rounds > 1 else None,
                           delta_color="off")
                 st.metric("用时", f"{last['ms']:.1f} ms")
-            view = st.segmented_control("查看", ["脱敏结果", "原文对照", "本次映射"], default="脱敏结果", key="view",
-                                        label_visibility="collapsed")
+            view = st.segmented_control("查看", ["脱敏结果", "原文对照", "本次映射"], key="view", label_visibility="collapsed")
             if view == "原文对照":
                 st.html('<div class="yd-cap">原文里标红的内容，发出去之前已换成标签（鼠标停留可看对应标签）</div>'
                         f'<div class="yd-box">{source_html(res)}</div>')
