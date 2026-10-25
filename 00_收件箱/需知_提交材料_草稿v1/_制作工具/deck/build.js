@@ -579,6 +579,7 @@ async function main() {
   pres.author = "需知团队";
   pres.company = "需知";
   pres.title = "需知 · 需求分析智能体 —— 团队赛方案";
+  pres.subject = "「智创未来」首届 AI 创新应用大赛 · 团队赛";   // 不写就是 pptxgenjs 默认的「PptxGenJS Presentation」，PDF 属性里也看得到
   pres.theme = { headFontFace: FONT, bodyFontFace: FONT };
   const footer = { text: "需知 · 需求分析智能体", options: { x: MX, y: 7.06, w: 6, h: 0.3, fontFace: FONT, fontSize: 10, color: C.dim } };
   pres.defineSlideMaster({ title: "XZ_COVER", background: { path: path.join(ASSETS, "bg_title.png") } });

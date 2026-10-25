@@ -8,7 +8,7 @@
 | `shots/` | 21 张 Demo 截图 S01～S21（PPT 与 Word 共用） |
 | `deck/` | `build.js` 出 PPT，`md2docx.js` 出 Word，`render.sh` 转 PDF 和逐页预览图，`figs.html` 是两张配图 F01/F02 的源文件 |
 | `video/` | `final_run.sh` 自动操作需知页面录屏，`narration.json` 旁白，`tts.py` 合成语音，`assemble.py` 合成成片与字幕 |
-| `scripts/` | `build_docs.py` 一键出 Word + PDF，`make_script_md.py` 出旁白稿，`package_code.py` 打包源码，`facts.py` 统计代码与测试数字 |
+| `scripts/` | `build_docs.py` 一键出 Word + PDF，`make_script_md.py` 出旁白稿，`package_code.py` 打包源码，`facts.py` 统计代码与测试数字，`pack_submission.py` 打提交包 |
 
 ## 一次性准备
 
@@ -41,7 +41,7 @@ bash deck/render.sh out/需知_方案PPT.pptx out/ppt 80     # 出 PDF + 逐页 
 .venv/bin/python scripts/build_docs.py ../04_需知_工具说明_草稿v1.md out/需知_工具说明.docx "需知 · 工具说明（使用手册与部署指南）" --pdf
 ```
 
-Word 打开时会提示更新域，点「是」，目录页码才会刷新。
+LibreOffice 转 PDF 时不刷新目录，所以 `--pdf` 会先转一次，按 PDF 页脚把各标题所在页写进 Word 目录，再转一次：PDF 和 Word 的目录都带页码。Word 打开时仍会提示更新域，点「是」按 Word 自己的排版刷新。
 
 ## 重录 Demo 视频
 
@@ -76,3 +76,15 @@ S21 是 REST 文档页：在需知目录跑 `python api.py`，再 `.venv/bin/pyt
 ```
 
 只打包 git 跟踪的文件，`.env`、一本账数据库、`history_learned.json` 一律排除（`.env.example` 保留）。
+
+## 打提交包
+
+这一步不用拷出去，直接在 Synology 里的 `_制作工具` 目录下用系统自带的 python3 运行：
+
+```bash
+python3 scripts/pack_submission.py .. ../需知_团队赛_提交包_草稿v1.zip
+```
+
+把上一级的 PPT（pptx + pdf）、Demo 视频、方案报告与工具说明（docx + pdf）和源码包装进一个 zip。包内文件名去掉「_草稿vN」，源码展开成 `05_需知_源码_v0.6/` 文件夹，另附 `00_材料说明.txt`（内容在 `content/提交包说明.txt`）。字幕、旁白稿、md、提交清单和本目录不进包；同一份材料有多个草稿版本时，取版本号最大的。
+
+打包时会列出 PPT / Word / PDF 里还没补的【待团队…】，以及比 pptx / docx 旧的 PDF（改了源文件忘了重新另存）。补完、另存 PDF 后重跑一次即可。

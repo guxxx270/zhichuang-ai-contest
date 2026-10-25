@@ -219,12 +219,12 @@ async function build() {
     new Paragraph({ children: [new TextRun({ text: "演示所用需求、系统与数据均为虚构", font: font(), size: 21, color: MUTE })] }),
     new Paragraph({ children: [new PageBreak()] }),
     new Paragraph({ children: [new TextRun({ text: "目录", font: font(), size: 32, bold: true, color: BRAND })], spacing: { after: 200 } }),
+    // 页码由 build_docs.py 按 PDF 页脚回填；Word 打开时会提示更新域，再按自己的排版刷新
     new TableOfContents("目录", { hyperlink: true, headingStyleRange: "1-3" }),
-    new Paragraph({ children: [new TextRun({ text: "（在 Word 中打开后右键目录 →「更新域」即可刷新页码）", font: font(), size: 18, color: MUTE })] }),
   ];
 
   const doc = new Document({
-    creator: "需知团队", title, description: subtitle,
+    creator: "需知团队", lastModifiedBy: "需知团队", title, description: subtitle.replace(/\*\*|`/g, ""),
     features: { updateFields: true },
     styles: {
       default: { document: { run: { font: font(), size: 21, color: INK }, paragraph: { spacing: { line: 360 } } } },
@@ -235,6 +235,9 @@ async function build() {
           run: { font: font(), size: 27, bold: true, color: "1E40AF" }, paragraph: { spacing: { before: 280, after: 140 }, outlineLevel: 1 } },
         { id: "Heading3", name: "Heading 3", basedOn: "Normal", next: "Normal", quickFormat: true,
           run: { font: font(), size: 23, bold: true, color: ACCENT }, paragraph: { spacing: { before: 200, after: 100 }, outlineLevel: 2 } },
+        // 目录行距比正文紧：60 多条三页排完，不把最后一条单甩到下一页
+        ...[1, 2, 3].map(n => ({ id: `TOC${n}`, name: `toc ${n}`, basedOn: "Normal", next: "Normal", uiPriority: 39, semiHidden: true, unhideWhenUsed: true,
+          paragraph: { spacing: { before: n === 1 ? 60 : 0, after: 0, line: 300 }, indent: { left: (n - 1) * 210 } } })),
       ],
     },
     numbering: { config: [
