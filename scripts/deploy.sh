@@ -4,12 +4,21 @@ set -Eeuo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 [[ ${EUID:-$(id -u)} == 0 ]] || { echo '请用 root 或 sudo 运行本脚本。' >&2; exit 1; }
-for program in docker openssl flock curl; do command -v "$program" >/dev/null || { echo "缺少 $program" >&2; exit 1; }; done
+for program in docker openssl flock curl git tar; do command -v "$program" >/dev/null || { echo "缺少 $program" >&2; exit 1; }; done
 docker compose version >/dev/null
 umask 077
 mkdir -p .deploy/auth .deploy/data
 exec 9>.deploy/update.lock
 flock -n 9 || { echo '已有更新正在执行。' >&2; exit 1; }
+# Docker 24 的 gRPC 元数据不接受中文 COPY 路径。仅从 Git 提取已提交源码到英文构建目录。
+# .env 和运行数据从不参与构建，.dockerignore 再做一层过滤。
+XUZHI_BUILD_CONTEXT="$(mktemp -d "$ROOT/.deploy/build.XXXXXX")"
+export XUZHI_BUILD_CONTEXT
+trap 'rm -rf -- "$XUZHI_BUILD_CONTEXT"' EXIT
+mkdir "$XUZHI_BUILD_CONTEXT/app"
+git archive HEAD -- '06_方案乙_技术版/Demo/需知' | tar -xf - --strip-components=3 -C "$XUZHI_BUILD_CONTEXT/app"
+cp deploy/Dockerfile "$XUZHI_BUILD_CONTEXT/Dockerfile"
+cp .dockerignore "$XUZHI_BUILD_CONTEXT/.dockerignore"
 ENV_FILE="$ROOT/06_方案乙_技术版/Demo/需知/.env"
 [[ -f "$ENV_FILE" ]] || { echo "缺少 $ENV_FILE，请先写入模型配置。" >&2; exit 1; }
 chmod 600 "$ENV_FILE"

@@ -3,8 +3,8 @@ services:
   app:
     image: zhichuang-xuzhi:local
     build:
-      context: .
-      dockerfile: deploy/Dockerfile
+      context: ${XUZHI_BUILD_CONTEXT:-./.deploy/build}
+      dockerfile: Dockerfile
     restart: unless-stopped
     env_file:
       - ./06_方案乙_技术版/Demo/需知/.env

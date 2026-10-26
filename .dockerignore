@@ -1,10 +1,7 @@
 **
-!deploy/
-!deploy/Dockerfile
-!06_*/
-!06_*/Demo/
-!06_*/Demo/*/
-!06_*/Demo/*/**
+!Dockerfile
+!app/
+!app/**
 **/.env*
 **/.venv/**
 **/__pycache__/**
