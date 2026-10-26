@@ -40,7 +40,6 @@ services:
       - "${XUZHI_PORT:-5030}:8080"
     volumes:
       - ./deploy/nginx.conf:/etc/nginx/nginx.conf:ro,z
-      - ./.deploy/auth/htpasswd:/etc/nginx/xuzhi.htpasswd:ro,z
     tmpfs:
       - /tmp:uid=10001,gid=10001,mode=1777
     read_only: true

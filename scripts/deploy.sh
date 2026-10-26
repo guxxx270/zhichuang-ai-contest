@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# 在仓库根目录 git pull 后运行；模型配置、访问口令和业务数据均保留。
+# 在仓库根目录 git pull 后运行；模型配置和业务数据均保留，网页免登录。
 set -Eeuo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 [[ ${EUID:-$(id -u)} == 0 ]] || { echo '请用 root 或 sudo 运行本脚本。' >&2; exit 1; }
-for program in docker openssl flock curl git tar; do command -v "$program" >/dev/null || { echo "缺少 $program" >&2; exit 1; }; done
+for program in docker flock curl git tar; do command -v "$program" >/dev/null || { echo "缺少 $program" >&2; exit 1; }; done
 docker compose version >/dev/null
 umask 077
-mkdir -p .deploy/auth .deploy/data
+mkdir -p .deploy/data
 exec 9>.deploy/update.lock
 flock -n 9 || { echo '已有更新正在执行。' >&2; exit 1; }
 # Docker 24 的 gRPC 元数据不接受中文 COPY 路径。仅从 Git 提取已提交源码到英文构建目录。
@@ -31,16 +31,6 @@ compose() { docker compose --env-file .deploy/compose.env "$@"; }
 compose config --quiet
 chown 10001:10001 .deploy/data
 chmod 700 .deploy/data
-if [[ ! -f .deploy/auth/htpasswd ]]; then
-    ACCESS_PASSWORD="$(openssl rand -hex 12)"
-    ACCESS_HASH="$(printf '%s\n' "$ACCESS_PASSWORD" | openssl passwd -apr1 -stdin)"
-    printf 'xuzhi:%s\n' "$ACCESS_HASH" > .deploy/auth/htpasswd
-    printf 'username=xuzhi\npassword=%s\n' "$ACCESS_PASSWORD" > .deploy/access.txt
-    unset ACCESS_PASSWORD ACCESS_HASH
-fi
-chown root:10001 .deploy/auth/htpasswd
-chmod 640 .deploy/auth/htpasswd
-chmod 600 .deploy/access.txt
 
 # 备份使用 SQLite 在线备份接口，不复制正在写入的数据库文件。
 if [[ -n "$(compose ps --status running -q app)" ]]; then
@@ -87,5 +77,5 @@ for attempt in {1..6}; do
 done
 [[ "$PROXY_READY" == 1 ]] || { echo '网页入口健康检查失败。' >&2; exit 1; }
 compose ps
-printf '\n部署完成，网页端口 %s；访问口令保存在 %s/.deploy/access.txt\n' "$PORT" "$ROOT"
+printf '\n部署完成，网页端口 %s；打开即可使用，无需登录。\n' "$PORT"
 printf '以后更新：cd %q && git pull --ff-only && ./scripts/deploy.sh\n' "$ROOT"
