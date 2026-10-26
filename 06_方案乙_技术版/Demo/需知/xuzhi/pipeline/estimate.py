@@ -13,6 +13,7 @@ from ..drafts import Draft, RepoBundle, draft_context_for_llm, redact_material
 from ..llm import OutputTruncated, gateway_unreachable, load_prompt
 from .intake import Card, Question
 from .estimate_references import build_references
+from .estimate_context import estimate_code_files
 from .tasks import AI_DO, AI_REVIEW, HUMAN, PHASES, Task, delivery_mode, who_split
 
 
@@ -126,15 +127,8 @@ def _finite_number(value: Decimal) -> float:
 
 def _payload(text: str, questions: list[Question], card: Card, repos: list[RepoBundle], drafts: list[Draft]) -> dict:
     # 仅使用调用方提供的材料；不扫描磁盘，不连接业务数据库。
-    context = draft_context_for_llm([], repos, code_limit=28000,
-                                    keywords=card.keywords() | set(card.indicators))
-    files = []
-    for index, repo in enumerate(context["repos"], 1):
-        for file_index, item in enumerate(repo["files"], 1):
-            if item["excerpt"].strip():
-                path = redact_material(item["path"])
-                # 脱敏可能把不同原路径变成同一标签；证据 ID 另带序号，避免字典覆盖。
-                files.append({"id": f"R{index}/F{file_index}/{path}", "path": path, "excerpt": item["excerpt"]})
+    files = estimate_code_files(repos, text, (q.answer for q in questions if q.answer.strip()),
+                                keywords=card.keywords(), indicators=card.indicators, code_limit=28000)
     # HTML 底稿可辅助理解页面，但不能据此声称已核对业务后端代码。
     reference = draft_context_for_llm(drafts, [], html_limit=6000)["html_drafts"] if drafts else []
     return {
@@ -262,8 +256,8 @@ def _call_failed(result: Estimate, exc: Exception) -> Estimate:
         result.error = "当前网关没有为所选模型提供可用渠道，尚未生成工时。请读取可用模型目录，并核对账号分组支持的模型后重试。"
     elif "沙箱策略拒发" in message:
         result.error = "出站内容含明文敏感项，已按沙箱策略拒发，尚未生成工时；请检查材料与答复的脱敏。"
-    elif "网关超时或连不上" in message or gateway_unreachable(exc):
-        result.error = "模型网关超时或连不上，尚未生成工时；稍后再试。"
+    elif "网关超时或连不上" in message or gateway_unreachable(exc) or "timed out" in message.lower() or "timeout" in type(exc).__name__.lower():
+        result.error = "模型网关超时或连不上，尚未生成工时；稍后再试。已读取的代码、规则模板与历史参考仍保留。"
     else:
         result.error = "模型估时调用失败，尚未生成工时。请检查模型连接后重新分析。"
     return result

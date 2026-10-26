@@ -168,6 +168,15 @@ def test_model_exception_has_no_partial_or_fixed_estimate():
     _assert_unestimated(result, "failed")
 
 
+@pytest.mark.parametrize("error", [TimeoutError("synthetic-key-must-not-appear"), RuntimeError("LLM 调用失败：Request timed out. synthetic-key-must-not-appear")])
+def test_timeout_retains_code_scope_without_fabricating_estimate_or_exposing_gateway_details(error):
+    result = _estimate(FakeLLM(error=error), repos=[_repo()])
+    _assert_unestimated(result, "failed")
+    assert "超时" in result.error and "已读取的代码" in result.error
+    assert "synthetic-key" not in result.error
+    assert result.code_files and result.references
+
+
 def test_missing_model_channel_has_an_actionable_safe_error():
     error = RuntimeError("secret-key-must-not-appear")
     error.body = {"error": {"code": "model_not_found", "message": "untrusted gateway details"}}

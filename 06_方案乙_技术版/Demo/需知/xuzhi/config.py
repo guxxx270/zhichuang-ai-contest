@@ -20,9 +20,9 @@ LLM_API_KEY = os.getenv("LLM_API_KEY", "").strip()
 LLM_MODEL = os.getenv("LLM_MODEL", "").strip()
 LLM_MODE = os.getenv("LLM_MODE", "").strip().lower()   # auto / api / mock
 try:
-    LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "").strip() or 90)   # 单次模型调用上限（秒）；连接 10 秒连不上即放弃
+    LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "").strip() or 180)   # 源码分析可能超过 90 秒；连接仍限 10 秒
 except ValueError:
-    LLM_TIMEOUT = 90.0
+    LLM_TIMEOUT = 180.0
 try:
     LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "").strip() or 0)   # 单次输出上限；0 = 不传，按网关默认
 except ValueError:
