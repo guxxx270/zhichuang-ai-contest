@@ -8,11 +8,14 @@ RUN sed -i "s|http://deb.debian.org|${DEBIAN_MIRROR}|g" /etc/apt/sources.list.d/
 COPY app/requirements.txt /tmp/requirements.txt
 ARG PYPI_INDEX=https://pypi.org/simple
 RUN uv pip install --system --no-cache --index-url "$PYPI_INDEX" -r /tmp/requirements.txt
+# 服务器 CPU 早于 x86-64-v2；单独约束这一层可复用已下载的主体依赖。
+# 再带上完整 requirements，让解析器同时校验 pandas 等包与此约束兼容。
+RUN uv pip install --system --no-cache --index-url "$PYPI_INDEX" -r /tmp/requirements.txt "numpy<2.4"
 RUN groupadd -g 10001 xuzhi && useradd -u 10001 -g 10001 -m xuzhi
 WORKDIR /app
 COPY app/ /app/
 RUN chmod -R a+rX /app
 USER 10001:10001
-RUN python -c "import streamlit, xuzhi.pipeline, xuzhi.ledger"
+RUN python -c "import numpy, pandas, pyarrow, streamlit, xuzhi.pipeline, xuzhi.ledger"
 EXPOSE 8501
 CMD ["python", "-m", "streamlit", "run", "app.py", "--server.address=0.0.0.0", "--server.port=8501", "--server.headless=true", "--server.fileWatcherType=none", "--browser.gatherUsageStats=false"]

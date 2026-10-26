@@ -17,6 +17,8 @@ git pull --ff-only
 默认 Debian 源较慢时，可在 `.deploy/compose.env` 加入 `XUZHI_DEBIAN_MIRROR=https://mirrors.tuna.tsinghua.edu.cn`。这只替换构建容器的软件源，保留 Debian 签名校验，不修改宿主机的软件源。
 Python 包下载较慢时，可另加 `XUZHI_PYPI_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple`；默认仍为官方 PyPI。
 
+部署镜像将 NumPy 限制为 `<2.4`，并在构建时导入 NumPy、pandas 和 PyArrow，检查服务器的 CPU 是否兼容。[NumPy 2.4 提高了 x86 CPU 基线](https://numpy.org/doc/2.4/release/2.4.0-notes.html#modulate-dispatched-x86-cpu-features)，当前服务器暴露的 Core 2 指令集不满足新基线。
+
 一本账、追问记忆、审计与历史对账数据持久保存在 `.deploy/data/`。每次更新前对现有 SQLite 做在线备份，放在 `.deploy/data/backups/`；更新不会重置演示数据。构建失败时旧容器继续运行；新容器健康检查失败时脚本尝试恢复上一应用镜像。源码、数据库结构或 Nginx 配置不兼容时，仍需检查日志并人工回退相应提交。
 
 本部署只启动 Web；`.env` 中企微和问码的配置会保留，企微机器人长连接需另行启动，同一机器人不要同时运行两份。
