@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import json
 import re
+from copy import deepcopy
 from pathlib import Path
+import socket
 
 import pytest
 
 from xuzhi.audit import count_plain_sensitive
+from xuzhi import sandbox
 from xuzhi.drafts import (
     CodeFile,
     RepoBundle,
@@ -138,6 +141,15 @@ def test_material_metadata_redacted_in_every_outbound_prompt():
             assert phone not in user and count_plain_sensitive(user) == 0, purpose
 
 
+@pytest.fixture(autouse=True)
+def strict_repository_policy(monkeypatch):
+    """保护规则用显式默认值验证，不依赖操作者当前放开的仓库策略。"""
+    monkeypatch.setitem(sandbox.policy(), "repo_fetch", deepcopy(sandbox.DEFAULTS["repo_fetch"]))
+    monkeypatch.setattr(socket, "getaddrinfo", lambda host, port, *args, **kwargs: [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0)),
+    ])
+
+
 def test_clone_url_whitelist(monkeypatch):
     import socket
 
@@ -167,7 +179,7 @@ def test_clone_url_under_proxy_fake_ip(monkeypatch):
     """本机代理 fake-ip 模式：域名都解析成 198.18.x.x。公网代码托管放行，其余域名照拒，直接写 IP 的也照拒。"""
     import socket
 
-    monkeypatch.setattr(socket, "getaddrinfo", lambda host, port: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("198.18.0.31", 0))])
+    monkeypatch.setattr(socket, "getaddrinfo", lambda host, port, *args, **kwargs: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("198.18.0.31", 0))])
     assert check_clone_url("https://github.com/acme/demo.git") == ""
     assert check_clone_url("https://gitee.com/acme/demo.git") == ""
     assert check_clone_url("https://api.github.com/repos/acme/demo") == ""
@@ -232,6 +244,110 @@ def test_rejected_clone_cannot_reach_archive_fallback(monkeypatch, url):
     monkeypatch.setattr(D, "_http_get_bytes", unexpected)
     with pytest.raises(RuntimeError):
         D.load_from_git(url, token="test-clone-token")
+
+
+@pytest.mark.parametrize("url", [
+    "http://10.1.2.3/team/demo.git",
+    "https://private.gitlab.example/team/demo.git",
+])
+def test_allowed_private_repository_can_load_without_disabling_tls(monkeypatch, url):
+    from xuzhi import drafts as D
+
+    monkeypatch.setitem(sandbox.policy()["repo_fetch"], "deny_private_networks", False)
+    monkeypatch.delenv("XUZHI_GIT_SSL_NO_VERIFY", raising=False)
+    monkeypatch.delenv("GIT_SSL_NO_VERIFY", raising=False)
+
+    def unexpected_host_check(*args):
+        pytest.fail("显式放开仓库网络后，不应继续按私网或 fake-ip 拒绝")
+
+    monkeypatch.setattr(D, "_is_private_host", unexpected_host_check)
+    calls = []
+
+    def clone(args, **kwargs):
+        calls.append(args)
+        assert args[-2] == url
+        assert args[args.index("--branch") + 1] == "master"
+        assert "http.sslVerify=false" not in args
+        assert "GIT_SSL_NO_VERIFY" not in kwargs["env"]
+        assert "protocol.allow=never" in args
+        dest = Path(args[-1])
+        dest.mkdir()
+        (dest / "report.py").write_text("def report(): return 1\n", encoding="utf-8")
+
+    monkeypatch.setattr(D.subprocess, "run", clone)
+    _, repos = D.load_from_git(url, branch="master")
+
+    assert len(calls) == 1
+    assert repos[0].ref == "master"
+    assert [file.path for file in repos[0].files] == ["report.py"]
+    assert "SSL未校验" not in repos[0].note
+
+
+@pytest.mark.parametrize("url", [
+    "file:///tmp/repo.git",
+    "ftp://private.gitlab.example/team/demo.git",
+    "ssh://git@private.gitlab.example/team/demo.git",
+    "git@private.gitlab.example:team/demo.git",
+    "https://user:password@private.gitlab.example/team/demo.git",
+])
+def test_open_private_policy_still_rejects_protocols_and_url_credentials(monkeypatch, url):
+    from xuzhi import drafts as D
+
+    monkeypatch.setitem(sandbox.policy()["repo_fetch"], "deny_private_networks", False)
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("协议或 URL 凭据不合法时，不应执行 Git 或归档请求")
+
+    monkeypatch.setattr(D.subprocess, "run", unexpected)
+    monkeypatch.setattr(D, "_http_get_bytes", unexpected)
+    with pytest.raises(RuntimeError):
+        D.load_from_git(url)
+
+
+def test_private_gitlab_archive_fallback_keeps_default_tls_verification(monkeypatch):
+    import io
+    import subprocess
+    import zipfile
+
+    from xuzhi import drafts as D
+
+    monkeypatch.setitem(sandbox.policy()["repo_fetch"], "deny_private_networks", False)
+    monkeypatch.delenv("XUZHI_GIT_SSL_NO_VERIFY", raising=False)
+    monkeypatch.delenv("GIT_SSL_NO_VERIFY", raising=False)
+    clone_calls = []
+
+    def failed_clone(args, **kwargs):
+        clone_calls.append(args)
+        assert "http.sslVerify=false" not in args
+        assert "GIT_SSL_NO_VERIFY" not in kwargs["env"]
+        raise subprocess.CalledProcessError(1, "git", stderr="certificate verify failed")
+
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr("demo-master/report.py", "def report(): return 1\n")
+    requests = []
+
+    def fake_urlopen(request, **kwargs):
+        requests.append(request.full_url)
+        assert request.full_url.startswith("https://private.gitlab.example/api/v4/projects/")
+        assert request.full_url.endswith("?sha=master")
+        assert "context" not in kwargs, "归档请求应沿用 urllib 默认的 TLS 证书校验"
+        return io.BytesIO(archive.getvalue())
+
+    monkeypatch.setattr(D.subprocess, "run", failed_clone)
+    original_opener = D._checked_opener
+    def fake_opener(ssl_no_verify=False):
+        assert ssl_no_verify is False
+        opener = original_opener(ssl_no_verify)
+        monkeypatch.setattr(opener, "open", fake_urlopen)
+        return opener
+    monkeypatch.setattr(D, "_checked_opener", fake_opener)
+    _, repos = D.load_from_git("https://private.gitlab.example/team/demo.git", token="test-only-token", branch="master")
+
+    assert clone_calls and len(requests) == 1
+    assert repos[0].ref == "master"
+    assert "GitLab API归档" in repos[0].note
+    assert "SSL未校验" not in repos[0].note
 
 
 def test_secret_paths_skipped(tmp_path: Path):

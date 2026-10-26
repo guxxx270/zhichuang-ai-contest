@@ -1225,7 +1225,8 @@ def _render_draft_link_rows() -> None:
         st.session_state.draft_link_rows = list(rows) + [{"id": nid}]
         st.session_state.draft_link_next_id = nid + 1
         st.rerun()
-    st.caption("只拉 http(s) 公网或公司代码托管地址，不拉本机 / 内网；Token 只在本次会话使用。")
+    repo_scope = "不拉本机 / 内网" if sandbox.get("repo_fetch.deny_private_networks", True) else "已允许读取你填写的内网仓库"
+    st.caption(f"只拉 http(s) 仓库；{repo_scope}；Token 只在本次会话使用。")
 
 ledger = get_ledger()
 memory = get_memory()
@@ -1423,12 +1424,20 @@ if go:
             run_mode = "mock"
         llm = build_llm(run_mode, run_model, run_base, run_key, backend=backend_sel, extra=extra)
         do_polish = llm.mode == "api"
-        drafts, repos, draft_errs = _collect_drafts(
-            draft_uploads,
-            _read_draft_link_entries() if mat_mode == "Git 仓库" else [],
-            use_sample_draft,
-            ssl_no_verify=bool(git_ssl_no_verify),
-        )
+        git_entries = _read_draft_link_entries() if mat_mode == "Git 仓库" else []
+        # 用户显式开工时重读策略，应用已授权配置且不丢失当前会话凭据。
+        sandbox.reload()
+        with st.spinner("正在读取代码仓库与参考材料……"):
+            drafts, repos, draft_errs = _collect_drafts(
+                draft_uploads,
+                git_entries,
+                use_sample_draft,
+                ssl_no_verify=bool(git_ssl_no_verify),
+            )
+        git_materials_failed = bool(git_entries) and not repos
+        # 每次加载替换整份结果；rerun 后仍能看到失败，重试成功后不残留旧错误。
+        st.session_state.materials_errors = list(draft_errs)
+        st.session_state.materials_git_failed = git_materials_failed
         for e in draft_errs:
             if e.startswith("未读到："):
                 st.error(e)
@@ -1466,11 +1475,12 @@ if go:
             app_versions.apply_change(ledger, change_of, a)
         else:
             st.session_state.req_id = ledger.log_analysis(a)
+            ledger.event(st.session_state.req_id, "Web受理", a.card.source or "")
         st.session_state.last_llm = {
             "mode": llm.mode, "model": llm.model, "api_base": run_base, "backend": backend_sel,
             "provider_id": provider_id,
         }
-        if do_polish:
+        if do_polish and not git_materials_failed:
             _begin_model_job(a, llm, kind="analysis")
         st.session_state.scroll_to_results = True
         st.rerun()
@@ -1511,10 +1521,19 @@ _mat = st.session_state.get("materials_report") or materials_report(
     getattr(a, "drafts", None) or st.session_state.get("drafts"),
     getattr(a, "repos", None) or st.session_state.get("repos"),
 )
-if _mat and (st.session_state.get("drafts") or st.session_state.get("repos")):   # 没传底稿 / 仓库就不占一行
-    with st.expander("📦 本次已读材料（Git / HTML）", expanded=bool(st.session_state.get("repos") or getattr(a, "repos", None))):
+_mat_errors = st.session_state.get("materials_errors") or []
+_git_materials_failed = st.session_state.get("materials_git_failed", False)
+if _git_materials_failed:
+    st.warning("本次 Git 仓库未读取成功，已保留快速初稿，未自动启动模型分析。请修复上方仓库材料后，再点「需知，开工」。")
+if _mat_errors or _git_materials_failed or st.session_state.get("drafts") or st.session_state.get("repos"):
+    with st.expander("📦 本次已读材料（Git / HTML）", expanded=bool(_mat_errors or _git_materials_failed or st.session_state.get("repos") or getattr(a, "repos", None))):
         for line in _mat:
             st.markdown(line)
+        for error in _mat_errors:
+            if error.startswith("未读到："):
+                st.error(error)
+            else:
+                st.warning(error)
 # 纪要直通车：一段话里有几条需求时提示拆开；单条需求不显示
 render_minutes_split(a, ledger=ledger, memory=memory, source="" if src == "自动识别" else src,
                      busy=_model_running(), on_switch=_cancel_model_job)
@@ -2057,7 +2076,7 @@ with tabs[6]:
     st.markdown("**三道线**：① 需求原话先脱敏再进模型；② 不接生产数据库；代码仓库仅在你主动粘贴链接时浅读摘要，不扫内网；③ 每次分析、答复、决策、模型调用留痕，可导出审计。")
 
     st.markdown("#### 沙箱策略（一页看完：数据去哪了、谁能用、能碰什么）")
-    st.caption("所有访问边界写在 `sandbox.yaml` 一个文件里，程序启动时加载；下表每条规则都标了在代码里的执行位置，评审可对照。改文件即改行为。")
+    st.caption("所有访问边界写在 `sandbox.yaml` 一个文件里，启动和点击开工时加载；下表每条规则都标了在代码里的执行位置，评审可对照。")
     if sandbox.note():
         st.warning(sandbox.note())
     _sum = sandbox.summary()

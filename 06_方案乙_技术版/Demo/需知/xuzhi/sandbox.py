@@ -161,7 +161,9 @@ def summary() -> dict[str, str]:
     p = policy()
     return {
         "模型": "先脱敏再进模型；Key 只留会话；每次调用留审计" if p["llm"]["audit_every_call"] else "先脱敏再进模型",
-        "仓库": "只拉 http(s) 公网 / 公司托管仓，拒内网；Token 走环境变量",
+        "仓库": ("只拉 http(s) 公网 / 公司托管仓，拒内网；Token 走环境变量"
+                 if p["repo_fetch"]["deny_private_networks"]
+                 else "允许指定的 http(s) 内网仓库；不扫描其他地址；Token 走环境变量"),
         "文件": f"凭据类文件不读（{len(p['files']['deny_read_globs'])} 类）",
         "企微": f"{p['wecom']['auth_mode']} 白名单；问码只读 {'/'.join(p['askcode']['allowed_tools'])}",
         "接口": f"默认只听 {p['api']['bind']}；对外须配 Token",

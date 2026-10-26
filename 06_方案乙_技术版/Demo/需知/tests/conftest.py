@@ -2,7 +2,12 @@
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
+from pathlib import Path
+
+# README 写的是直接 `pytest -q tests`：这种跑法不会把 Demo 根目录放进 sys.path，导入 xuzhi 前先补上。
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 os.environ["LLM_MODE"] = "mock"
 # 测试期间一本账 / 记忆 / 审计写到临时库，绝不碰 data/ledger.sqlite3

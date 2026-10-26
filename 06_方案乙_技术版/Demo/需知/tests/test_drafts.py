@@ -780,6 +780,8 @@ def test_symlinked_source_files_are_not_read(tmp_path: Path):
 
 
 def test_clone_url_rejects_non_public_and_numeric_host_tricks(monkeypatch):
+    from xuzhi import sandbox
+    monkeypatch.setitem(sandbox.policy()["repo_fetch"], "deny_private_networks", True)
     """100.64/10 不是公网；0177.0.0.1、2130706433、0x7f000001 在 git 眼里都是 127.0.0.1。"""
     import socket
 
@@ -794,6 +796,8 @@ def test_clone_url_rejects_non_public_and_numeric_host_tricks(monkeypatch):
 
 
 def test_redirects_are_rechecked_and_tokens_stay_on_the_original_host(monkeypatch):
+    from xuzhi import sandbox
+    monkeypatch.setitem(sandbox.policy()["repo_fetch"], "deny_private_networks", True)
     import socket
     import urllib.request
 

@@ -44,6 +44,26 @@ def gateway_unreachable(e: BaseException | None) -> bool:
     return _gateway_down(e) or _gateway_down(getattr(e, "__cause__", None))
 
 
+def _bypass_proxy_mounts(api_base: str) -> dict | None:
+    """网关按系统规则应直连时，返回让 httpx 对该主机不走代理的 mounts。
+
+    httpx 会读 macOS / Windows 的系统代理，却不认系统代理的例外清单（127.0.0.1、内网段、*.公司域名）；
+    urllib（拉模型目录用的）认。不处理时目录能拉到，真正调用却被送进本机代理，内网网关报 502 或超时。
+    这里用 urllib 同一套判断（环境变量 NO_PROXY 优先，其次系统例外清单），只放行这一个主机。"""
+    from urllib.request import getproxies, proxy_bypass
+
+    parsed = urlparse(api_base or "")
+    host = parsed.hostname or ""
+    scheme = (parsed.scheme or "").lower()
+    try:
+        if not host or not getproxies().get(scheme) or not proxy_bypass(host):
+            return None
+    except Exception:   # noqa: BLE001  判断失败就保持默认行为
+        return None
+    pattern_host = f"[{host}]" if ":" in host else host
+    return {f"all://{pattern_host}": None}
+
+
 def list_openai_models(api_base: str, api_key: str) -> tuple[list[tuple[str, str]], str]:
     """实时拉取 OpenAI 兼容网关 GET /models（硅基流动等），不用本地写死列表。"""
     from .qoder_cloud import parse_model_catalog
@@ -139,9 +159,14 @@ class LLM:
         if self.mode == "api":
             try:
                 from openai import OpenAI, Timeout  # 延迟导入，mock 模式不需要
+                options: dict[str, Any] = {}
+                mounts = _bypass_proxy_mounts(self.api_base)
+                if mounts:
+                    from openai import DefaultHttpxClient
+                    options["http_client"] = DefaultHttpxClient(mounts=mounts)
                 # 不自动重试：超时再重试只会让页面多卡一轮；失败的这一步直接用规则结果
                 self._client = OpenAI(base_url=self.api_base, api_key=self.api_key,
-                                      timeout=Timeout(config.LLM_TIMEOUT, connect=10.0), max_retries=0)
+                                      timeout=Timeout(config.LLM_TIMEOUT, connect=10.0), max_retries=0, **options)
             except ImportError:
                 self.mode, self.note = "mock", "未安装 openai，已退回 mock（pip install openai 后恢复）"
 

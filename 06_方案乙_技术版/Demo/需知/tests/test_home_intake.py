@@ -157,3 +157,12 @@ def test_dictation_uses_current_box_and_preserves_the_result_across_samples(
 
     assert _widget(home.text_area, "原话").value == expected, "切换样例不能恢复口述前的旧草稿"
     assert Ledger().stats()["count"] == count_before, "口述和切换样例都不能自动开工"
+
+
+def test_web_start_logs_intake_event(home):
+    _widget(home.text_area, "原话").input("运营希望净值日报增加累计收益率。")
+    _widget(home.button, "需知，开工").click()
+    _run(home)
+
+    req_id = home.session_state["req_id"]
+    assert [event["action"] for event in Ledger().events_of(req_id)][:1] == ["Web受理"]

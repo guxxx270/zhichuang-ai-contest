@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import threading
+from copy import deepcopy
+import socket
 
 import pytest
 
@@ -9,6 +11,15 @@ from xuzhi import sandbox
 from xuzhi.audit import Audit, RecordingSink, count_plain_sensitive, count_redaction_tags, host_of, track
 from xuzhi.drafts import check_clone_url, is_secret_path
 from xuzhi.llm import LLM
+
+
+@pytest.fixture(autouse=True)
+def strict_repository_policy(monkeypatch):
+    """规则测试固定严格默认策略，避免用户主动放行的 YAML 改变测试前提。"""
+    monkeypatch.setitem(sandbox.policy(), "repo_fetch", deepcopy(sandbox.DEFAULTS["repo_fetch"]))
+    monkeypatch.setattr(socket, "getaddrinfo", lambda host, port: [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0)),
+    ])
 
 
 class _FakeClient:
@@ -268,3 +279,33 @@ def test_policy_override_changes_behaviour(monkeypatch):
     monkeypatch.setattr(socket, "getaddrinfo", lambda host, port: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("198.18.0.31", 0))])
     monkeypatch.setitem(sandbox.policy()["repo_fetch"], "fake_ip_trusted_hosts", [])
     assert "fake-ip" in check_clone_url("https://github.com/acme/demo.git")
+
+
+def test_private_policy_override_preserves_other_boundaries(monkeypatch):
+    monkeypatch.setitem(sandbox.policy()["repo_fetch"], "deny_private_networks", False)
+    assert check_clone_url("http://10.1.2.3/team/repo.git") == ""
+    assert check_clone_url("https://private.example.com/team/repo.git") == ""
+    assert "用户名" in check_clone_url("https://user:password@private.example.com/team/repo.git")
+    assert is_secret_path("config/credentials.json")
+    assert is_secret_path(".env")
+
+    monkeypatch.setitem(sandbox.policy()["repo_fetch"], "allowed_schemes", ["https"])
+    assert "只支持" in check_clone_url("http://10.1.2.3/team/repo.git")
+    assert check_clone_url("https://10.1.2.3/team/repo.git") == ""
+
+
+def test_repo_policy_reload_applies_private_network_override(monkeypatch, tmp_path):
+    policy_path = tmp_path / "sandbox.yaml"
+    monkeypatch.setattr(sandbox, "POLICY_PATH", policy_path)
+    try:
+        policy_path.write_text("repo_fetch:\n  deny_private_networks: true\n", encoding="utf-8")
+        sandbox.reload()
+        assert "内网" in check_clone_url("https://10.1.2.3/team/repo.git")
+
+        policy_path.write_text("repo_fetch:\n  deny_private_networks: false\n", encoding="utf-8")
+        sandbox.reload()
+        assert check_clone_url("https://10.1.2.3/team/repo.git") == ""
+        assert "只支持" in check_clone_url("ssh://git@10.1.2.3/team/repo.git")
+        assert is_secret_path("config/credentials.json")
+    finally:
+        sandbox.policy.cache_clear()
