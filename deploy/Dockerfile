@@ -1,7 +1,9 @@
 FROM ghcr.io/astral-sh/uv:0.11.6-python3.12-trixie-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 UV_HTTP_TIMEOUT=120 UV_HTTP_RETRIES=3
-RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
+ARG DEBIAN_MIRROR=http://deb.debian.org
+RUN sed -i "s|http://deb.debian.org|${DEBIAN_MIRROR}|g" /etc/apt/sources.list.d/debian.sources \
+    && apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY app/requirements.txt /tmp/requirements.txt
 RUN uv pip install --system --no-cache -r /tmp/requirements.txt

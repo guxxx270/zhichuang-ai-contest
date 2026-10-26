@@ -5,6 +5,8 @@ services:
     build:
       context: ${XUZHI_BUILD_CONTEXT:-./.deploy/build}
       dockerfile: Dockerfile
+      args:
+        DEBIAN_MIRROR: ${XUZHI_DEBIAN_MIRROR:-http://deb.debian.org}
     restart: unless-stopped
     env_file:
       - ./06_方案乙_技术版/Demo/需知/.env
