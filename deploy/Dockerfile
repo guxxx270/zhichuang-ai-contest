@@ -6,7 +6,8 @@ RUN sed -i "s|http://deb.debian.org|${DEBIAN_MIRROR}|g" /etc/apt/sources.list.d/
     && apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY app/requirements.txt /tmp/requirements.txt
-RUN uv pip install --system --no-cache -r /tmp/requirements.txt
+ARG PYPI_INDEX=https://pypi.org/simple
+RUN uv pip install --system --no-cache --index-url "$PYPI_INDEX" -r /tmp/requirements.txt
 RUN groupadd -g 10001 xuzhi && useradd -u 10001 -g 10001 -m xuzhi
 WORKDIR /app
 COPY app/ /app/

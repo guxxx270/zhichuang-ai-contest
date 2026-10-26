@@ -7,6 +7,7 @@ services:
       dockerfile: Dockerfile
       args:
         DEBIAN_MIRROR: ${XUZHI_DEBIAN_MIRROR:-http://deb.debian.org}
+        PYPI_INDEX: ${XUZHI_PYPI_INDEX:-https://pypi.org/simple}
     restart: unless-stopped
     env_file:
       - ./06_方案乙_技术版/Demo/需知/.env
