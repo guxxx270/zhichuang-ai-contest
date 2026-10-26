@@ -76,7 +76,16 @@ if ! compose up -d --no-build --wait --wait-timeout 180 </dev/null; then
 fi
 PORT="$(sed -n 's/^XUZHI_PORT=//p' .deploy/compose.env | tail -1)"
 PORT="${PORT:-5030}"
-curl --noproxy '*' --fail --silent --show-error --retry 5 --retry-connrefused --retry-delay 1 "http://127.0.0.1:$PORT/healthz" >/dev/null
+# CentOS 7 的 curl 不支持 --retry-connrefused，用 shell 重试兼容旧版本。
+PROXY_READY=0
+for attempt in {1..6}; do
+    if curl --noproxy '*' --fail --silent --show-error --connect-timeout 3 --max-time 5 "http://127.0.0.1:$PORT/healthz" >/dev/null; then
+        PROXY_READY=1
+        break
+    fi
+    sleep 1
+done
+[[ "$PROXY_READY" == 1 ]] || { echo '网页入口健康检查失败。' >&2; exit 1; }
 compose ps
 printf '\n部署完成，网页端口 %s；访问口令保存在 %s/.deploy/access.txt\n' "$PORT" "$ROOT"
 printf '以后更新：cd %q && git pull --ff-only && ./scripts/deploy.sh\n' "$ROOT"
