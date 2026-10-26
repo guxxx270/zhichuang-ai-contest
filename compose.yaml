@@ -1,0 +1,55 @@
+name: zhichuang-xuzhi
+services:
+  app:
+    image: zhichuang-xuzhi:local
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ./06_方案乙_技术版/Demo/需知/.env
+    environment:
+      XUZHI_LEDGER_DB: /var/lib/xuzhi/ledger.sqlite3
+      XUZHI_HISTORY_LEARNED: /var/lib/xuzhi/history_learned.json
+    volumes:
+      - ./.deploy/data:/var/lib/xuzhi:Z
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8501/_stcore/health', timeout=5).read()"]
+      interval: 10s
+      timeout: 6s
+      retries: 12
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+  web:
+    image: ${XUZHI_NGINX_IMAGE:-nginx:1.28-alpine}
+    restart: unless-stopped
+    user: "10001:10001"
+    entrypoint: ["nginx", "-g", "daemon off;"]
+    ports:
+      - "${XUZHI_PORT:-5030}:8080"
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/nginx.conf:ro,Z
+      - ./.deploy/auth/htpasswd:/etc/nginx/xuzhi.htpasswd:ro,Z
+    tmpfs:
+      - /tmp:uid=10001,gid=10001,mode=1777
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    depends_on:
+      app:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

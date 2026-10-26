@@ -6,6 +6,8 @@
 
 ## 怎么用这个仓库（一句话版）
 
+- 需知服务器部署与更新：[部署说明](deploy/README.md)，服务器 `git pull --ff-only` 后运行 `./scripts/deploy.sh`。
+
 - 文件夹在 Mac 上 `~/SynologyDrive/智创未来AI大赛/`，同时是 git 仓库。
 - **Claude 负责 commit**：每完成一步（选题、方案、PPT、代码、Demo）就提交一次，里程碑打 tag，`00_索引.md` 第四节同步记决策。
 - **Jerry 负责 push**：想同步到 GitHub 时双击 `推送到GitHub.command`（或让 Claude 双击）。第一次可能要在终端里登录一次 GitHub。
